@@ -82,8 +82,21 @@ private struct PrimaryNavigation<Content: View>: View {
                 .toolbarBackground(.visible, for: .navigationBar)
                 .toolbar {
                     ToolbarItemGroup(placement: .topBarTrailing) {
-                        Button { model.showSearch = true } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("全局搜索证券")
-                        NavigationLink(value: GPRoute.settings) { Image(systemName: "slider.horizontal.3") }.accessibilityLabel("设置").accessibilityIdentifier("settings.open")
+                        Button { model.showSearch = true } label: {
+                            Image(systemName: "magnifyingglass").frame(width: 44, height: 44).contentShape(Rectangle())
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("全局搜索证券")
+                        .accessibilityIdentifier("search.open")
+                        .accessibilityAddTraits(.isButton)
+                        NavigationLink(value: GPRoute.settings) {
+                            Label("设置", systemImage: "slider.horizontal.3").labelStyle(.iconOnly)
+                                .frame(width: 44, height: 44).contentShape(Rectangle())
+                        }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("设置")
+                        .accessibilityIdentifier("settings.open")
+                        .accessibilityAddTraits(.isButton)
                     }
                 }
                 .navigationDestination(for: GPRoute.self) { route in RouteDestination(route: route) }
