@@ -16,6 +16,14 @@ targets:
     info:
       path: Info.plist
       properties:
+        CFBundleDisplayName: 观盘 Pro
+        UILaunchScreen: {}
+        # ATS 的 NSAllowsLocalNetworking 是嵌套字典，无法用 INFOPLIST_KEY_* 注入
+        # （Xcode 只支持扁平的 INFOPLIST_KEY_ 项），只能写进 plist 本体，
+        # 否则连 NAS 的 http 地址会被 ATS 直接拒掉。
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: 手动连接你配置的 NAS 服务，读取行情和同步你确认的账本。
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
@@ -30,11 +38,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.guanpan.next.ios
         PRODUCT_NAME: GuanpanNext
         TARGETED_DEVICE_FAMILY: '1,2'
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: 观盘 Pro
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: 手动连接你配置的NAS服务，读取行情和同步你确认的账本。
-        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+        GENERATE_INFOPLIST_FILE: NO
         CODE_SIGNING_ALLOWED: NO
   GuanpanNextUITests:
     type: bundle.ui-testing

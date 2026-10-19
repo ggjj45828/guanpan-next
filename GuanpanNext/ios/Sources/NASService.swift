@@ -40,7 +40,7 @@ enum NextNASService {
     }
 
     static func readStatus(baseURL: String, token: String, session: URLSession = .shared) async throws -> NextNASStatus {
-        let url = endpoint(baseURL)
+        let url = try endpoint(baseURL)
         var request = URLRequest(url: url, timeoutInterval: 10)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await session.data(for: request)
@@ -52,7 +52,7 @@ enum NextNASService {
     }
 
     static func pushBook(_ book: NextBook, expectedRevision: Int, baseURL: String, token: String, session: URLSession = .shared) async throws -> Int {
-        let url = endpoint(baseURL)
+        let url = try endpoint(baseURL)
         let bookData = try JSONEncoder().encode(book)
         let bookJSON = String(decoding: bookData, as: UTF8.self)
         let body = try JSONSerialization.data(withJSONObject: ["mode": "manual-confirmed", "expectedRevision": expectedRevision, "bookJSON": bookJSON])

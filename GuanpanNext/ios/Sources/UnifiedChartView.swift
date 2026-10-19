@@ -117,6 +117,12 @@ struct UnifiedChartView: View {
         .onChange(of: visibleLayers) { _, _ in saveChartState() }
     }
 
+    /// Decimal 不能直接丢给 CGFloat(...)：CGFloat 只有 BinaryInteger / BinaryFloatingPoint
+    /// 两种泛型入口，Decimal 两个都不满足。统一从 NSDecimalNumber 转 Double 再转 CGFloat。
+    private func cg(_ value: Decimal) -> CGFloat {
+        CGFloat(NSDecimalNumber(decimal: value).doubleValue)
+    }
+
     private func draw(context: inout GraphicsContext, size: CGSize) {
         guard let dataset = activeDataset, let domain = visiblePriceDomain, let time = visibleTimeDomain, samples.count > 0 else { return }
         let left: CGFloat = 43, right: CGFloat = dataset.iopvSource == nil ? 12 : 44, top: CGFloat = 9
@@ -137,7 +143,7 @@ struct UnifiedChartView: View {
             }
         }
         func x(_ date: Date) -> CGFloat { plot.minX + plot.width * CGFloat(date.timeIntervalSince(time.lowerBound) / max(0.001, time.upperBound.timeIntervalSince(time.lowerBound))) }
-        func priceY(_ value: Decimal) -> CGFloat { plot.maxY - plot.height * CGFloat((value - domain.lowerBound) / max(Decimal(string: "0.0000001")!, domain.upperBound - domain.lowerBound)) }
+        func priceY(_ value: Decimal) -> CGFloat { plot.maxY - plot.height * cg((value - domain.lowerBound) / max(Decimal(string: "0.0000001")!, domain.upperBound - domain.lowerBound)) }
         var pricePath = Path()
         for (i, point) in samples.enumerated() {
             let pos = CGPoint(x: x(point.timestamp), y: priceY(point.close))
@@ -149,7 +155,7 @@ struct UnifiedChartView: View {
             for point in samples {
                 guard let iopv = point.iopv, iopv > 0 else { started = false; continue }
                 let premium = (point.close / iopv - 1) * 100
-                let y = plot.maxY - plot.height * CGFloat((premium - premiumDomain.lowerBound) / max(Decimal(string: "0.0000001")!, premiumDomain.upperBound - premiumDomain.lowerBound))
+                let y = plot.maxY - plot.height * cg((premium - premiumDomain.lowerBound) / max(Decimal(string: "0.0000001")!, premiumDomain.upperBound - premiumDomain.lowerBound))
                 let pos = CGPoint(x: x(point.timestamp), y: y)
                 if !started { iopvPath.move(to: pos); started = true } else { iopvPath.addLine(to: pos) }
             }
@@ -180,7 +186,7 @@ struct UnifiedChartView: View {
             let barWidth = max(1, plot.width / CGFloat(samples.count) * 0.55)
             for point in samples {
                 guard let volume = point.volume else { continue }
-                let h = volumeHeight * CGFloat(volume / maxVolume)
+                let h = volumeHeight * cg(volume / maxVolume)
                 let rect = CGRect(x: x(point.timestamp) - barWidth / 2, y: size.height - bottom - h, width: barWidth, height: h)
                 context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(p.forest.opacity(0.32)))
             }
