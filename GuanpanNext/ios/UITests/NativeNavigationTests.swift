@@ -8,6 +8,20 @@ final class NativeNavigationTests: XCTestCase {
         add(attachment)
     }
 
+    /// SwiftUI 工具栏里的 NavigationLink / Button 在无障碍树里不一定登记成 button
+    /// （实测按 buttons 查 "settings.open" 是 No matches found，但元素确实在屏上），
+    /// 所以按 identifier 跨类型查。
+    private func byId(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// 只有 accessibilityLabel 没有 identifier 的元素，按 label 跨类型查。
+    private func byLabel(_ app: XCUIApplication, _ label: String) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", label))
+            .firstMatch
+    }
+
     func testFivePrimaryScreensAndSettingsRenderOnDevice() throws {
         let app = XCUIApplication()
         app.launchArguments += ["-ui-testing", "1"]
@@ -22,7 +36,7 @@ final class NativeNavigationTests: XCTestCase {
         }
         // 首帧刚出时按钮还没进无障碍树，直接 tap 会 "Failed to tap ... Button"。
         // 所有首次点击都必须先等元素出现。
-        let settingsButton = app.buttons["settings.open"]
+        let settingsButton = byId(app, "settings.open")
         XCTAssertTrue(settingsButton.waitForExistence(timeout: 10))
         settingsButton.tap()
         XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
@@ -81,7 +95,7 @@ final class NativeNavigationTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-ui-testing", "1"]
         app.launch()
-        let searchButton = app.buttons["全局搜索证券"]
+        let searchButton = byLabel(app, "全局搜索证券")
         XCTAssertTrue(searchButton.waitForExistence(timeout: 10))
         searchButton.tap()
         XCTAssertTrue(app.navigationBars["全局搜索"].waitForExistence(timeout: 5))
@@ -96,7 +110,7 @@ final class NativeNavigationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "159941")).firstMatch.exists)
         attach(app, "global-search-security-to-ai")
 
-        let searchAgain = app.buttons["全局搜索证券"]
+        let searchAgain = byLabel(app, "全局搜索证券")
         XCTAssertTrue(searchAgain.waitForExistence(timeout: 10))
         searchAgain.tap()
         let strategySearch = app.textFields["输入代码或名称"]
@@ -115,7 +129,7 @@ final class NativeNavigationTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-ui-testing", "1"]
         app.launch()
-        let settingsEntry = app.buttons["settings.open"]
+        let settingsEntry = byId(app, "settings.open")
         XCTAssertTrue(settingsEntry.waitForExistence(timeout: 10))
         settingsEntry.tap()
         XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
