@@ -20,7 +20,11 @@ final class NativeNavigationTests: XCTestCase {
             tab.tap()
             attach(app, "primary-\(title)")
         }
-        app.buttons["settings.open"].tap()
+        // 首帧刚出时按钮还没进无障碍树，直接 tap 会 "Failed to tap ... Button"。
+        // 所有首次点击都必须先等元素出现。
+        let settingsButton = app.buttons["settings.open"]
+        XCTAssertTrue(settingsButton.waitForExistence(timeout: 10))
+        settingsButton.tap()
         XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
         attach(app, "settings")
     }
@@ -77,7 +81,9 @@ final class NativeNavigationTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-ui-testing", "1"]
         app.launch()
-        app.buttons["全局搜索证券"].tap()
+        let searchButton = app.buttons["全局搜索证券"]
+        XCTAssertTrue(searchButton.waitForExistence(timeout: 10))
+        searchButton.tap()
         XCTAssertTrue(app.navigationBars["全局搜索"].waitForExistence(timeout: 5))
         let field = app.textFields["输入代码或名称"]
         XCTAssertTrue(field.waitForExistence(timeout: 3))
@@ -90,7 +96,9 @@ final class NativeNavigationTests: XCTestCase {
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "159941")).firstMatch.exists)
         attach(app, "global-search-security-to-ai")
 
-        app.buttons["全局搜索证券"].tap()
+        let searchAgain = app.buttons["全局搜索证券"]
+        XCTAssertTrue(searchAgain.waitForExistence(timeout: 10))
+        searchAgain.tap()
         let strategySearch = app.textFields["输入代码或名称"]
         XCTAssertTrue(strategySearch.waitForExistence(timeout: 3))
         if app.buttons["search.clear"].exists { app.buttons["search.clear"].tap() }
@@ -107,7 +115,9 @@ final class NativeNavigationTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-ui-testing", "1"]
         app.launch()
-        app.buttons["settings.open"].tap()
+        let settingsEntry = app.buttons["settings.open"]
+        XCTAssertTrue(settingsEntry.waitForExistence(timeout: 10))
+        settingsEntry.tap()
         XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
         let theme = app.segmentedControls["settings.theme"]
         XCTAssertTrue(theme.waitForExistence(timeout: 5))
