@@ -1,13 +1,25 @@
+version: "3.8"
+name: guanpan-next
+
 services:
   guanpan-next:
     build: ./server
     ports:
-      - "127.0.0.1:8790:8790"
+      - "8786:8786"
     environment:
-      GUANPAN_NEXT_TOKEN: ${GUANPAN_NEXT_TOKEN:?请配置至少24字符的新服务口令}
       GUANPAN_NEXT_DATA: /data
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      GUANPAN_AI_PROFILE: ${GUANPAN_AI_PROFILE:-flash}
+      GUANPAN_AI_BASE_URL: ${GUANPAN_AI_BASE_URL:-}
+      GUANPAN_AI_MODEL: ${GUANPAN_AI_MODEL:-}
     volumes:
       - guanpan_next_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8786/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 volumes:
   guanpan_next_data:

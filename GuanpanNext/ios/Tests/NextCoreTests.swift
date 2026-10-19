@@ -144,6 +144,11 @@ final class NextCoreTests: XCTestCase {
         XCTAssertFalse(center.append(duplicate, now: date.addingTimeInterval(60)))
         XCTAssertEqual(center.alerts.count, 1)
     }
+    func testPriceAlertRuleRequiresAValidInstrumentAndPositivePrice() throws {
+        let valid = NextPriceAlertRule(code: "159941", name: "纳指ETF", price: 1.2, direction: .atOrBelow)
+        XCTAssertNoThrow(try valid.validate())
+        XCTAssertThrowsError(try NextPriceAlertRule(code: "bad", name: "", price: 0, direction: .atOrAbove).validate())
+    }
     func testNavigationRestoresSecurityFiltersChartAndCrosshair() throws {
         var nav = NextNavigationState(); nav.listFilters["market"] = "ETF"; nav.scrollAnchors["watchlist"] = "159941"
         nav.openInstrument("159941"); nav.openIntent("buy-opportunity", code: "159941")
@@ -213,6 +218,14 @@ final class NextCoreTests: XCTestCase {
         let legacy = try JSONDecoder().decode(NextAppArchive.self, from: Data("{}".utf8))
         XCTAssertTrue(legacy.decisionHistory.isEmpty)
     }
+    func testDailyChartCacheKeySurvivesBackupValidation() throws {
+        let sample = NextChartSample(timestamp: now, open: 1.0, high: 1.1, low: 0.9, close: 1.05, iopv: nil, volume: 100)
+        let daily = NextChartDataset(code: "159941", interval: .day, samples: [sample], costPerUnit: nil, costObservedAt: nil, priceSource: "NAS", iopvSource: nil, observedAt: now)
+        var archive = NextAppArchive(); archive.chartData["159941:day"] = daily
+        XCTAssertEqual(try NextArchiveEnvelope(archive: archive).archive().chartData["159941:day"], daily)
+        archive.chartData = ["bad:day": daily]
+        XCTAssertThrowsError(try NextArchiveEnvelope(archive: archive))
+    }
     func testLastTradeQuoteCannotSimulateOrderExecution() throws {
         var sim = NextExperiment()
         try sim.place(code: "159941", limit: 1.5, units: 100, rules: etfRules(), at: now, until: now.addingTimeInterval(3600))
@@ -256,6 +269,18 @@ final class NextCoreTests: XCTestCase {
         XCTAssertNil(dataset.samples[0].iopv)
         XCTAssertNil(dataset.iopvSource)
         try dataset.validate()
+    }
+    func testLiveETFIOPVOnlyEnrichesNearestCurrentMinutePoint() throws {
+        let first = NextChartSample(timestamp: now, open: nil, high: nil, low: nil, close: 1.2, iopv: nil, volume: 100)
+        let last = NextChartSample(timestamp: now.addingTimeInterval(60), open: nil, high: nil, low: nil, close: 1.21, iopv: nil, volume: 100)
+        let raw = NextChartDataset(code: "159941", interval: .intraday, samples: [first, last], costPerUnit: nil, costObservedAt: nil, priceSource: "minute", iopvSource: nil, observedAt: now)
+        let etf = NextQuote(code: "159941", name: "纳指ETF", price: 1.21, previousClose: 1.2, time: now.addingTimeInterval(90), source: "quote", iopv: 1.205, providerInstrumentType: "ETF")
+        let enriched = raw.attachingVerifiedIOPV(etf)
+        XCTAssertNil(enriched.samples[0].iopv)
+        XCTAssertEqual(enriched.samples[1].iopv, 1.205)
+        XCTAssertNotNil(enriched.iopvSource)
+        let far = NextQuote(code: "159941", name: "纳指ETF", price: 1.21, previousClose: 1.2, time: now.addingTimeInterval(500), source: "quote", iopv: 1.205, providerInstrumentType: "ETF")
+        XCTAssertEqual(raw.attachingVerifiedIOPV(far), raw)
     }
 }
 

@@ -105,32 +105,112 @@ class MarketAdapterTests(unittest.TestCase):
         self.assertEqual(parse_quotes(body, ["159941"], datetime(2026, 10, 19, 6, 28, tzinfo=timezone.utc)), [])
 
 
+class DailyParserTests(unittest.TestCase):
+    def test_source_ohlcv_validation_and_date_dedup(self):
+        from market import parse_daily_bars
+        payload = {"data": {"sz159941": {"qfqday": [
+            ["2026-10-16", "1.20", "1.30", "1.40", "1.10", "123"],
+            ["2026-10-16", "1.21", "1.31", "1.41", "1.11", "124"],
+            ["2026-10-17", "1.30", "1.20", "1.10", "1.00", "100"]]}}}
+        rows = parse_daily_bars(json.dumps(payload), "159941")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["close"], "1.31")
+
+
+class IndependentWorkersTests(unittest.TestCase):
+    def test_minute_archive_deduplicates_and_never_prunes(self):
+        from workers import parse_minute
+        # Use a completed business day to avoid dependence on test clock.
+        payload = {"data": {"sz159941": {"data": {"date": "20261016", "data": [
+            "0930 1.234 100", "0931 1.236 120", "0931 1.237 125"]}}}}
+        rows = parse_minute(json.dumps(payload), "159941")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1]["price"], "1.237")
+        with tempfile.TemporaryDirectory() as folder:
+            db = NextDatabase(Path(folder) / "archive.sqlite3")
+            db.put_minute("159941", rows, "2026-10-16T07:00:00Z")
+            self.assertEqual(len(db.get_minute("159941", "2026-10-16")["rows"]), 2)
+
+    def test_minute_iopv_is_optional_but_verified_value_survives_later_pull(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = NextDatabase(Path(folder) / "iopv.sqlite3")
+            stamped = "2026-10-16T09:30:00+08:00"
+            db.put_minute("159941", [{"timestamp": stamped, "price": "1.2", "volume": "100", "iopv": "1.19"}], "one")
+            db.put_minute("159941", [{"timestamp": stamped, "price": "1.2", "volume": "100", "iopv": None}], "two")
+            self.assertEqual(db.get_minute("159941", "2026-10-16")["rows"][0]["iopv"], "1.19")
+
+    def test_iopv_is_attached_only_for_near_time_etf_quote(self):
+        from workers import attach_quote_iopv
+        rows = [{"timestamp": "2026-10-16T09:30:00+08:00", "price": "1.2", "volume": "10", "iopv": None}]
+        etf = {"time": "2026-10-16T09:33:00+08:00", "providerInstrumentType": "ETF", "iopv": "1.19"}
+        self.assertEqual(attach_quote_iopv(rows, etf)[0]["iopv"], "1.19")
+        rows[0]["iopv"] = None
+        late = {"time": "2026-10-16T09:40:01+08:00", "providerInstrumentType": "ETF", "iopv": "1.19"}
+        self.assertIsNone(attach_quote_iopv(rows, late)[0]["iopv"])
+
+    def test_deepseek_profiles_and_missing_key_do_not_fake_ai(self):
+        from ai import PROFILES, generate_research
+        self.assertEqual(PROFILES["flash"]["model"], "deepseek-flash")
+        self.assertEqual(PROFILES["pro"]["model"], "deepseek-v4-pro")
+        factors = {"code": "159941", "asOf": "2026-10-16", "source": "source",
+            "close": "1.2", "ma20": "1.1", "ma250": "1.0", "momentum20": "0.1", "drawdown20": "-0.02"}
+        self.assertIsNone(generate_research(factors, api_key=""))
+
+    def test_research_is_replaced_for_new_completed_day(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = NextDatabase(Path(folder) / "research.sqlite3")
+            db.put_research("factors-159941", {"asOf": "2026-10-16", "state": "观察"})
+            db.put_research("factors-159941", {"asOf": "2026-10-17", "state": "谨慎"})
+            self.assertEqual(db.get_research("factors-159941")["asOf"], "2026-10-17")
+
+    def test_minute_archive_rejects_untrusted_rows_and_invalid_dates(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = NextDatabase(Path(folder) / "minute.sqlite3")
+            with self.assertRaises(InvalidData):
+                db.put_minute("159941", [{"timestamp": "bad", "price": "1.2", "volume": None}], "now")
+            with self.assertRaises(InvalidData):
+                db.get_minute("159941", "2026-13-40")
+
+    def test_tracked_instrument_is_separate_from_real_ledger(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = NextDatabase(Path(folder) / "tracked.sqlite3")
+            db.track_instrument("159941", "2026-10-19T08:00:00+00:00")
+            db.track_instrument("159941", "2026-10-19T09:00:00+00:00")
+            self.assertEqual(db.tracked_instruments(), ["159941"])
+            self.assertEqual(db.get_real("main"), {"revision": 0, "bookJSON": None})
+
+    def test_worker_status_is_not_part_of_real_ledger(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = NextDatabase(Path(folder) / "status.sqlite3")
+            db.put_worker_status("daily-archive", "2026-10-19T08:00:00+00:00", "degraded", "0/4 source replies")
+            self.assertEqual(db.worker_status()[0]["state"], "degraded")
+            self.assertEqual(db.get_real("main")["revision"], 0)
+
+
 class HTTPTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.db = NextDatabase(Path(self.temp.name) / "new.sqlite3")
-        self.token = "test-only-token-1234567890123456"
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.db, self.token, lambda codes: [{"code": code} for code in codes]))
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.db, lambda codes: [{"code": code} for code in codes]))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
 
     def tearDown(self):
         self.server.shutdown(); self.server.server_close(); self.thread.join(); self.temp.cleanup()
 
-    def request(self, method, path, payload=None, auth=True):
+    def request(self, method, path, payload=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=3)
         headers = {"Content-Type": "application/json"}
-        if auth: headers["Authorization"] = "Bearer " + self.token
         connection.request(method, path, json.dumps(payload) if payload is not None else None, headers)
         response = connection.getresponse(); value = json.loads(response.read()); status = response.status
         connection.close(); return status, value
 
     def test_health_has_no_private_records(self):
-        status, value = self.request("GET", "/health", auth=False)
-        self.assertEqual(status, 200); self.assertEqual(value, {"service": "guanpan-next", "schemaVersion": 1})
+        status, value = self.request("GET", "/health")
+        self.assertEqual(status, 200); self.assertEqual(value["service"], "guanpan-next"); self.assertEqual(value["authentication"], "none"); self.assertEqual(value["workers"], [])
 
-    def test_auth_required_for_real_records(self):
-        self.assertEqual(self.request("GET", "/v1/real/books/main", auth=False)[0], 401)
-        self.assertEqual(self.request("POST", "/v1/real/books/main", {}, auth=False)[0], 401)
+    def test_real_records_are_available_without_app_passphrase(self):
+        self.assertEqual(self.request("GET", "/v1/real/books/main"), (200, {"revision": 0, "bookJSON": None}))
+        self.assertEqual(self.request("POST", "/v1/real/books/main", {})[0], 400)
 
     def test_explicit_manual_confirmation_and_revision(self):
         payload = {"bookJSON": json.dumps(book()), "expectedRevision": 0}
@@ -139,21 +219,36 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/v1/real/books/main", payload), (200, {"revision": 1}))
         self.assertEqual(self.request("POST", "/v1/real/books/main", payload)[0], 409)
 
+    def test_daily_archive_persists_and_serves_offline(self):
+        rows = [{"date": "2026-10-16", "open": "1.2", "close": "1.3", "high": "1.4", "low": "1.1", "volume": "123"}]
+        self.db.put_daily("159941", rows, "2026-10-19T08:00:00+00:00")
+        status, payload = self.request("GET", "/v1/market/daily/159941")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["bars"], rows)
+        self.assertEqual(payload["source"], "Tencent newfqkline qfqday")
+
     def test_no_real_trading_endpoint(self):
         for path in ("/v1/trade", "/api/data", "/api/native/data"):
             self.assertEqual(self.request("POST", path, {})[0], 404)
 
-    def test_market_quote_endpoint_requires_auth_and_valid_codes(self):
-        self.assertEqual(self.request("GET", "/v1/market/quotes?codes=159941", auth=False)[0], 401)
+    def test_market_quote_endpoint_and_valid_codes(self):
         status, value = self.request("GET", "/v1/market/quotes?codes=159941,510300")
         self.assertEqual(status, 200)
         self.assertEqual(value["quotes"], [{"code": "159941"}, {"code": "510300"}])
         for query in ("", "codes=12", "codes=159941,159941", "codes=700000"):
             self.assertEqual(self.request("GET", "/v1/market/quotes" + ("?" + query if query else ""))[0], 400)
 
-    def test_empty_or_short_token_rejected(self):
-        for value in ("", "short"):
-            with self.assertRaises(ValueError): make_handler(self.db, value)
+    def test_tracking_endpoint_requires_confirmation(self):
+        self.assertEqual(self.request("POST", "/v1/market/track/159941", {})[0], 400)
+        status, body = self.request("POST", "/v1/market/track/159941", {"mode": "track-confirmed"})
+        self.assertEqual((status, body), (200, {"code": "159941", "tracked": True}))
+        self.assertEqual(self.db.tracked_instruments(), ["159941"])
+
+    def test_web_console_is_available(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=3)
+        connection.request("GET", "/")
+        response = connection.getresponse(); body = response.read().decode(); connection.close()
+        self.assertEqual(response.status, 200); self.assertIn("观盘 Pro Next", body); self.assertIn("行情档案核对", body)
 
 
 if __name__ == "__main__": unittest.main()

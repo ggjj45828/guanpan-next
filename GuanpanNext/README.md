@@ -17,7 +17,7 @@
 - `ios/Tests/NextCoreTests.swift`：账本、规则、图表、盘口撮合、策略隔离和恢复相关核心测试。
 - `ios/UITests/NativeNavigationTests.swift`：五大主页面、证券详情、全屏图表、AI 深链、设置导航及模拟器截图附件。
 - `../.github/workflows/guanpan-next-ios.yml`：macOS 上的 Swift/Xcode 构建、单元/UI 测试和 `.xcresult` 证据包流程。
-- `server/`：新 NAS 服务，独立数据库/端口，含只读 Tencent 行情代理和 CAS 真实账本快照端点；尚未部署。iOS 保存 NAS 口令到钥匙串，真实账本仅在手动确认后同步，修订冲突停止覆盖。
+- `server/`：新 NAS 服务，独立数据库/端口，含只读 Tencent 行情代理和 CAS 真实账本快照端点；尚未部署。NAS 不要求应用口令；网页可读取和下载新账本，iOS 经确认后可双向传输真实账本，修订冲突停止覆盖。
 - NAS 的 8790 容器端口是服务内部 HTTP；不要直接暴露互联网或向 iPhone 明文发送账本令牌。正式连接须经可信 HTTPS 反向代理/VPN TLS 入口。
 
 ## 当前验证边界
@@ -25,3 +25,5 @@
 服务器已有 17 项 Python 测试通过。此执行环境未安装 Xcode/Swift，因此尚无原生构建、模拟器截图、IPA 或真机手势验证。CI 中的构建与 UI 测试配置已经加入，但未在 GitHub Actions 上运行；不能将工作流配置视为成功证据。
 
 目前 iOS 行情仅接入可选的腾讯报价和当日分时；历史 K 线、历史 IOPV、五档盘口、经核实的交易规则未接入。NAS 个人账本手动同步客户端和行情代理接口已编码，仍需实 NAS 部署/HTTPS/冲突实测；自动采集通道、在线 AI 研究与策略执行、真实推送、策略历史收益、性能及 iPhone Air 实机验证尚未完成。任何界面中的缺失数据都需明确提示，不能以静态示例数值冒充已连接功能。
+
+日 K：NAS 每 30 分钟刷新默认四只 ETF 及已有缓存代码，原始腾讯前复权 OHLCV 写入独立 SQLite；来源不可用时保留已核验缓存。iPhone 日 K 周期读取 NAS 历史数据并在本机缓存。

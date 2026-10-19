@@ -92,7 +92,8 @@ struct LocalPreferences: Codable {
             ("chart-history-v1.json", try encoder.encode(archive.chartData)),
             ("instrument-rules-v1.json", try encoder.encode(archive.instrumentRules)),
             ("order-books-v1.json", try encoder.encode(archive.orderBooks)),
-            ("decision-history-v1.json", try encoder.encode(archive.decisionHistory))
+            ("decision-history-v1.json", try encoder.encode(archive.decisionHistory)),
+            ("nas-research-v1.json", try encoder.encode(archive.nasResearch))
         ]
         let parent = directory.deletingLastPathComponent()
         let staging = parent.appendingPathComponent("GuanpanProNative-staging-\(UUID().uuidString)", isDirectory: true)
@@ -130,8 +131,10 @@ struct LocalPreferences: Codable {
     @Published var rules: [String: NextInstrumentRules] { didSet { reportSave(repository.save(rules, filename: "instrument-rules-v1.json")) } }
     @Published var orderBooks: [String: NextOrderBookSnapshot] { didSet { reportSave(repository.save(orderBooks, filename: "order-books-v1.json")) } }
     @Published var decisions: [NextDecision] { didSet { reportSave(repository.save(decisions, filename: "decision-history-v1.json")) } }
+    @Published var nasResearch: [String: NextNASResearch] { didSet { reportSave(repository.save(nasResearch, filename: "nas-research-v1.json")) } }
     @Published var status = "行情尚未刷新 · 缓存可离线查看"
     @Published var syncStatus = "NAS 未连接"
+    @Published var notificationStatus = "尚未检查系统通知权限"
     @Published var errorMessage: String?
     @Published var showSearch = false
     @Published var searchText = ""
@@ -162,6 +165,7 @@ struct LocalPreferences: Codable {
         self.rules = repository.load([String: NextInstrumentRules].self, filename: "instrument-rules-v1.json", fallback: [:])
         self.orderBooks = repository.load([String: NextOrderBookSnapshot].self, filename: "order-books-v1.json", fallback: [:])
         self.decisions = repository.load([NextDecision].self, filename: "decision-history-v1.json", fallback: [])
+        self.nasResearch = repository.load([String: NextNASResearch].self, filename: "nas-research-v1.json", fallback: [:])
         self.errorMessage = repository.integrityWarning
     }
     func commitRealLedger(_ updated: NextBook, action: String, reason: String) throws {
@@ -175,6 +179,38 @@ struct LocalPreferences: Codable {
         var updated = book
         updated.positions.append(NextPosition(code: code, name: name, units: units, bookCost: cost))
         try commitRealLedger(updated, action: "录入场内持仓", reason: "用户确认保存")
+    }
+    func recordTrade(code: String, name: String, side: String, units: Int, price: Decimal, fee: Decimal) throws {
+        guard code.count == 6, code.allSatisfy(\.isNumber), units > 0, price > 0,
+              side == "buy" || side == "sell", fee >= 0, !fee.isNaN else { throw NextError.invalid("成交代码、方向、价格、份额或手续费无效") }
+        if rules[code]?.assetClass == .etf || quotes[code]?.quote.providerInstrumentType == "ETF" {
+            guard fee == Decimal(string: "0.10")! else { throw NextError.invalid("已核实 ETF 的手续费按每笔 ¥0.10 记录") }
+        }
+        let gross = price * Decimal(units)
+        var updated = book
+        let positionIndex = updated.positions.firstIndex { $0.code == code }
+        var realized: Decimal = 0
+        if side == "buy" {
+            guard updated.cash >= gross + fee else { throw NextError.invalid("账本现金不足。请先在资产页记录真实转入；若只是补录已有持仓，可直接从此证券录入持仓。") }
+            updated.cash -= gross + fee
+            if let positionIndex {
+                updated.positions[positionIndex].units += units
+                updated.positions[positionIndex].bookCost += gross + fee
+            } else {
+                updated.positions.append(NextPosition(code: code, name: name, units: units, bookCost: gross + fee))
+            }
+        } else {
+            guard let positionIndex, updated.positions[positionIndex].units >= units else { throw NextError.invalid("卖出份额超过真实账本持有份额") }
+            let oldUnits = updated.positions[positionIndex].units
+            let cost = updated.positions[positionIndex].bookCost * Decimal(units) / Decimal(oldUnits)
+            realized = gross - fee - cost
+            updated.positions[positionIndex].units -= units
+            updated.positions[positionIndex].bookCost -= cost
+            if updated.positions[positionIndex].units == 0 { updated.positions.remove(at: positionIndex) }
+            updated.cash += gross - fee
+        }
+        updated.fills.append(NextFill(date: Date(), code: code, side: side, units: units, price: price, fee: fee, realized: realized))
+        try commitRealLedger(updated, action: side == "buy" ? "记录成交买入" : "记录成交卖出", reason: "用户核对成交；本笔手续费 ¥\(NextMoney.text(fee))")
     }
     func adjustRealCash(_ amount: Decimal, reason: String) throws {
         guard !amount.isNaN, amount != 0, book.cash + amount >= 0 else { throw NextError.invalid("变更金额无效或会导致现金为负") }
@@ -196,6 +232,7 @@ struct LocalPreferences: Codable {
     func addWatch(_ code: String) throws {
         guard code.count == 6, code.allSatisfy(\.isNumber), !watch.contains(code) else { throw NextError.invalid("请输入有效且尚未关注的 6 位证券代码") }
         preferences.watch.insert(code, at: 0)
+        if !preferences.nasBaseURL.isEmpty { Task { await registerNASArchive(code) } }
     }
     func removeWatch(_ code: String) { preferences.watch.removeAll { $0 == code } }
     func openInstrumentIntent(_ code: String) {
@@ -208,37 +245,86 @@ struct LocalPreferences: Codable {
         routeRequestID = UUID()
     }
     func saveTheme(_ theme: GPTheme) { preferences.theme = theme }
-    func configureNAS(baseURL: String, token: String) throws {
+    func refreshNotificationStatus() async { notificationStatus = await NextLocalNotificationService.authorizationStatus() }
+    func requestNotificationPermission() async { notificationStatus = await NextLocalNotificationService.requestAuthorization() }
+    func postLocalAlert(level: String, fingerprint: String, title: String, detail: String, stamp: NextDataStamp) {
+        var center = preferences.notifications
+        let quiet = center.quietHours.isQuiet(Date())
+        let alert = NextAlert(fingerprint: fingerprint, level: level, title: title, detail: detail, createdAt: Date(), stamp: stamp,
+                              delivery: quiet ? "静默记录" : "待本机投递")
+        guard center.append(alert, now: Date()) else { return }
+        preferences.notifications = center; preferences = preferences
+        guard !quiet else { return }
+        Task {
+            let delivery = await NextLocalNotificationService.deliver(id: alert.id, title: title, detail: detail)
+            guard let index = preferences.notifications.alerts.firstIndex(where: { $0.id == alert.id }) else { return }
+            preferences.notifications.alerts[index].delivery = delivery
+            preferences = preferences
+        }
+    }
+    func addPriceAlert(code: String, price: Decimal, direction: NextPriceAlertDirection) throws {
+        guard code.count == 6, code.allSatisfy(\.isNumber), !preferences.notifications.priceRules.contains(where: { $0.code == code && $0.price == price && $0.direction == direction }) else {
+            throw NextError.invalid("价格提醒代码无效或已存在")
+        }
+        let rule = NextPriceAlertRule(code: code, name: quotes[code]?.quote.name ?? code, price: price, direction: direction)
+        try rule.validate()
+        preferences.notifications.priceRules.append(rule); preferences = preferences
+    }
+    func removePriceAlert(_ id: UUID) { preferences.notifications.priceRules.removeAll { $0.id == id }; preferences = preferences }
+    private func evaluatePriceAlerts(_ values: [NextQuote]) {
+        var rules = preferences.notifications.priceRules
+        var triggered: [(NextPriceAlertRule, NextQuote)] = []
+        for quote in values where quote.isFresh(at: Date()) {
+            for index in rules.indices where rules[index].enabled && rules[index].code == quote.code {
+                let match = rules[index].direction == .atOrAbove ? quote.price >= rules[index].price : quote.price <= rules[index].price
+                if match && !rules[index].isInsideTrigger { triggered.append((rules[index], quote)) }
+                rules[index].isInsideTrigger = match
+            }
+        }
+        preferences.notifications.priceRules = rules; preferences = preferences
+        for (rule, quote) in triggered {
+            let relation = rule.direction == .atOrAbove ? "达到或高于" : "达到或低于"
+            postLocalAlert(level: "价格", fingerprint: "price-rule-\(rule.id.uuidString)", title: "\(rule.name) 价格提醒", detail: "最新价 ¥\(NextMoney.text(quote.price, digits: 4))，已\(relation)你设置的 ¥\(NextMoney.text(rule.price, digits: 4))。", stamp: NextDataStamp(source: quote.source, observedAt: quote.time, quality: .live, detail: "价格规则触发"))
+        }
+    }
+    func configureNAS(baseURL: String) throws {
         let normalized = try NextNASService.validateURL(baseURL).absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard token.count >= 24 else { throw NextError.invalid("NAS 访问口令至少需要 24 个字符") }
-        try NextCredentialStore.save(token)
         if preferences.nasBaseURL != normalized { preferences.nasRevision = nil }
-        preferences.nasBaseURL = normalized
-        preferences = preferences
+        preferences.nasBaseURL = normalized; preferences = preferences
         syncStatus = "NAS 地址已保存；请测试连接"
     }
     func probeNAS() async {
         do {
-            let token = try NextCredentialStore.load()
-            let remote = try await NextNASService.readStatus(baseURL: preferences.nasBaseURL, token: token)
-            if preferences.nasRevision == nil && remote.hasBook {
-                syncStatus = "服务端已有账本修订 \(remote.revision)；未关联本机版本，拒绝覆盖"
-            } else { syncStatus = "NAS 可连接 · 服务端修订 \(remote.revision) · \(remote.hasBook ? "已有数据" : "空账本")" }
-        } catch { syncStatus = "NAS 离线或认证失败 · \(error.localizedDescription)" }
+            let remote = try await NextNASService.readStatus(baseURL: preferences.nasBaseURL)
+            syncStatus = "NAS 可连接 · 修订 \(remote.revision) · \(remote.hasBook ? "已有数据，可下载" : "空账本")"
+        } catch {
+            syncStatus = "NAS 离线或读取失败 · \(error.localizedDescription)"
+            postLocalAlert(level: "NAS", fingerprint: "nas-connectivity", title: "NAS 连接不可用", detail: "\(error.localizedDescription)。本机账本和缓存仍可使用。", stamp: NextDataStamp(source: "NAS 连通性检查", observedAt: Date(), quality: .stale, detail: "用户触发检查"))
+        }
+    }
+    func downloadBookManually() async {
+        do {
+            let remote = try await NextNASService.readStatus(baseURL: preferences.nasBaseURL)
+            guard let incoming = remote.book else { throw NextError.invalid("NAS 上还没有可下载的新账本") }
+            guard repository.integrityWarning == nil else { throw NextError.invalid("本机数据完整性待恢复；下载已停止") }
+            try repository.writeSafetyCopy(try makeBackup())
+            try commitRealLedger(incoming, action: "从 NAS 下载真实账本", reason: "用户确认下载 NAS 修订 \(remote.revision)；原账本已备份")
+            preferences.nasRevision = remote.revision; preferences = preferences
+            syncStatus = "已从 NAS 下载账本 · 修订 \(remote.revision)"
+        } catch { syncStatus = "下载停止 · \(error.localizedDescription)" }
     }
     func syncBookManually() async {
         do {
-            let token = try NextCredentialStore.load()
-            let remote = try await NextNASService.readStatus(baseURL: preferences.nasBaseURL, token: token)
+            let remote = try await NextNASService.readStatus(baseURL: preferences.nasBaseURL)
             if let knownRevision = preferences.nasRevision {
-                guard remote.revision == knownRevision else { throw NextError.invalid("NAS 修订从本机记录的 \(knownRevision) 变为 \(remote.revision)；没有合并或覆盖，请先人工核对") }
+                guard remote.revision == knownRevision else { throw NextError.invalid("NAS 修订已变化；请先下载核对") }
             } else {
-                guard remote.revision == 0 && !remote.hasBook else { throw NextError.invalid("NAS 已有未关联的账本；没有覆盖。请先完成备份差异核对流程") }
+                guard remote.revision == 0 && !remote.hasBook else { throw NextError.invalid("NAS 已有未关联账本；请先下载核对") }
             }
-            let revision = try await NextNASService.pushBook(book, expectedRevision: remote.revision, baseURL: preferences.nasBaseURL, token: token)
+            let revision = try await NextNASService.pushBook(book, expectedRevision: remote.revision, baseURL: preferences.nasBaseURL)
             preferences.nasRevision = revision; preferences = preferences
-            syncStatus = "用户确认同步完成 · 修订 \(revision) · \(Date.now.formatted(date: .numeric, time: .shortened))"
-        } catch { syncStatus = "同步停止 · \(error.localizedDescription)" }
+            syncStatus = "用户确认上传完成 · 修订 \(revision)"
+        } catch { syncStatus = "上传停止 · \(error.localizedDescription)" }
     }
     func chartState(for code: String) -> NextChartState { preferences.navigation.chartStates[code] ?? NextChartState() }
     func saveChartState(_ state: NextChartState, for code: String) {
@@ -291,8 +377,8 @@ struct LocalPreferences: Codable {
         do {
             var sourceNote = ""
             let fetched: [NextQuote]
-            if !preferences.nasBaseURL.isEmpty, let token = try? NextCredentialStore.load() {
-                do { fetched = try await NextNASService.fetchQuotes(codes: unique, baseURL: preferences.nasBaseURL, token: token); sourceNote = "NAS 代理" }
+            if !preferences.nasBaseURL.isEmpty {
+                do { fetched = try await NextNASService.fetchQuotes(codes: unique, baseURL: preferences.nasBaseURL); sourceNote = "NAS 代理" }
                 catch { fetched = try await NextMarketDataService.fetchQuotes(codes: unique); sourceNote = "NAS 离线，已直连" }
             } else {
                 fetched = try await NextMarketDataService.fetchQuotes(codes: unique)
@@ -306,22 +392,58 @@ struct LocalPreferences: Codable {
                 updated[quote.code] = cached
             }
             quotes = updated
+            evaluatePriceAlerts(fetched)
             status = "行情已更新 · \(sourceNote) · \(fetched.count)/\(unique.count) · \(Date.now.formatted(date: .omitted, time: .shortened))"
         } catch {
             status = "行情连接失败 · 显示本地缓存"
             errorMessage = "\(error.localizedDescription)。本地账本和历史缓存仍可查看。"
+            postLocalAlert(level: "行情", fingerprint: "market-refresh-unavailable", title: "行情刷新失败", detail: "\(error.localizedDescription)。当前显示本机缓存，不据此生成新的价格计划。", stamp: NextDataStamp(source: "行情刷新", observedAt: Date(), quality: .stale, detail: "请求失败"))
         }
     }
     func refreshInstrument(_ code: String) async {
+        await registerNASArchive(code)
         await refreshQuotes(codes: [code])
+        await refreshDaily(code)
         do {
-            let dataset = try await NextMarketDataService.fetchIntraday(code: code)
+            let raw = try await NextMarketDataService.fetchIntraday(code: code)
+            let dataset = quotes[code].map { raw.attachingVerifiedIOPV($0.quote) } ?? raw
             try dataset.validate()
             chartData[code] = dataset
             status = "行情与分时已更新 · \(dataset.samples.count) 点 · \(dataset.observedAt.formatted(date: .omitted, time: .shortened))"
         } catch {
-            status = "报价缓存可用 · 分时历史暂不可用"
-            errorMessage = "\(error.localizedDescription)。不会用报价点补造历史曲线或 IOPV。"
+            if !preferences.nasBaseURL.isEmpty {
+                await loadNASMinute(code: code, day: Date())
+            } else {
+                status = "报价缓存可用 · 分时历史暂不可用"
+                errorMessage = "\(error.localizedDescription)。不会用报价点补造历史曲线或 IOPV。"
+            }
+        }
+    }
+    func refreshNASResearch(_ code: String) async {
+        guard !preferences.nasBaseURL.isEmpty else { return }
+        do { nasResearch[code] = try await NextNASService.fetchResearch(code: code, baseURL: preferences.nasBaseURL) }
+        catch { if nasResearch[code] == nil { errorMessage = "NAS 研究暂不可用：\(error.localizedDescription)" } }
+    }
+    func registerNASArchive(_ code: String) async {
+        guard !preferences.nasBaseURL.isEmpty else { return }
+        do { try await NextNASService.trackInstrument(code: code, baseURL: preferences.nasBaseURL) }
+        catch { status = "NAS 后台归档登记失败 · 本机行情和缓存仍可用" }
+    }
+    func loadNASMinute(code: String, day: Date) async {
+        guard !preferences.nasBaseURL.isEmpty else { errorMessage = "先连接 NAS 才能读取归档日期"; return }
+        do {
+            let dataset = try await NextNASService.fetchMinute(code: code, day: day, baseURL: preferences.nasBaseURL)
+            chartData[code] = dataset
+            status = "已载入 NAS 分时档案 · \(dataset.priceSource) · \(dataset.samples.count) 点"
+        } catch { errorMessage = error.localizedDescription }
+    }
+    func refreshDaily(_ code: String) async {
+        guard !preferences.nasBaseURL.isEmpty else { return }
+        do {
+            let dataset = try await NextNASService.fetchDaily(code: code, baseURL: preferences.nasBaseURL)
+            chartData["\(code):day"] = dataset
+        } catch {
+            if chartData["\(code):day"] == nil { errorMessage = "日 K 暂不可用：\(error.localizedDescription)" }
         }
     }
     func acceptOrderBook(_ snapshot: NextOrderBookSnapshot, marketOpen: Bool) throws {
@@ -347,6 +469,7 @@ struct LocalPreferences: Codable {
         preferences = LocalPreferences(goal: incoming.goal, watch: incoming.watch, navigation: incoming.navigation, theme: GPTheme(rawValue: incoming.theme.rawValue) ?? .system, notifications: incoming.notifications, nasBaseURL: preferences.nasBaseURL, nasRevision: nil)
         quotes = incoming.cachedQuotes; chartData = incoming.chartData; rules = incoming.instrumentRules; orderBooks = incoming.orderBooks
         decisions = incoming.decisionHistory
+        nasResearch = incoming.nasResearch
     }
     func research(for code: String?) -> NextDecision? {
         do {
@@ -377,6 +500,7 @@ struct LocalPreferences: Codable {
         archive.cachedQuotes = quotes; archive.chartData = chartData; archive.instrumentRules = rules; archive.orderBooks = orderBooks
         archive.notifications = preferences.notifications; archive.audits = ledger.events
         archive.decisionHistory = decisions
+        archive.nasResearch = nasResearch
         archive.theme = NextTheme(rawValue: theme.rawValue) ?? .system
         return archive
     }

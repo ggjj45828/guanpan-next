@@ -85,7 +85,6 @@ private struct PrimaryNavigation<Content: View>: View {
                         Button { model.showSearch = true } label: {
                             Image(systemName: "magnifyingglass").frame(width: 44, height: 44).contentShape(Rectangle())
                         }
-                        .accessibilityElement(children: .ignore)
                         .accessibilityLabel("全局搜索证券")
                         .accessibilityIdentifier("search.open")
                         .accessibilityAddTraits(.isButton)
@@ -93,7 +92,6 @@ private struct PrimaryNavigation<Content: View>: View {
                             Label("设置", systemImage: "slider.horizontal.3").labelStyle(.iconOnly)
                                 .frame(width: 44, height: 44).contentShape(Rectangle())
                         }
-                        .accessibilityElement(children: .ignore)
                         .accessibilityLabel("设置")
                         .accessibilityIdentifier("settings.open")
                         .accessibilityAddTraits(.isButton)
@@ -183,6 +181,7 @@ private struct MarketScreen: View {
     @Environment(\.gp) private var p
     @State private var entry = ""
     @State private var selectedFilter = "全部"
+    @State private var tradeRequest: GPTradeRequest?
     private var visibleCodes: [String] {
         switch selectedFilter {
         case "持仓": return model.book.positions.map(\.code)
@@ -195,14 +194,14 @@ private struct MarketScreen: View {
             Section {
                 HStack(alignment: .top) { Text("用熟悉的证券代码开始，详情里再展开行情、图表与研究。").font(.subheadline).foregroundStyle(p.muted); Spacer(); Button { Task { await model.refreshQuotes(codes: visibleCodes) } } label: { Label("刷新", systemImage: "arrow.clockwise").font(.caption.weight(.semibold)) }.disabled(visibleCodes.isEmpty) }
                     .listRowBackground(p.canvas)
-                HStack(spacing: 8) { TextField("添加 6 位证券代码", text: $entry).keyboardType(.numberPad).textFieldStyle(.roundedBorder).submitLabel(.done).onSubmit(add); Button("添加", action: add).buttonStyle(.borderedProminent).tint(p.forest) }
+                HStack(spacing: 8) { TextField("添加 6 位证券代码", text: $entry).keyboardType(.numberPad).textFieldStyle(.roundedBorder).submitLabel(.done).onSubmit(add); Button(selectedFilter == "持仓" ? "录入" : "添加", action: add).buttonStyle(.borderedProminent).tint(p.forest) }
                     .listRowBackground(p.canvas)
                 Picker("证券筛选", selection: $selectedFilter) { ForEach(["全部", "自选", "持仓"], id: \.self) { Text($0).tag($0) } }.pickerStyle(.segmented)
                     .listRowBackground(p.canvas)
                 HStack { Text("证券").frame(maxWidth: .infinity, alignment: .leading); Text("最新").frame(width: 78, alignment: .trailing); Text("涨跌").frame(width: 58, alignment: .trailing) }.font(.caption2.weight(.medium)).foregroundStyle(p.muted).listRowBackground(p.canvas)
             }
             if visibleCodes.isEmpty {
-                GPStatus(title: "这个列表还没有证券", detail: "搜索并添加一只场内 ETF，点入可查看详情。", symbol: "magnifyingglass").listRowBackground(p.canvas).listRowSeparator(.hidden)
+                GPStatus(title: "这个列表还没有证券", detail: selectedFilter == "持仓" ? "从自选点进 ETF，选择记录买入或补录已有持仓；也可在上方输入代码。" : "搜索并添加一只场内 ETF，点入可查看详情。", symbol: "magnifyingglass").listRowBackground(p.canvas).listRowSeparator(.hidden)
             }
             ForEach(visibleCodes, id: \.self) { code in
                 NavigationLink(value: GPRoute.instrument(code)) {
@@ -210,10 +209,21 @@ private struct MarketScreen: View {
                 }.accessibilityIdentifier("instrument.row.\(code)")
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         if model.watch.contains(code) { Button("移除", systemImage: "star.slash", role: .destructive) { model.removeWatch(code) } }
+                        Button("买入", systemImage: "plus.circle") { tradeRequest = GPTradeRequest(code: code, side: "buy") }.tint(p.forest)
+                        if model.book.positions.contains(where: { $0.code == code && $0.units > 0 }) { Button("卖出", systemImage: "minus.circle") { tradeRequest = GPTradeRequest(code: code, side: "sell") }.tint(p.terracotta) }
                         Button("分析", systemImage: "sparkles") { model.openInstrumentIntent(code) }.tint(p.forest)
                     }
                     .listRowBackground(p.paper)
-                    .contextMenu { Button("分析买入机会", systemImage: "sparkles") { model.openInstrumentIntent(code) }; if model.watch.contains(code) { Button("移出自选", systemImage: "star.slash", role: .destructive) { model.removeWatch(code) } } }
+                    .contextMenu {
+                        Button("记录买入", systemImage: "plus.circle") { tradeRequest = GPTradeRequest(code: code, side: "buy") }
+                        if model.book.positions.contains(where: { $0.code == code && $0.units > 0 }) {
+                            Button("记录卖出", systemImage: "minus.circle") { tradeRequest = GPTradeRequest(code: code, side: "sell") }
+                        }
+                        Button("分析买入机会", systemImage: "sparkles") { model.openInstrumentIntent(code) }
+                        if model.watch.contains(code) {
+                            Button("移出自选", systemImage: "star.slash", role: .destructive) { model.removeWatch(code) }
+                        }
+                    }
             }
             Section("行情连接状态") {
                 VStack(alignment: .leading, spacing: 6) { Text(model.status).font(.subheadline.weight(.medium)); Text("来源：Tencent 公共报价接口。失败时保留本地缓存；ETF 属性、交易规则、五档盘口及 IOPV 不从报价接口推断。").font(.caption).foregroundStyle(p.muted); Button("重试") { Task { await model.refreshQuotes(codes: visibleCodes) } }.font(.caption.weight(.semibold)).tint(p.forest) }
@@ -222,10 +232,23 @@ private struct MarketScreen: View {
         }
         .listStyle(.plain).scrollContentBackground(.hidden).background(p.canvas).scrollDismissesKeyboard(.interactively)
         .navigationTitle("行情").navigationBarTitleDisplayMode(.large)
+        .sheet(item: $tradeRequest) { TradeEntrySheet(request: $0) }
         .onAppear { selectedFilter = model.preferences.navigation.listFilters["market"] ?? "全部" }
         .onChange(of: selectedFilter) { _, value in model.preferences.navigation.listFilters["market"] = value; model.preferences = model.preferences }
     }
-    private func add() { do { try model.addWatch(entry); entry = "" } catch { model.errorMessage = error.localizedDescription } }
+    private func add() {
+        let code = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard code.count == 6, code.allSatisfy(\.isNumber) else { model.errorMessage = "请输入有效的 6 位场内证券代码"; return }
+        if selectedFilter == "持仓" || model.watch.contains(code) {
+            tradeRequest = GPTradeRequest(code: code, side: "buy")
+            entry = ""
+            return
+        }
+        do {
+            try model.addWatch(code); entry = ""
+            Task { await model.refreshQuotes(codes: [code]) }
+        } catch { model.errorMessage = error.localizedDescription }
+    }
 }
 
 private struct InstrumentRow: View {
@@ -248,6 +271,7 @@ private struct InstrumentDetailScreen: View {
     let code: String
     @State private var interval: NextChartInterval = .intraday
     @State private var selectedTime: Date?
+    @State private var tradeRequest: GPTradeRequest?
     private var position: NextPosition? { model.book.positions.first { $0.code == code } }
     private var quote: NextQuote? { model.quotes[code]?.quote }
     private var name: String { position?.name ?? quote?.name ?? knownName(code) }
@@ -260,7 +284,7 @@ private struct InstrumentDetailScreen: View {
                 if let quote, let iopv = quote.iopv { Text("当前 IOPV ¥\(NextMoney.text(iopv, digits: 4)) · 溢折价 \(NextMoney.text((quote.price / iopv - 1) * 100, digits: 2))% · 同源时点 \(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption2.monospaced()).foregroundStyle(p.terracotta).padding(.bottom, 8) }
                 if let stamp = model.quotes[code]?.stamp { Text(stamp.label(now: Date())).font(.caption2).foregroundStyle(p.muted).padding(.bottom, 8) }
                 DataPanel(title: "行情图表", caption: model.chartData[code].map { "\($0.priceSource) · \($0.observedAt.formatted(date: .omitted, time: .shortened))" } ?? "暂无本机历史") {
-                    UnifiedChartView(dataset: model.chartData[code], interval: $interval, costPerUnit: cost, selectedTime: $selectedTime, securityCode: code)
+                    UnifiedChartView(dataset: interval == .intraday ? model.chartData[code] : model.chartData["\(code):day"], interval: $interval, costPerUnit: cost, selectedTime: $selectedTime, securityCode: code)
                     HStack { Button { Task { await model.refreshInstrument(code) } } label: { Label("刷新行情与分时", systemImage: "arrow.clockwise").font(.caption.weight(.semibold)) }; Spacer(); NavigationLink(value: GPRoute.chart(code)) { Label("全屏分析", systemImage: "arrow.up.left.and.arrow.down.right").font(.caption.weight(.semibold)) }.accessibilityIdentifier("chart.fullscreen") }.tint(p.forest)
                 }
                 EditorialSection(title: "交易盘口", trailing: model.rules[code]?.isVerified == true ? "规则已验证" : "规则待验证") {
@@ -275,13 +299,16 @@ private struct InstrumentDetailScreen: View {
                     else { GPDataRow(title: "ETF 交易规则", value: "未接入来源") }
                 }
                 EditorialSection(title: "下一步") {
+                    HStack { Button("记录买入") { tradeRequest = GPTradeRequest(code: code, side: "buy") }; if (position?.units ?? 0) > 0 { Button("记录卖出") { tradeRequest = GPTradeRequest(code: code, side: "sell") } } }.buttonStyle(.bordered).tint(p.forest)
                     NavigationLink(value: GPRoute.decision(code)) { IntentRow(icon: "sparkles", title: "分析买入机会", detail: "组织行情、持仓、资金、限价计划与风险") }.accessibilityIdentifier("instrument.analyze-buy")
+                    NavigationLink(value: GPRoute.alerts) { IntentRow(icon: "bell.badge", title: "设置价格提醒", detail: "自动带入当前证券代码；只用新鲜行情触发") }
                     NavigationLink(value: GPRoute.twin(.G)) { IntentRow(icon: "waveform.path.ecg", title: "在数字孪生中观察", detail: "只影响 G 模拟账户，不触碰真实账本") }
                 }
                 if !model.notice.isEmpty { Text(model.notice).font(.caption).foregroundStyle(p.muted).padding(.vertical, 8) }
             }
         }.navigationTitle(name).navigationBarTitleDisplayMode(.inline)
-            .onAppear { model.preferences.navigation.selectedSecurity = code; model.preferences = model.preferences }
+            .sheet(item: $tradeRequest) { TradeEntrySheet(request: $0) }
+            .onAppear { model.preferences.navigation.selectedSecurity = code; model.preferences = model.preferences; Task { await model.refreshDaily(code) } }
     }
 }
 
@@ -310,18 +337,26 @@ private struct FullscreenChartScreen: View {
     let code: String
     @State private var interval: NextChartInterval = .intraday
     @State private var crosshair: Date?
+    @State private var archiveDay = Date()
     var body: some View {
         GeometryReader { geo in
             VStack(alignment: .leading, spacing: 14) {
                 HStack { VStack(alignment: .leading) { Text(knownName(code)).font(.headline); Text("\(code) · \(model.quotes[code]?.stamp.label(now: Date()) ?? "暂无行情")").font(.caption).foregroundStyle(p.muted) }; Spacer(); NavigationLink(value: GPRoute.decision(code)) { Label("分析", systemImage: "sparkles").font(.caption.weight(.semibold)) } }
                 DataPanel(title: "价格与 IOPV", caption: geo.size.width > geo.size.height ? "横屏 · 拖动/双指缩放" : "竖屏") {
-                    UnifiedChartView(dataset: model.chartData[code], interval: $interval, costPerUnit: model.book.positions.first(where: { $0.code == code })?.costPerUnit, selectedTime: $crosshair, securityCode: code, expanded: true)
-                    if let dataset = model.chartData[code] { Text("图表来源：\(dataset.priceSource) · 观测 \(dataset.observedAt.formatted(date: .numeric, time: .shortened)) · IOPV 历史\(dataset.iopvSource == nil ? "不可用" : "可用")").font(.caption2).foregroundStyle(p.muted) }
+                    if interval == .intraday && !model.preferences.nasBaseURL.isEmpty {
+                        HStack {
+                            DatePicker("历史分时", selection: $archiveDay, in: ...Date(), displayedComponents: .date).datePickerStyle(.compact)
+                            Button("读取") { Task { await model.loadNASMinute(code: code, day: archiveDay) } }
+                        }.font(.caption).tint(p.forest)
+                    }
+                    UnifiedChartView(dataset: interval == .intraday ? model.chartData[code] : model.chartData["\(code):day"], interval: $interval, costPerUnit: model.book.positions.first(where: { $0.code == code })?.costPerUnit, selectedTime: $crosshair, securityCode: code, expanded: true)
+                    if let dataset = (interval == .intraday ? model.chartData[code] : model.chartData["\(code):day"]) { Text("图表来源：\(dataset.priceSource) · 观测 \(dataset.observedAt.formatted(date: .numeric, time: .shortened)) · IOPV 历史\(dataset.iopvSource == nil ? "不可用" : "可用")").font(.caption2).foregroundStyle(p.muted) }
                 }
                 DataPanel(title: "十字光标数据") { if let crosshair { GPDataRow(title: "时间", value: crosshair.formatted(date: .numeric, time: .shortened)) } else { Text("拖动图表定位历史时点；返回详情后周期和光标状态继续保留。").font(.caption).foregroundStyle(p.muted) } }
                 Spacer(minLength: 0)
             }.padding(16).background(p.canvas).frame(maxWidth: .infinity, maxHeight: .infinity)
         }.navigationTitle("全屏行情分析").navigationBarTitleDisplayMode(.inline)
+            .onAppear { Task { await model.refreshDaily(code) } }
     }
 }
 
@@ -337,7 +372,7 @@ private struct DecisionScreen: View {
     var body: some View {
         GPPageBackground {
             VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 9) { Image(systemName: "sparkles").foregroundStyle(p.forest); Text("私人投资顾问").font(.caption.weight(.semibold)).foregroundStyle(p.forest); Spacer(); Text("规则模式 · AI 未连接").font(.caption2).foregroundStyle(p.muted) }.padding(.top, 7)
+                HStack(spacing: 9) { Image(systemName: "sparkles").foregroundStyle(p.forest); Text("私人投资顾问").font(.caption.weight(.semibold)).foregroundStyle(p.forest); Spacer(); Text(code.flatMap { model.nasResearch[$0]?.ai } == nil ? "本地规则 · AI 待连接" : "NAS DeepSeek · 有历史记录").font(.caption2).foregroundStyle(p.muted) }.padding(.top, 7)
                 Text(code.map { "围绕 \(knownName($0))，把已知信息整理成下一步" } ?? "先说你想完成什么").font(.system(.title2, design: .serif).weight(.semibold)).foregroundStyle(p.ink).padding(.top, 10)
                 Text("分析会结合本机账本、有效行情、预算和风险限制。没有来源的数据会明确标为缺口。").font(.subheadline).foregroundStyle(p.muted).padding(.top, 5)
                 EditorialSection(title: "你的目标与资金") {
@@ -349,8 +384,21 @@ private struct DecisionScreen: View {
                     result = model.research(for: code)
                     if let result { model.recordDecision(result) }
                     analyzed = true
+                    if let code { Task { await model.refreshNASResearch(code) } }
                 }.padding(.vertical, 10)
                 if analyzed {
+                    if let code, let report = model.nasResearch[code] {
+                        EditorialSection(title: "NAS 独立研究") {
+                            if let ai = report.ai {
+                                Text(ai.content).font(.subheadline).foregroundStyle(p.ink)
+                                GPDataRow(title: "来源", value: "\(ai.provider) · \(ai.model)", note: "数据截至 \(ai.asOf) · 不连接券商")
+                            } else if let factors = report.factors {
+                                GPDataRow(title: "本地因子", value: factors.state, note: "\(factors.source) · \(factors.asOf)")
+                                Text(report.providerConfigured ? "DeepSeek 尚未生成该日结论。" : "NAS 尚未配置 DeepSeek API key；当前只有可追溯的本地因子。")
+                                    .font(.caption).foregroundStyle(p.muted)
+                            } else { GPStatus(title: "NAS 尚无研究记录", detail: "等待日 K 归档与后台研究任务完成。", symbol: "clock") }
+                        }
+                    }
                     EditorialSection(title: "结论") {
                         Text(result?.title ?? "先补齐行情和证据").font(.system(.title3, design: .serif).weight(.semibold)).foregroundStyle(p.ink)
                         Text(result?.origin == "本地规则检查" ? "当前结果由本地规则整理，不是 AI 生成建议。" : "待接入 AI 服务，并为每项结论保存可追溯来源。")
@@ -385,6 +433,7 @@ private struct DecisionScreen: View {
             years = String(model.goal.years)
             budget = NSDecimalNumber(decimal: model.goal.monthlyBudget).stringValue
             limit = NSDecimalNumber(decimal: model.goal.concentrationLimit).stringValue
+            if let code { Task { await model.refreshNASResearch(code) } }
         }
     }
 }
@@ -490,15 +539,100 @@ private struct AddPositionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.gp) private var p
     @State private var code = ""; @State private var name = ""; @State private var units = ""; @State private var cost = ""; @State private var confirm = false
+    @State private var lookupStatus = "输入 6 位代码后自动查询名称"
     var body: some View {
         NavigationStack {
-            Form { Section("证券信息") { TextField("6 位场内代码", text: $code).keyboardType(.numberPad); TextField("名称", text: $name); TextField("数量", text: $units).keyboardType(.numberPad); TextField("持仓总成本", text: $cost).keyboardType(.decimalPad) }; Section { Text("只写入你确认的新场内账本。不会自动导入旧版混合资产。真实交易由你在券商完成。").font(.caption).foregroundStyle(p.muted) } }
+            Form { Section("证券信息") { TextField("6 位场内代码", text: $code).keyboardType(.numberPad); TextField("名称（自动填入）", text: $name); Text(lookupStatus).font(.caption).foregroundStyle(.secondary); TextField("数量", text: $units).keyboardType(.numberPad); TextField("持仓总成本", text: $cost).keyboardType(.decimalPad) }; Section { Text("只写入你确认的新场内账本。不会自动导入旧版混合资产。真实交易由你在券商完成。").font(.caption).foregroundStyle(p.muted) } }
                 .navigationTitle("录入持仓").navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("核对并保存") { confirm = true }.disabled(code.count != 6 || Int(units) == nil || cost.isEmpty) } }
-                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let c = try? NextMoney.parse(cost) else { return }; onSave(code, name.isEmpty ? code : name, u, c); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name.isEmpty ? "场内证券" : name) · \(units) 份 · 成本 ¥\(cost)。保存后会产生可审计记录。") }
+                .onChange(of: code) { _, value in
+                    guard value.count == 6, value.allSatisfy(\.isNumber) else { name = ""; lookupStatus = "输入 6 位代码后自动查询名称"; return }
+                    lookupStatus = "正在查询证券名称…"
+                    Task {
+                        await model.refreshQuotes(codes: [value])
+                        guard code == value else { return }
+                        if let found = model.quotes[value]?.quote.name, !found.isEmpty { name = found; lookupStatus = "名称来自行情源" }
+                        else { name = ""; lookupStatus = "名称未查到，请检查代码或稍后重试" }
+                    }
+                }
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("核对并保存") { confirm = true }.disabled(code.count != 6 || name.isEmpty || Int(units) == nil || cost.isEmpty) } }
+                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let c = try? NextMoney.parse(cost) else { return }; onSave(code, name, u, c); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份 · 成本 ¥\(cost)。保存后会产生可审计记录。") }
         }
     }
     let onSave: (String, String, Int, Decimal) -> Void
+}
+
+private struct GPTradeRequest: Identifiable {
+    let code: String
+    let side: String
+    var id: String { code + side }
+}
+
+private struct TradeEntrySheet: View {
+    @EnvironmentObject private var model: NextAppModel
+    @Environment(\.dismiss) private var dismiss
+    let request: GPTradeRequest
+    @State private var units = ""
+    @State private var price = ""
+    @State private var fee = ""
+    @State private var confirm = false
+    @State private var confirmImport = false
+    private var name: String { model.book.positions.first(where: { $0.code == request.code })?.name ?? model.quotes[request.code]?.quote.name ?? knownName(request.code) }
+    private var nameResolved: Bool { name != "场内证券" }
+    private var verifiedETF: Bool { model.rules[request.code]?.assetClass == .etf || model.quotes[request.code]?.quote.providerInstrumentType == "ETF" }
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("\(name) · \(request.code)") {
+                    Text(nameResolved ? name : "正在查询证券名称…").font(.subheadline).foregroundStyle(.secondary)
+                    TextField("成交价格", text: $price).keyboardType(.decimalPad)
+                    TextField("成交份额", text: $units).keyboardType(.numberPad)
+                    TextField("本笔手续费", text: $fee).keyboardType(.decimalPad)
+                    Text(verifiedETF ? "ETF 手续费默认每笔 ¥0.10" : "证券类别或费率尚未核实，请按券商成交记录填写手续费。")
+                    Text("仅记录已在券商完成的交易，不会发出委托。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("真实账本") {
+                    Text("可用现金 ¥\(NextMoney.text(model.book.cash))")
+                    Text("持有 \(model.book.positions.first(where: { $0.code == request.code })?.units ?? 0) 份")
+                    if request.side == "buy" && model.book.positions.allSatisfy({ $0.code != request.code }) {
+                        Button("这是已有持仓：直接补录") { confirmImport = true }
+                            .disabled(!nameResolved || Int(units) == nil || price.isEmpty)
+                        Text("补录已有持仓只记录当前总成本，不虚构历史成交或改动现金。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle(request.side == "buy" ? "记录买入" : "记录卖出")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("核对") { confirm = true }.disabled(!nameResolved || Int(units) == nil || price.isEmpty || fee.isEmpty) }
+            }
+            .confirmationDialog("确认补录真实持仓？", isPresented: $confirmImport, titleVisibility: .visible) {
+                Button("确认补录") {
+                    do {
+                        guard let count = Int(units) else { throw NextError.invalid("份额无效") }
+                        try model.addPosition(code: request.code, name: name, units: count, cost: try NextMoney.parse(price) * Decimal(count))
+                        dismiss()
+                    } catch { model.errorMessage = error.localizedDescription }
+                }
+                Button("取消", role: .cancel) { }
+            } message: { Text("\(name) \(units) 份，每份成本 ¥\(price)。只写入当前真实持仓，不虚构历史成交。") }
+            .confirmationDialog("确认写入真实交易流水？", isPresented: $confirm, titleVisibility: .visible) {
+                Button("确认记录") {
+                    do {
+                        guard let count = Int(units) else { throw NextError.invalid("份额无效") }
+                        try model.recordTrade(code: request.code, name: name, side: request.side, units: count, price: try NextMoney.parse(price), fee: try NextMoney.parse(fee))
+                        dismiss()
+                    } catch { model.errorMessage = error.localizedDescription }
+                }
+                Button("取消", role: .cancel) { }
+            } message: { Text("\(request.side == "buy" ? "买入" : "卖出") \(name) \(units) 份，价格 ¥\(price)，另计手续费 ¥\(fee)。") }
+        }.task {
+            if !nameResolved { await model.refreshQuotes(codes: [request.code]) }
+            if verifiedETF { fee = "0.10" }
+        }
+    }
 }
 
 private struct SettingsScreen: View {
@@ -506,8 +640,8 @@ private struct SettingsScreen: View {
     @Environment(\.gp) private var p
     @State private var dynamicTypeNote = false
     @State private var nasURL = ""
-    @State private var nasToken = ""
     @State private var confirmSync = false
+    @State private var confirmDownload = false
     var body: some View {
         GPPageBackground {
             VStack(alignment: .leading, spacing: 0) {
@@ -518,16 +652,20 @@ private struct SettingsScreen: View {
                 EditorialSection(title: "连接状态") { GPDataRow(title: "行情服务", value: model.status); GPDataRow(title: "NAS 服务", value: model.syncStatus); GPDataRow(title: "同步通道", value: "个人资产手动 · 行情独立 · 研究独立") }
                 EditorialSection(title: "新 NAS 连接") {
                     TextField("NAS HTTPS 地址，例如 https://nas.example.com", text: $nasURL).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).textFieldStyle(.roundedBorder)
-                    SecureField("至少 24 字符的新服务口令", text: $nasToken).textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder)
-                    HStack { Button("保存并测试") { do { try model.configureNAS(baseURL: nasURL, token: nasToken); nasToken = ""; Task { await model.probeNAS() } } catch { model.errorMessage = error.localizedDescription } }.font(.caption.weight(.semibold)); Spacer(); Button("重新检查") { Task { await model.probeNAS() } }.font(.caption) }.tint(p.forest)
-                    GPActionButton(title: "手动同步真实账本", secondary: true, systemImage: "arrow.triangle.2.circlepath") { confirmSync = true }
-                    Text("NAS 使用独立 8790 服务和新数据库；请通过受信任 HTTPS 入口连接，口令保存在系统钥匙串。同步采用修订号比较；服务端版本变化、未关联已有账本或网络异常时停止，不自动覆盖。")
+                    HStack { Button("保存并测试") { do { try model.configureNAS(baseURL: nasURL); Task { await model.probeNAS() } } catch { model.errorMessage = error.localizedDescription } }.font(.caption.weight(.semibold)); Spacer(); Button("重新检查") { Task { await model.probeNAS() } }.font(.caption) }.tint(p.forest)
+                    GPActionButton(title: "从 NAS 下载账本", secondary: true, systemImage: "arrow.down.doc") { confirmDownload = true }
+                    GPActionButton(title: "上传本机账本到 NAS", secondary: true, systemImage: "arrow.up.doc") { confirmSync = true }
+                    Text("NAS 使用独立 8786 服务和新数据库；请通过受信任 HTTPS 入口连接，无需应用口令。同步采用修订号比较；服务端版本变化、未关联已有账本或网络异常时停止，不自动覆盖。")
                         .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 EditorialSection(title: "无障碍") { Button("减少动态效果") { dynamicTypeNote = true }.font(.caption.weight(.medium)); Text("底部导航、表单、列表行和图表均提供可访问标签；页面遵循安全区并避让系统键盘。").font(.caption).foregroundStyle(p.muted) }
                 Text("观盘 Pro · 新原生账本结构").font(.caption2).foregroundStyle(p.muted).padding(.vertical, 18)
             }
         }.onAppear { nasURL = model.preferences.nasBaseURL }
+            .confirmationDialog("确认从 NAS 下载真实账本并替换本机账本？", isPresented: $confirmDownload, titleVisibility: .visible) {
+                Button("确认下载", role: .destructive) { Task { await model.downloadBookManually() } }
+                Button("取消", role: .cancel) { }
+            } message: { Text("本机数据先保存可验证的恢复副本；NAS 账本经校验后写入本机并留下审计记录。") }
             .confirmationDialog("确认把本机真实账本同步到新 NAS？", isPresented: $confirmSync, titleVisibility: .visible) {
                 Button("确认同步", role: .destructive) { Task { await model.syncBookManually() } }
                 Button("取消", role: .cancel) { }
@@ -630,15 +768,37 @@ private struct SearchSheet: View {
 private struct AlertCenterScreen: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
+    private var quietEnabled: Binding<Bool> { Binding(get: { model.preferences.notifications.quietHours.enabled }, set: { model.preferences.notifications.quietHours.enabled = $0; model.preferences = model.preferences }) }
+    private var quietStart: Binding<Int> { Binding(get: { model.preferences.notifications.quietHours.startMinute / 60 }, set: { model.preferences.notifications.quietHours.startMinute = $0 * 60; model.preferences = model.preferences }) }
+    private var quietEnd: Binding<Int> { Binding(get: { model.preferences.notifications.quietHours.endMinute / 60 }, set: { model.preferences.notifications.quietHours.endMinute = $0 * 60; model.preferences = model.preferences }) }
+    @State private var priceCode = ""
+    @State private var price = ""
+    @State private var direction: NextPriceAlertDirection = .atOrBelow
     var body: some View {
         GPPageBackground {
             EditorialSection(title: "通知记录", trailing: "去重与静默时段") {
-                Text("支持价格、均线、组合风险、限价计划、模拟结果和 NAS 数据异常。实际推送需在通知授权与服务端配置后启用。").font(.caption).foregroundStyle(p.muted)
+                Text("支持价格、均线、组合风险、限价计划、模拟结果和 NAS 数据异常。本机提醒遵循系统通知权限；NAS 的 APNs 远程推送需单独配置。").font(.caption).foregroundStyle(p.muted)
+                HStack { Button("允许本机通知") { Task { await model.requestNotificationPermission() } }; Button("发送测试提醒") { model.postLocalAlert(level: "测试", fingerprint: "local-notification-test", title: "观盘 Pro 提醒测试", detail: "这是一条本机通知测试，不代表交易信号。", stamp: NextDataStamp(source: "本机测试", observedAt: Date(), quality: .live, detail: "用户手动触发")) } }.buttonStyle(.bordered).tint(p.forest)
+                Text(model.notificationStatus).font(.caption2).foregroundStyle(p.muted)
                 if model.preferences.notifications.alerts.isEmpty { GPStatus(title: "暂无通知记录", detail: "网络或 NAS 未连接时仍可查看本机已有提醒。", symbol: "bell.slash") }
-                ForEach(model.preferences.notifications.alerts) { alert in DataPanel(title: alert.title, caption: alert.level) { Text(alert.detail).font(.subheadline); Text(alert.stamp.label(now: Date())).font(.caption2.monospaced()).foregroundStyle(p.muted) } }
+                ForEach(model.preferences.notifications.alerts) { alert in DataPanel(title: alert.title, caption: alert.level) { Text(alert.detail).font(.subheadline); Text(alert.stamp.label(now: Date())).font(.caption2.monospaced()).foregroundStyle(p.muted); Text(alert.delivery).font(.caption2).foregroundStyle(p.muted); if !alert.read { Button("标为已读") { guard let index = model.preferences.notifications.alerts.firstIndex(where: { $0.id == alert.id }) else { return }; model.preferences.notifications.alerts[index].read = true; model.preferences = model.preferences }.font(.caption.weight(.semibold)).tint(p.forest) } } }
             }
-            EditorialSection(title: "静默时段") { Text("\(model.preferences.notifications.quietHours.startMinute / 60):00 – \(model.preferences.notifications.quietHours.endMinute / 60):00").font(.subheadline); Text("静默期间通知保留在记录中，不重复弹出。").font(.caption).foregroundStyle(p.muted) }
-        }.navigationTitle("通知中心").navigationBarTitleDisplayMode(.inline)
+            EditorialSection(title: "价格提醒") {
+                HStack { TextField("代码", text: $priceCode).keyboardType(.numberPad).textFieldStyle(.roundedBorder); TextField("价格", text: $price).keyboardType(.decimalPad).textFieldStyle(.roundedBorder) }
+                Picker("条件", selection: $direction) { ForEach(NextPriceAlertDirection.allCases) { Text($0.title).tag($0) } }.pickerStyle(.segmented)
+                Button("添加价格提醒") { do { try model.addPriceAlert(code: priceCode.trimmingCharacters(in: .whitespacesAndNewlines), price: try NextMoney.parse(price), direction: direction); price = "" } catch { model.errorMessage = error.localizedDescription } }.font(.caption.weight(.semibold)).tint(p.forest)
+                if model.preferences.notifications.priceRules.isEmpty { Text("仅以新鲜行情触发；缓存行情不会触发价格提醒。添加后可在任意刷新行情时检查。") .font(.caption).foregroundStyle(p.muted) }
+                ForEach(model.preferences.notifications.priceRules) { rule in HStack { VStack(alignment: .leading, spacing: 3) { Text("\(rule.name) · \(rule.code)").font(.subheadline.weight(.semibold)); Text("\(rule.direction.title) ¥\(NextMoney.text(rule.price, digits: 4)) · \(rule.enabled ? "已启用" : "已暂停")").font(.caption).foregroundStyle(p.muted) }; Spacer(); Button(rule.enabled ? "暂停" : "启用") { guard let index = model.preferences.notifications.priceRules.firstIndex(where: { $0.id == rule.id }) else { return }; model.preferences.notifications.priceRules[index].enabled.toggle(); model.preferences = model.preferences }.font(.caption); Button("删除", role: .destructive) { model.removePriceAlert(rule.id) }.font(.caption) } }
+            }
+            EditorialSection(title: "静默时段") {
+                Toggle("在此期间只记录、不弹出", isOn: quietEnabled).tint(p.forest)
+                HStack { Picker("开始", selection: quietStart) { ForEach(0..<24, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) } }; Picker("结束", selection: quietEnd) { ForEach(0..<24, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) } } }.pickerStyle(.menu)
+                Text("\(model.preferences.notifications.quietHours.startMinute / 60):00 – \(model.preferences.notifications.quietHours.endMinute / 60):00；静默期间通知保留在记录中，不重复弹出。").font(.caption).foregroundStyle(p.muted)
+            }
+        }.navigationTitle("通知中心").navigationBarTitleDisplayMode(.inline).task {
+            if priceCode.isEmpty, let code = model.preferences.navigation.selectedSecurity { priceCode = code }
+            await model.refreshNotificationStatus()
+        }
     }
 }
 

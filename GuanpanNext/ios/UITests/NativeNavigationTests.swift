@@ -48,13 +48,15 @@ final class NativeNavigationTests: XCTestCase {
         app.launchArguments += ["-ui-testing", "1"]
         app.launch()
         app.tabBars.buttons["行情"].tap()
-        let security = app.buttons["instrument.row.159941"].firstMatch
+        let security = byId(app, "instrument.row.159941")
         XCTAssertTrue(security.waitForExistence(timeout: 5))
         security.tap()
         XCTAssertTrue(app.navigationBars["纳指 ETF"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["行情图表"].exists)
         attach(app, "instrument-detail")
-        app.buttons["chart.fullscreen"].tap()
+        let fullscreen = byId(app, "chart.fullscreen")
+        XCTAssertTrue(fullscreen.waitForExistence(timeout: 5))
+        fullscreen.tap()
         XCTAssertTrue(app.navigationBars["全屏行情分析"].waitForExistence(timeout: 5))
         attach(app, "chart-fullscreen")
         let plot = app.otherElements["chart.plot"]
@@ -70,7 +72,9 @@ final class NativeNavigationTests: XCTestCase {
         let backStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.45))
         backStart.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.45)))
         XCTAssertTrue(app.navigationBars["纳指 ETF"].waitForExistence(timeout: 5))
-        app.buttons["instrument.analyze-buy"].tap()
+        let analyzeBuy = byId(app, "instrument.analyze-buy")
+        XCTAssertTrue(analyzeBuy.waitForExistence(timeout: 5))
+        analyzeBuy.tap()
         XCTAssertTrue(app.staticTexts["私人投资顾问"].waitForExistence(timeout: 5))
         attach(app, "instrument-ai-deep-link")
     }
@@ -80,7 +84,7 @@ final class NativeNavigationTests: XCTestCase {
         app.launchArguments += ["-ui-testing", "1"]
         app.launch()
         app.tabBars.buttons["行情"].tap()
-        let row = app.buttons["instrument.row.159941"].firstMatch
+        let row = byId(app, "instrument.row.159941")
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.swipeLeft()
         let analyze = app.buttons["分析"].firstMatch

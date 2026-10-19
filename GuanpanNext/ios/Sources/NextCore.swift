@@ -300,6 +300,21 @@ struct NextChartDataset: Codable, Equatable {
             throw NextError.invalid("图表数据时间、价格或来源无效")
         }
     }
+
+    /// A live quote may supply an ETF IOPV while the minute feed supplies only
+    /// price and volume. Attach it only to the nearest same-session sample
+    /// within five minutes; it must never become a fabricated whole-day line.
+    func attachingVerifiedIOPV(_ quote: NextQuote, maximumAge: TimeInterval = 300) -> NextChartDataset {
+        guard interval == .intraday, code == quote.code, quote.providerInstrumentType == "ETF",
+              let iopv = quote.iopv, iopv > 0,
+              let index = samples.indices.min(by: { abs(samples[$0].timestamp.timeIntervalSince(quote.time)) < abs(samples[$1].timestamp.timeIntervalSince(quote.time)) }),
+              abs(samples[index].timestamp.timeIntervalSince(quote.time)) <= maximumAge else { return self }
+        var changed = samples
+        let current = changed[index]
+        changed[index] = NextChartSample(timestamp: current.timestamp, open: current.open, high: current.high, low: current.low, close: current.close, iopv: iopv, volume: current.volume)
+        return NextChartDataset(code: code, interval: interval, samples: changed, costPerUnit: costPerUnit, costObservedAt: costObservedAt,
+                                priceSource: priceSource, iopvSource: "Tencent ETF quote · 同一时段最近采样点", observedAt: observedAt)
+    }
 }
 struct NextGoal: Codable, Equatable {
     var years = 10
@@ -563,6 +578,25 @@ struct NextAlert: Codable, Identifiable, Equatable {
     var read = false
     var delivery: String = "待处理"
 }
+enum NextPriceAlertDirection: String, Codable, CaseIterable, Identifiable, Equatable {
+    case atOrAbove, atOrBelow
+    var id: String { rawValue }
+    var title: String { self == .atOrAbove ? "上涨至或高于" : "下跌至或低于" }
+}
+struct NextPriceAlertRule: Codable, Identifiable, Equatable {
+    var id = UUID()
+    let code: String
+    let name: String
+    let price: Decimal
+    let direction: NextPriceAlertDirection
+    var enabled = true
+    var isInsideTrigger = false
+    func validate() throws {
+        guard code.count == 6, code.allSatisfy(\.isNumber), !name.isEmpty, price > 0 else {
+            throw NextError.invalid("价格提醒的代码、名称或价格无效")
+        }
+    }
+}
 struct NextQuietHours: Codable, Equatable {
     var enabled = true
     var startMinute = 22 * 60
@@ -577,8 +611,18 @@ struct NextQuietHours: Codable, Equatable {
 }
 struct NextNotificationCenter: Codable, Equatable {
     var alerts: [NextAlert] = []
+    var priceRules: [NextPriceAlertRule] = []
     var quietHours = NextQuietHours()
     var dedupeMinutes = 30
+    private enum CodingKeys: String, CodingKey { case alerts, priceRules, quietHours, dedupeMinutes }
+    init() {}
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        alerts = try values.decodeIfPresent([NextAlert].self, forKey: .alerts) ?? []
+        priceRules = try values.decodeIfPresent([NextPriceAlertRule].self, forKey: .priceRules) ?? []
+        quietHours = try values.decodeIfPresent(NextQuietHours.self, forKey: .quietHours) ?? NextQuietHours()
+        dedupeMinutes = try values.decodeIfPresent(Int.self, forKey: .dedupeMinutes) ?? 30
+    }
     mutating func append(_ alert: NextAlert, now: Date) -> Bool {
         let duplicate = alerts.contains { $0.fingerprint == alert.fingerprint && now.timeIntervalSince($0.createdAt) >= 0 && now.timeIntervalSince($0.createdAt) < Double(max(0, dedupeMinutes) * 60) }
         guard !duplicate else { return false }
@@ -614,6 +658,17 @@ struct NextAuditedBook: Codable, Equatable {
 }
 
 enum NextTheme: String, Codable, CaseIterable { case system, light, dark, comfort }
+
+/// Cached NAS research is portable with the encrypted local backup, but it is
+/// never a source of truth for the real ledger and never carries an API key.
+struct NextNASResearch: Codable, Equatable {
+    struct Factor: Codable, Equatable { let code: String; let asOf: String; let source: String; let close: String; let ma20: String; let ma250: String; let state: String }
+    struct AI: Codable, Equatable { let code: String; let asOf: String; let source: String; let provider: String; let model: String; let content: String; let realOrder: Bool }
+    let factors: Factor?
+    let ai: AI?
+    let providerConfigured: Bool
+}
+
 struct NextAppArchive: Codable, Equatable {
     var schemaVersion = 1
     var book = NextBook()
@@ -629,8 +684,9 @@ struct NextAppArchive: Codable, Equatable {
     var notifications = NextNotificationCenter()
     var audits: [NextAuditEvent] = []
     var decisionHistory: [NextDecision] = []
+    var nasResearch: [String: NextNASResearch] = [:]
     var theme: NextTheme = .system
-    private enum CodingKeys: String, CodingKey { case schemaVersion, book, experiment, twins, goal, watch, navigation, cachedQuotes, chartData, instrumentRules, orderBooks, notifications, audits, decisionHistory, theme }
+    private enum CodingKeys: String, CodingKey { case schemaVersion, book, experiment, twins, goal, watch, navigation, cachedQuotes, chartData, instrumentRules, orderBooks, notifications, audits, decisionHistory, nasResearch, theme }
     init() {}
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -648,6 +704,7 @@ struct NextAppArchive: Codable, Equatable {
         notifications = try values.decodeIfPresent(NextNotificationCenter.self, forKey: .notifications) ?? NextNotificationCenter()
         audits = try values.decodeIfPresent([NextAuditEvent].self, forKey: .audits) ?? []
         decisionHistory = try values.decodeIfPresent([NextDecision].self, forKey: .decisionHistory) ?? []
+        nasResearch = try values.decodeIfPresent([String: NextNASResearch].self, forKey: .nasResearch) ?? [:]
         theme = try values.decodeIfPresent(NextTheme.self, forKey: .theme) ?? .system
     }
     func validate() throws {
@@ -661,7 +718,11 @@ struct NextAppArchive: Codable, Equatable {
         guard watch.allSatisfy({ $0.count == 6 && $0.allSatisfy(\.isNumber) }), Set(watch).count == watch.count else {
             throw NextError.invalid("自选清单校验失败")
         }
-        for (code, chart) in chartData { guard code == chart.code else { throw NextError.invalid("图表证券代码不匹配") }; try chart.validate() }
+        for (key, chart) in chartData {
+            let validKey = key == chart.code || (chart.interval == .day && key == "\(chart.code):day")
+            guard validKey else { throw NextError.invalid("图表缓存键与证券代码或周期不匹配") }
+            try chart.validate()
+        }
         for (code, rule) in instrumentRules { guard code == rule.code else { throw NextError.invalid("证券规则代码不匹配") }; try rule.validate() }
         for (code, book) in orderBooks { guard code == book.code else { throw NextError.invalid("盘口证券代码不匹配") }; try book.validate() }
         guard decisionHistory.count <= 1000,
@@ -670,6 +731,14 @@ struct NextAppArchive: Codable, Equatable {
                   Set(decision.evidence.map(\.id)).count == decision.evidence.count &&
                   (decision.selectedOption == nil || decision.options.contains(where: { $0.id == decision.selectedOption }))
               }) else { throw NextError.invalid("历史决策记录校验失败") }
+        try notifications.priceRules.forEach { try $0.validate() }
+        for (code, report) in nasResearch {
+            guard code.count == 6, code.allSatisfy(\.isNumber),
+                  report.factors.map({ $0.code == code }) ?? true,
+                  report.ai.map({ $0.code == code && !$0.realOrder && !$0.content.isEmpty }) ?? true else {
+                throw NextError.invalid("NAS 研究缓存校验失败")
+            }
+        }
     }
 }
 struct NextArchiveEnvelope: Codable, Equatable {

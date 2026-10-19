@@ -2,6 +2,7 @@
 import json
 import re
 import sqlite3
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 
@@ -93,8 +94,16 @@ class NextDatabase:
                 CREATE TABLE IF NOT EXISTS real_book_history (
                     id TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL,
                     PRIMARY KEY(id, revision));
+                CREATE TABLE IF NOT EXISTS daily_bars (code TEXT PRIMARY KEY, fetched_at TEXT NOT NULL, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS minute_archive (
+                    code TEXT NOT NULL, stamp TEXT NOT NULL, body TEXT NOT NULL, fetched_at TEXT NOT NULL,
+                    PRIMARY KEY(code, stamp));
                 CREATE TABLE IF NOT EXISTS research_runs (
                     id TEXT PRIMARY KEY, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS tracked_instruments (
+                    code TEXT PRIMARY KEY, added_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS worker_status (
+                    name TEXT PRIMARY KEY, updated_at TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS experiments (
                     id TEXT PRIMARY KEY, body TEXT NOT NULL);
             """)
@@ -130,10 +139,101 @@ class NextDatabase:
             db.execute("INSERT INTO real_book_history VALUES (?, ?, ?)", (book_id, revision, book_json))
         return revision
 
-    def put_research(self, run_id, body):
+    def get_daily(self, code):
+        self.validate_id(code)
+        if len(code) != 6 or not code.isdigit(): raise InvalidData("invalid exchange code")
+        with self.connect() as db:
+            row = db.execute("SELECT fetched_at, body FROM daily_bars WHERE code=?", (code,)).fetchone()
+        return {"code": code, "source": "Tencent newfqkline qfqday", "fetchedAt": row[0], "bars": json.loads(row[1])} if row else None
+
+    def put_daily(self, code, rows, stamp):
+        self.validate_id(code)
+        if len(code) != 6 or not code.isdigit() or not rows: raise InvalidData("invalid daily bars")
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO daily_bars VALUES (?, ?, ?)", (code, stamp, json.dumps(rows, ensure_ascii=False)))
+
+    def put_minute(self, code, rows, fetched_at):
+        self.validate_id(code)
+        if len(code) != 6 or not code.isdigit() or not isinstance(rows, list) or not rows:
+            raise InvalidData("invalid minute archive")
+        validated = []
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {"timestamp", "price", "volume", "iopv"}:
+                raise InvalidData("invalid minute row")
+            stamp, price, volume, iopv = row["timestamp"], row["price"], row["volume"], row["iopv"]
+            if not isinstance(stamp, str) or "T" not in stamp:
+                raise InvalidData("invalid minute timestamp")
+            try:
+                numeric_price = Decimal(str(price))
+                numeric_volume = Decimal(str(volume)) if volume is not None else None
+                numeric_iopv = Decimal(str(iopv)) if iopv is not None else None
+            except (InvalidOperation, ValueError):
+                raise InvalidData("invalid minute values")
+            if (not numeric_price.is_finite() or numeric_price <= 0 or
+                    (numeric_volume is not None and (not numeric_volume.is_finite() or numeric_volume < 0)) or
+                    (numeric_iopv is not None and (not numeric_iopv.is_finite() or numeric_iopv <= 0))):
+                raise InvalidData("invalid minute values")
+            # A later raw minute pull must not erase a previously verified IOPV sample.
+            validated.append((code, stamp, json.dumps(row, ensure_ascii=False), fetched_at))
+        with self.connect() as db:
+            for code, stamp, body, fetched_at in validated:
+                existing = db.execute("SELECT body FROM minute_archive WHERE code=? AND stamp=?", (code, stamp)).fetchone()
+                if existing:
+                    prior = json.loads(existing[0])
+                    incoming = json.loads(body)
+                    if incoming.get("iopv") is None and prior.get("iopv") is not None:
+                        incoming["iopv"] = prior["iopv"]
+                        body = json.dumps(incoming, ensure_ascii=False)
+                db.execute("INSERT OR REPLACE INTO minute_archive VALUES (?, ?, ?, ?)", (code, stamp, body, fetched_at))
+
+    def get_minute(self, code, day):
+        self.validate_id(code)
+        if len(code) != 6 or not code.isdigit() or not isinstance(day, str): raise InvalidData("invalid minute query")
+        try: date.fromisoformat(day)
+        except ValueError: raise InvalidData("invalid minute query")
+        with self.connect() as db:
+            rows = db.execute("SELECT body FROM minute_archive WHERE code=? AND stamp LIKE ? ORDER BY stamp",
+                              (code, day + "%")).fetchall()
+        return {"code": code, "day": day, "source": "Tencent minute query", "rows": [json.loads(row[0]) for row in rows]}
+
+    def get_research(self, run_id):
         self.validate_id(run_id)
         with self.connect() as db:
-            db.execute("INSERT INTO research_runs VALUES (?, ?)", (run_id, json.dumps(body, ensure_ascii=False)))
+            row = db.execute("SELECT body FROM research_runs WHERE id=?", (run_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def put_research(self, run_id, body):
+        self.validate_id(run_id)
+        if not isinstance(body, dict): raise InvalidData("invalid research body")
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO research_runs VALUES (?, ?)", (run_id, json.dumps(body, ensure_ascii=False)))
+
+    def track_instrument(self, code, added_at):
+        self.validate_id(code)
+        if len(code) != 6 or not code.isdigit() or not isinstance(added_at, str) or not added_at:
+            raise InvalidData("invalid tracked instrument")
+        with self.connect() as db:
+            db.execute("INSERT OR IGNORE INTO tracked_instruments VALUES (?, ?)", (code, added_at))
+
+    def tracked_instruments(self):
+        with self.connect() as db:
+            rows = db.execute("SELECT code FROM tracked_instruments ORDER BY added_at, code").fetchall()
+        return [row[0] for row in rows]
+
+    def put_worker_status(self, name, updated_at, state, detail):
+        if not isinstance(name, str) or re.fullmatch(r"[a-z-]{1,40}", name) is None:
+            raise InvalidData("invalid worker name")
+        if state not in ("starting", "idle", "ok", "degraded") or not isinstance(updated_at, str) or not updated_at:
+            raise InvalidData("invalid worker status")
+        if not isinstance(detail, str) or len(detail) > 500:
+            raise InvalidData("invalid worker detail")
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO worker_status VALUES (?, ?, ?, ?)", (name, updated_at, state, detail))
+
+    def worker_status(self):
+        with self.connect() as db:
+            rows = db.execute("SELECT name, updated_at, state, detail FROM worker_status ORDER BY name").fetchall()
+        return [{"name": row[0], "updatedAt": row[1], "state": row[2], "detail": row[3]} for row in rows]
 
     def put_experiment(self, experiment_id, body):
         self.validate_id(experiment_id)

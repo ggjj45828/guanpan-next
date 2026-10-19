@@ -39,12 +39,11 @@ jobs:
           xcodegen generate
           ls -la
 
-      # 核心逻辑测试不阻断出包：这份源码是首版，测试断言与实现可能还有分歧，
-      # 先保证能拿到可安装的 IPA，测试结论单独看日志。
-      - name: Core logic tests (non-blocking)
-        continue-on-error: true
+      - name: Core logic tests
         working-directory: GuanpanNext/ios
-        run: swift test --parallel 2>&1 | tail -80
+        run: |
+          set -o pipefail
+          swift test --parallel 2>&1 | tee build-core-tests.log
 
       - name: Build unsigned device app
         working-directory: GuanpanNext/ios
@@ -76,25 +75,29 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent Payload ../GuanpanNext-unsigned.ipa
           unzip -l ../GuanpanNext-unsigned.ipa | tail -15
 
-      # 模拟器 UI 测试留作证据，失败不影响 IPA。设备名按 runner 实际可用机型动态挑，
-      # 写死 "iPhone Air" / "iPhone 17" 在旧镜像上根本不存在，会让整个 workflow 卡在这里。
-      - name: UI smoke test on available simulator (non-blocking)
+      # 模拟器 UI 测试失败不阻断出包。这套工程的工具栏入口在无障碍树里登记不稳定，
+      # 已经出现过「按钮确实在屏上、但 XCUITest 按 id/label 都查不到」；
+      # 出包和 UI 断言是两件事，先保证能拿到 IPA，测试结论单独看日志。
+      - name: UI navigation and gesture tests on available simulator
         continue-on-error: true
         working-directory: GuanpanNext/ios
         run: |
+          set -o pipefail
           mkdir -p build
-          DEVICE="$(xcrun simctl list devices available | grep -oE 'iPhone [A-Za-z0-9 ]+' | head -1 | sed 's/[[:space:]]*$//')"
-          if [ -z "$DEVICE" ]; then
+          DEVICE_ID="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((v["udid"] for group in d["devices"].values() for v in group if v.get("isAvailable") and v.get("name", "").startswith("iPhone")), ""))')"
+          if [ -z "$DEVICE_ID" ]; then
             echo "runner 上没有可用 iPhone 模拟器，跳过"
             exit 0
           fi
-          echo "使用模拟器: $DEVICE"
+          echo "使用模拟器 UDID: $DEVICE_ID"
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
           xcodebuild test \
             -project GuanpanNext.xcodeproj \
             -scheme GuanpanNext \
-            -destination "platform=iOS Simulator,name=$DEVICE" \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
             -resultBundlePath build/sim.xcresult \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tail -80
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee build-ui-tests.log
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
@@ -106,10 +109,12 @@ jobs:
 
       - name: Upload test evidence
         if: always()
-        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: guanpan-next-test-evidence
-          path: GuanpanNext/ios/build/sim.xcresult
-          if-no-files-found: ignore
+          path: |
+            GuanpanNext/ios/build/sim.xcresult
+            GuanpanNext/ios/build-ui-tests.log
+            GuanpanNext/ios/build-core-tests.log
+          if-no-files-found: warn
           retention-days: 14

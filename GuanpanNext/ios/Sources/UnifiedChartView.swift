@@ -14,12 +14,23 @@ struct UnifiedChartView: View {
     var expanded = false
     @State private var magnification = 1.0
     @State private var pinchBase: Double?
-    @State private var visibleLayers: Set<String> = ["price", "volume", "iopv", "cost"]
-    private var activeDataset: NextChartDataset? { dataset?.interval == interval.wrappedValue ? dataset : nil }
+    @State private var visibleLayers: Set<String> = ["price", "volume", "iopv", "cost", "average", "previous", "ma5", "ma20", "ma250", "trades", "range"]
+    private var activeDataset: NextChartDataset? {
+        guard let dataset else { return nil }
+        return (interval.wrappedValue == .intraday ? dataset.interval == .intraday : dataset.interval == .day) ? dataset : nil
+    }
 
     private var samples: [NextChartSample] {
         guard let all = activeDataset?.orderedSamples, !all.isEmpty else { return [] }
-        let count = max(2, Int(Double(all.count) / max(1, magnification)))
+        let window: Int
+        switch interval.wrappedValue {
+        case .fiveDay, .week: window = 5
+        case .month: window = 22
+        case .threeMonth: window = 66
+        case .year: window = 252
+        case .intraday, .day, .all: window = all.count
+        }
+        let count = max(2, Int(Double(min(all.count, window)) / max(1, magnification)))
         return Array(all.suffix(count))
     }
     private var visibleTimeDomain: ClosedRange<Date>? {
@@ -67,12 +78,17 @@ struct UnifiedChartView: View {
                     layerButton("成交量", key: "volume", available: samples.contains(where: { $0.volume != nil }))
                     layerButton("IOPV", key: "iopv", available: activeDataset?.iopvSource != nil)
                     layerButton("成本线", key: "cost", available: costPerUnit != nil)
-                    layerButton("MA5", key: "ma5", available: samples.count >= 5)
-                    layerButton("MA20", key: "ma20", available: samples.count >= 20)
+                    layerButton("MA5", key: "ma5", available: (activeDataset?.orderedSamples.count ?? 0) >= 5)
+                    layerButton("MA20", key: "ma20", available: (activeDataset?.orderedSamples.count ?? 0) >= 20)
+                    layerButton("MA250", key: "ma250", available: activeDataset?.interval == .day && (activeDataset?.orderedSamples.count ?? 0) >= 250)
+                    layerButton("均价", key: "average", available: activeDataset?.interval == .intraday && samples.contains(where: { $0.volume != nil }))
+                    layerButton("昨收", key: "previous", available: activeDataset?.interval == .intraday && securityCode.flatMap { model.quotes[$0]?.quote.previousClose } != nil)
+                    layerButton("B/S", key: "trades", available: securityCode.map { code in model.book.fills.contains(where: { $0.code == code }) } ?? false)
+                    layerButton("高低", key: "range", available: true)
                 }
             }
             if samples.isEmpty {
-                GPStatus(title: dataset == nil ? "暂无可绘制行情" : "该周期暂无历史数据", detail: dataset == nil ? "接入经过验证的行情源并取得历史数据后，价格、IOPV 和成交量会共用这套图表模型。" : "当前已缓存数据周期为“\(label(dataset!.interval))”。选择对应周期查看；不会把其他周期的数据冒充为本周期。", symbol: "chart.xyaxis.line")
+                GPStatus(title: dataset == nil ? "暂无可绘制行情" : "该周期暂无历史数据", detail: dataset == nil ? "分时由手机读取，日 K 由 NAS 归档后下载；离线时显示已有缓存。" : "当前数据周期为“\(label(dataset!.interval))”。切换日 K 或分时查看；不会把其他周期的数据冒充为本周期。", symbol: "chart.xyaxis.line")
                     .frame(height: expanded ? 430 : 250)
             } else {
                 GeometryReader { geometry in
@@ -97,10 +113,21 @@ struct UnifiedChartView: View {
                         .accessibilityAction(named: "上一个数据点") { moveCrosshair(-1) }
                         .accessibilityAction(named: "下一个数据点") { moveCrosshair(1) }
                 }.frame(height: expanded ? 430 : 250)
-                HStack(spacing: 13) {
-                    legend("价格", color: p.forest)
-                    if activeDataset?.iopvSource != nil { legend("IOPV 溢折价（右轴）", color: p.terracotta) }
-                    if costPerUnit != nil { legend("持仓成本", color: p.muted) }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        legend("价格", color: p.forest)
+                        if visibleLayers.contains("average") && activeDataset?.interval == .intraday { legend("均价", color: .orange) }
+                        if visibleLayers.contains("ma5") && activeDataset?.interval == .day { legend("MA5", color: p.terracotta) }
+                        if visibleLayers.contains("ma20") && activeDataset?.interval == .day { legend("MA20", color: p.jade) }
+                        if visibleLayers.contains("ma250") && activeDataset?.interval == .day { legend("MA250", color: .blue) }
+                        if visibleLayers.contains("previous") && activeDataset?.interval == .intraday { legend("昨收", color: p.muted) }
+                        if activeDataset?.iopvSource != nil { legend("IOPV 右轴", color: p.terracotta) }
+                        if costPerUnit != nil { legend("成本", color: .purple) }
+                        if visibleLayers.contains("trades") { legend("B 买 / S 卖", color: p.jade) }
+                        if visibleLayers.contains("range") { legend("可视高低", color: p.muted) }
+                    }
+                }
+                HStack {
                     Spacer(minLength: 0)
                     if let point = selectedSample {
                         VStack(alignment: .trailing, spacing: 3) {
@@ -161,22 +188,67 @@ struct UnifiedChartView: View {
             }
             context.stroke(iopvPath, with: .color(p.terracotta), style: StrokeStyle(lineWidth: 1.3, dash: [4, 3]))
         }
-        for (key, period, color) in [("ma5", 5, p.terracotta), ("ma20", 20, p.jade)] where visibleLayers.contains(key) && samples.count >= period {
-            var path = Path()
-            for index in samples.indices {
-                let start = max(0, index - period + 1)
-                let window = samples[start...index]
-                let average = window.reduce(Decimal.zero) { $0 + $1.close } / Decimal(window.count)
-                let point = CGPoint(x: x(samples[index].timestamp), y: priceY(average))
-                if index == start { path.move(to: point) } else { path.addLine(to: point) }
+        // Moving averages include earlier bars outside the zoom window.
+        let fullSamples = dataset.orderedSamples
+        let cumulative = fullSamples.reduce(into: [Decimal.zero]) { sums, sample in sums.append(sums.last! + sample.close) }
+        for (key, period, color, width) in [("ma5", 5, p.terracotta, 1.35), ("ma20", 20, p.jade, 1.25), ("ma250", 250, Color.blue, 1.45)]
+        where visibleLayers.contains(key) && fullSamples.count >= period && (key != "ma250" || dataset.interval == .day) {
+            var path = Path(); var started = false
+            for (index, point) in fullSamples.enumerated() where index >= period - 1 && point.timestamp >= time.lowerBound && point.timestamp <= time.upperBound {
+                let average = (cumulative[index + 1] - cumulative[index + 1 - period]) / Decimal(period)
+                let position = CGPoint(x: x(point.timestamp), y: priceY(average))
+                if !started { path.move(to: position); started = true } else { path.addLine(to: position) }
             }
-            context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
+            context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round))
+        }
+        func referenceLine(_ value: Decimal, color: Color, title: String, dash: [CGFloat]) {
+            let y = priceY(value)
+            guard y >= plot.minY && y <= plot.maxY else { return }
+            var path = Path(); path.move(to: CGPoint(x: plot.minX, y: y)); path.addLine(to: CGPoint(x: plot.maxX, y: y))
+            context.stroke(path, with: .color(color.opacity(0.8)), style: StrokeStyle(lineWidth: 0.9, dash: dash))
+            context.draw(Text(title).font(.system(size: 8, weight: .medium, design: .monospaced)).foregroundColor(color),
+                         at: CGPoint(x: plot.maxX - 44, y: max(plot.minY + 9, min(plot.maxY - 9, y - 8))))
+        }
+        if visibleLayers.contains("previous"), dataset.interval == .intraday, let code = securityCode,
+           let quote = model.quotes[code]?.quote, let first = samples.first,
+           Calendar(identifier: .gregorian).isDate(quote.time, inSameDayAs: first.timestamp) {
+            let previous = quote.previousClose
+            referenceLine(previous, color: p.muted, title: "昨收 ¥\(NextMoney.text(previous, digits: 3))", dash: [3, 3])
+        }
+        if visibleLayers.contains("average"), dataset.interval == .intraday {
+            var cumulativePrice = Decimal.zero; var cumulativeVolume = Decimal.zero; var averagePath = Path(); var started = false
+            for point in samples {
+                guard let volume = point.volume, volume > 0 else { continue }
+                cumulativePrice += point.close * volume; cumulativeVolume += volume
+                let position = CGPoint(x: x(point.timestamp), y: priceY(cumulativePrice / cumulativeVolume))
+                if !started { averagePath.move(to: position); started = true } else { averagePath.addLine(to: position) }
+            }
+            if started { context.stroke(averagePath, with: .color(.orange), style: StrokeStyle(lineWidth: 1.4, lineCap: .round)) }
+        }
+        if visibleLayers.contains("range"), let highest = samples.compactMap({ $0.high ?? $0.close }).max(),
+           let lowest = samples.compactMap({ $0.low ?? $0.close }).min() {
+            referenceLine(highest, color: p.muted, title: "高 ¥\(NextMoney.text(highest, digits: 3))", dash: [1, 5])
+            referenceLine(lowest, color: p.muted, title: "低 ¥\(NextMoney.text(lowest, digits: 3))", dash: [1, 5])
+        }
+        if visibleLayers.contains("trades"), let code = securityCode {
+            for fill in model.book.fills where fill.code == code {
+                var marketCalendar = Calendar(identifier: .gregorian)
+                marketCalendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+                let stamp = dataset.interval == .day ? marketCalendar.startOfDay(for: fill.date) : fill.date
+                guard stamp >= time.lowerBound, stamp <= time.upperBound,
+                      fill.price >= domain.lowerBound, fill.price <= domain.upperBound else { continue }
+                let center = CGPoint(x: x(stamp), y: priceY(fill.price))
+                let buy = fill.side == "buy"
+                let color = buy ? p.jade : p.terracotta
+                context.fill(Path(ellipseIn: CGRect(x: center.x - 7, y: center.y - 7, width: 14, height: 14)), with: .color(color))
+                context.draw(Text(buy ? "B" : "S").font(.system(size: 9, weight: .bold)).foregroundColor(.white), at: center)
+            }
         }
         if visibleLayers.contains("cost"), let cost = costPerUnit {
             let y = priceY(cost)
             if y >= plot.minY && y <= plot.maxY {
                 var costPath = Path(); costPath.move(to: CGPoint(x: plot.minX, y: y)); costPath.addLine(to: CGPoint(x: plot.maxX, y: y))
-                context.stroke(costPath, with: .color(p.muted), style: StrokeStyle(lineWidth: 1, dash: [5, 3]))
+                context.stroke(costPath, with: .color(.purple), style: StrokeStyle(lineWidth: 1.2, dash: [6, 3]))
             } else {
                 let labelY = cost < domain.lowerBound ? plot.maxY : plot.minY
                 context.draw(Text("成本线超出本段价格轴 · ¥\(NextMoney.text(cost, digits: 3))").font(.system(size: 8, weight: .medium)).foregroundColor(p.muted), at: CGPoint(x: plot.midX, y: labelY))
@@ -196,11 +268,11 @@ struct UnifiedChartView: View {
             var cross = Path(); cross.move(to: CGPoint(x: crossX, y: plot.minY)); cross.addLine(to: CGPoint(x: crossX, y: plot.maxY))
             context.stroke(cross, with: .color(p.terracotta), style: StrokeStyle(lineWidth: 0.8, dash: [3, 3]))
         }
-        context.draw(Text("\(time.lowerBound.formatted(date: .omitted, time: .shortened))").font(.system(size: 8, design: .monospaced)).foregroundColor(p.muted), at: CGPoint(x: plot.minX + 12, y: size.height - 5))
-        context.draw(Text("\(time.upperBound.formatted(date: .omitted, time: .shortened))").font(.system(size: 8, design: .monospaced)).foregroundColor(p.muted), at: CGPoint(x: plot.maxX - 12, y: size.height - 5))
+        context.draw(Text("\(time.lowerBound.formatted(date: dataset.interval == .day ? .abbreviated : .omitted, time: dataset.interval == .day ? .omitted : .shortened))").font(.system(size: 8, design: .monospaced)).foregroundColor(p.muted), at: CGPoint(x: plot.minX + 12, y: size.height - 5))
+        context.draw(Text("\(time.upperBound.formatted(date: dataset.interval == .day ? .abbreviated : .omitted, time: dataset.interval == .day ? .omitted : .shortened))").font(.system(size: 8, design: .monospaced)).foregroundColor(p.muted), at: CGPoint(x: plot.maxX - 12, y: size.height - 5))
     }
 
-    private func label(_ interval: NextChartInterval) -> String { switch interval { case .intraday: "分时"; case .fiveDay: "5日"; case .day: "日K"; case .week: "周K"; case .month: "月K"; case .threeMonth: "3月"; case .year: "1年"; case .all: "全部" } }
+    private func label(_ interval: NextChartInterval) -> String { switch interval { case .intraday: "分时"; case .fiveDay: "5日"; case .day: "日K"; case .week: "近1周"; case .month: "近1月"; case .threeMonth: "近3月"; case .year: "近1年"; case .all: "全部" } }
     private func restoreChartState() {
         guard let securityCode else { return }
         let state = model.chartState(for: securityCode)
@@ -226,8 +298,17 @@ struct UnifiedChartView: View {
     }
     private func layerButton(_ title: String, key: String, available: Bool) -> some View {
         let active = visibleLayers.contains(key)
+        let indicatorColor: Color
+        switch key {
+        case "ma5", "iopv": indicatorColor = p.terracotta
+        case "ma20", "trades": indicatorColor = p.jade
+        case "ma250": indicatorColor = .blue
+        case "average": indicatorColor = .orange
+        case "cost": indicatorColor = .purple
+        default: indicatorColor = p.forest
+        }
         return Button { if active { visibleLayers.remove(key) } else { visibleLayers.insert(key) } } label: {
-            Text(title).font(.system(size: 9, weight: active ? .semibold : .regular)).foregroundStyle(!available ? p.muted.opacity(0.45) : active ? p.forest : p.muted)
+            Text(title).font(.system(size: 9, weight: active ? .semibold : .regular)).foregroundStyle(!available ? p.muted.opacity(0.45) : active ? indicatorColor : p.muted)
                 .padding(.horizontal, 8).padding(.vertical, 5).background(active ? p.tint : .clear, in: Capsule())
         }.buttonStyle(.plain).disabled(!available).accessibilityLabel("\(title)指标\(!available ? "不可用" : active ? "已显示" : "已隐藏")")
     }

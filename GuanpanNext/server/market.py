@@ -72,3 +72,41 @@ def fetch_tencent_quotes(codes):
     if not result:
         raise ValueError("quote response had no validated matching records")
     return result
+
+
+def parse_daily_bars(body, code):
+    """Validate Tencent qfqday records; never synthesize OHLC from minute data."""
+    import json
+    from datetime import date
+    symbol = symbol_for(code)
+    start, end = body.find("{"), body.rfind("}")
+    if start < 0 or end < start: raise ValueError("invalid daily response")
+    node = json.loads(body[start:end + 1]).get("data", {}).get(symbol, {})
+    rows = node.get("qfqday")
+    if not isinstance(rows, list): raise ValueError("daily bars missing")
+    result = {}
+    for row in rows:
+        if not isinstance(row, list) or len(row) < 6: continue
+        try:
+            business_day = date.fromisoformat(row[0])
+            open_, close, high, low, volume = (Decimal(str(v)) for v in row[1:6])
+            if (business_day > datetime.now(ZoneInfo("Asia/Shanghai")).date() or
+                    any(not n.is_finite() for n in (open_, close, high, low, volume)) or
+                    min(open_, close, high, low) <= 0 or volume < 0 or
+                    low > min(open_, close) or high < max(open_, close)):
+                continue
+            result[str(business_day)] = {"date": str(business_day), "open": str(open_),
+                "close": str(close), "high": str(high), "low": str(low), "volume": str(volume)}
+        except (ValueError, InvalidOperation, TypeError): continue
+    if not result: raise ValueError("no validated daily bars")
+    return [result[key] for key in sorted(result)]
+
+
+def fetch_tencent_daily(code):
+    symbol = symbol_for(code)
+    url = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get?" + urlencode({"param": f"{symbol},day,,,640,qfq"})
+    request = Request(url, headers={"Accept": "application/json", "User-Agent": "GuanpanProNext/3", "Referer": "https://gu.qq.com/"})
+    with urlopen(request, timeout=12) as response:
+        if response.status != 200: raise OSError("daily source unavailable")
+        raw = response.read(2_000_000).decode("utf-8", errors="strict")
+    return parse_daily_bars(raw, code)
