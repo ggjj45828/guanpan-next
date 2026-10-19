@@ -89,7 +89,7 @@ private struct PrimaryNavigation<Content: View>: View {
                         .accessibilityLabel("全局搜索证券")
                         .accessibilityIdentifier("search.open")
                         .accessibilityAddTraits(.isButton)
-                        NavigationLink(value: GPRoute.settings) {
+                        Button { path.append(.settings) } label: {
                             Label("设置", systemImage: "slider.horizontal.3").labelStyle(.iconOnly)
                                 .frame(width: 44, height: 44).contentShape(Rectangle())
                         }
