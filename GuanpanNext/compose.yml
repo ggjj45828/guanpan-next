@@ -1,0 +1,13 @@
+services:
+  guanpan-next:
+    build: ./server
+    ports:
+      - "127.0.0.1:8790:8790"
+    environment:
+      GUANPAN_NEXT_TOKEN: ${GUANPAN_NEXT_TOKEN:?请配置至少24字符的新服务口令}
+      GUANPAN_NEXT_DATA: /data
+    volumes:
+      - guanpan_next_data:/data
+    restart: unless-stopped
+volumes:
+  guanpan_next_data:
