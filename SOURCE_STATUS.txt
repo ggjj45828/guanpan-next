@@ -1,0 +1,10 @@
+观盘 Pro 全新原生工程源码状态
+
+已设计：方向 A「东方编辑室」主视觉与 B 专业数据布局融合规范；页面架构、流程、异常态与验收矩阵见 GuanpanNext/PRODUCT_REDESIGN_REVIEW.md。
+已编码：独立 SwiftUI 工程、五个主页面及详情/设置/异常流、场内账本与隔离模拟数据模型、新 NAS 服务端、统一图表、行情接入骨架、备份恢复、跨页搜索。
+已测试：NAS 服务端 Python 测试 17 项通过；工作流 YAML 可解析；Swift 改动完成空白检查。
+未测试：当前环境无 Xcode/Swift，原生工程、XCTest、UI 自动化和模拟器未编译或运行。
+未实机验证：iPhone Air 和其它 iPhone 设备尚无真实运行证据。
+未交付：IPA 尚未生成。本包是当前源码快照，不代表 App 已完成验收。
+
+构建方式：仓库中的 .github/workflows/guanpan-next-ios.yml 使用 macOS runner 执行 Swift/Xcode 构建、模拟器测试和未签名 IPA 打包。
