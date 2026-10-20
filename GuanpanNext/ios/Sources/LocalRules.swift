@@ -652,7 +652,7 @@ enum NextAccountAdvisor {
         var priced: [(position: NextPosition, value: Double, price: Double)] = []
         var missing: [NextPosition] = []
         for position in holdings {
-            guard let quote = quotes[position.code]?.quote, quote.price > 0 else { missing.append(position); continue }
+            guard let quote = quotes[position.code], quote.price > 0 else { missing.append(position); continue }
             let price = NextNum.double(quote.price)
             priced.append((position, price * Double(position.units), price))
         }
