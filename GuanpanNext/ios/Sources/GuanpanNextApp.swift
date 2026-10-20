@@ -1558,6 +1558,39 @@ private struct DecisionHistoryScreen: View {
     }
 }
 
+// 单独成 struct 而不是留在 ForEach 闭包里：原来 HStack + 多个 GPDataRow +
+// 三处 isEstimated 三元表达式挤在同一个表达式里，编译器类型检查直接超时
+// （error: unable to type-check this expression in reasonable time）。
+private struct DividendEventRow: View {
+    @Environment(\.gp) private var p
+    let event: NextETFDividendEvent
+
+    private var estimated: Bool { event.isEstimated == true }
+    private var statusText: String { estimated ? "复权行情估算 · 未核实" : "历史派息数据 · 非到账凭证" }
+    private var statusSymbol: String { estimated ? "function" : "checkmark.seal" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                NavigationLink(value: GPRoute.instrument(event.code)) {
+                    Text(event.code).font(.subheadline.weight(.semibold)).foregroundStyle(p.forest)
+                }
+                Spacer()
+                Text("¥\(NextMoney.text(event.amountPerShare, digits: 4))/份")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(p.ink)
+            }
+            GPDataRow(title: "除息日", value: event.date)
+            if let record = event.recordDate { GPDataRow(title: "权益登记日", value: record) }
+            if let pay = event.payDate { GPDataRow(title: "现金发放日", value: pay) }
+            Label(statusText, systemImage: statusSymbol)
+                .font(.caption2)
+                .foregroundStyle(estimated ? p.terracotta : p.muted)
+        }
+        .padding(.vertical, 9)
+    }
+}
+
 private struct DividendHistoryScreen: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
@@ -1584,19 +1617,7 @@ private struct DividendHistoryScreen: View {
                     GPStatus(title: "暂无已缓存派息事件", detail: "联网或 NAS 可用时会尝试更新；离线时保留本机记录。估算事件会单独标注，不作为已确认分红。", symbol: "calendar.badge.clock")
                 }
                 ForEach(events) { event in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(alignment: .firstTextBaseline) {
-                            NavigationLink(value: GPRoute.instrument(event.code)) { Text(event.code).font(.subheadline.weight(.semibold)).foregroundStyle(p.forest) }
-                            Spacer()
-                            Text("¥\(NextMoney.text(event.amountPerShare, digits: 4))/份").font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(p.ink)
-                        }
-                        GPDataRow(title: "除息日", value: event.date)
-                        if let record = event.recordDate { GPDataRow(title: "权益登记日", value: record) }
-                        if let pay = event.payDate { GPDataRow(title: "现金发放日", value: pay) }
-                        Label(event.isEstimated == true ? "复权行情估算 · 未核实" : "历史派息数据 · 非到账凭证", systemImage: event.isEstimated == true ? "function" : "checkmark.seal")
-                            .font(.caption2).foregroundStyle(event.isEstimated == true ? p.terracotta : p.muted)
-                    }
-                    .padding(.vertical, 9)
+                    DividendEventRow(event: event)
                     if event.id != events.last?.id { Divider().overlay(p.rule) }
                 }
             }
@@ -1652,6 +1673,24 @@ private struct BackupRestoreScreen: View {
     }
 }
 
+// 与 DividendEventRow 同理：ForEach 闭包里塞 GPDataRow + Divider 会让内容推断失败，
+// 编译器退到 TableRowBuilder 重载并报 generic parameter 'V' could not be inferred。
+private struct TwinBacktestFillRow: View {
+    @Environment(\.gp) private var p
+    let fill: NextTwinBacktest.Fill
+    private var sideText: String { fill.side == "buy" ? "买入" : "卖出" }
+    var body: some View {
+        VStack(spacing: 0) {
+            GPDataRow(
+                title: "\(fill.date) · \(fill.code)",
+                value: "\(sideText) \(fill.units) 份",
+                note: "¥\(fill.price) · 费用 ¥\(fill.fee) · 成交额 ¥\(fill.gross)"
+            )
+            Divider().overlay(p.rule)
+        }
+    }
+}
+
 private struct TwinDetailScreen: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
@@ -1687,9 +1726,8 @@ private struct TwinDetailScreen: View {
                     if run.fills.isEmpty { Text("该区间内策略没有成交；曲线仍包含现金余额和共同外部资金流。").font(.caption).foregroundStyle(p.muted) }
                     else {
                         LazyVStack(spacing: 0) {
-                            ForEach(run.fills, id: \.id) { fill in
-                                GPDataRow(title: "\(fill.date) · \(fill.code)", value: "\(fill.side == "buy" ? "买入" : "卖出") \(fill.units) 份", note: "¥\(fill.price) · 费用 ¥\(fill.fee) · 成交额 ¥\(fill.gross)")
-                                Divider().overlay(p.rule)
+                            ForEach(run.fills) { fill in
+                                TwinBacktestFillRow(fill: fill)
                             }
                         }
                     }
