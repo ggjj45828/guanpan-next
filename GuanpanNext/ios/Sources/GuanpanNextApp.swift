@@ -1618,7 +1618,7 @@ private struct DividendHistoryScreen: View {
                 }
                 ForEach(events) { event in
                     DividendEventRow(event: event)
-                    if event.id != events.last?.id { Divider().overlay(p.rule) }
+                    if event.id != events.last?.id { Divider().overlay(p.line) }
                 }
             }
         }
@@ -1686,7 +1686,7 @@ private struct TwinBacktestFillRow: View {
                 value: "\(sideText) \(fill.units) 份",
                 note: "¥\(fill.price) · 费用 ¥\(fill.fee) · 成交额 ¥\(fill.gross)"
             )
-            Divider().overlay(p.rule)
+            Divider().overlay(p.line)
         }
     }
 }
