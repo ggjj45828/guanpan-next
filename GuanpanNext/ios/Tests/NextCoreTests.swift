@@ -444,6 +444,113 @@ final class NextCoreTests: XCTestCase {
         let far = NextQuote(code: "159941", name: "纳指ETF", price: 1.21, previousClose: 1.2, time: now.addingTimeInterval(500), source: "quote", iopv: 1.205, providerInstrumentType: "ETF")
         XCTAssertEqual(raw.attachingVerifiedIOPV(far), raw)
     }
+    // MARK: - 本机规则引擎
+
+    private func dailyBars(_ closes: [Double], start: Date? = nil) -> [NextChartSample] {
+        let base = start ?? Date(timeIntervalSince1970: 1_700_000_000)
+        return closes.enumerated().map { index, value in
+            let price = Decimal(string: String(format: "%.4f", value))!
+            return NextChartSample(timestamp: base.addingTimeInterval(Double(index) * 86_400),
+                                   open: price, high: price, low: price, close: price,
+                                   iopv: nil, volume: 1_000_000)
+        }
+    }
+
+    func testDividendPointsAreMonotonicAndNeverNegative() {
+        XCTAssertEqual(NextDividendRules.points(forYieldPercent: nil), 0)
+        XCTAssertEqual(NextDividendRules.points(forYieldPercent: 0), 0)
+        XCTAssertEqual(NextDividendRules.points(forYieldPercent: 1.9), 0)
+        XCTAssertEqual(NextDividendRules.points(forYieldPercent: 2.5), 2)
+        XCTAssertEqual(NextDividendRules.points(forYieldPercent: 3.5), 5)
+        XCTAssertEqual(NextDividendRules.points(forYieldPercent: 4.5), 8)
+        XCTAssertEqual(NextDividendRules.points(forYieldPercent: 5.5), 11)
+        XCTAssertEqual(NextDividendRules.points(forYieldPercent: 9), 14)
+    }
+
+    func testDividendYieldPrefersIOPVForOnExchangeETFOnly() {
+        // ETF：分母用净值。场内溢价 25% 时，若用场内价会低估股息率。
+        let etf = NextDividendRules.yieldPercent(code: "515180", perShare: Decimal(string: "0.06")!, price: 1.25, iopv: 1.0)
+        XCTAssertEqual(etf ?? 0, 6, accuracy: 0.0001)
+        // 个股：没有 IOPV 概念，分母用现价。
+        let stock = NextDividendRules.yieldPercent(code: "600519", perShare: Decimal(string: "0.06")!, price: 1.25, iopv: 1.0)
+        XCTAssertEqual(stock ?? 0, 4.8, accuracy: 0.0001)
+        // REITs（508/180）不在 ETF 白名单，不能被当作 ETF 套 IOPV。
+        XCTAssertFalse(NextDividendRules.isOnExchangeETF("508000"))
+        XCTAssertFalse(NextDividendRules.isOnExchangeETF("180101"))
+        XCTAssertTrue(NextDividendRules.isOnExchangeETF("159941"))
+        XCTAssertTrue(NextDividendRules.isOnExchangeETF("515180"))
+    }
+
+    func testWorthBuyNeedsEnoughDailyBars() {
+        let quotePrice = Decimal(string: "1.20")!
+        let short = dailyBars(Array(repeating: 1.2, count: 12))
+        XCTAssertNil(NextWorthBuyEngine.evaluate(code: "159941", price: quotePrice, previousClose: quotePrice,
+                                                 samples: short, dividendPerShare: 0, iopv: nil,
+                                                 costPerUnit: nil, weightPercent: nil, positionLimitPercent: nil))
+        let enough = dailyBars(Array(repeating: 1.2, count: 40))
+        XCTAssertNotNil(NextWorthBuyEngine.evaluate(code: "159941", price: quotePrice, previousClose: quotePrice,
+                                                    samples: enough, dividendPerShare: 0, iopv: nil,
+                                                    costPerUnit: nil, weightPercent: nil, positionLimitPercent: nil))
+        // 40 根平盘样本：均线全部交织、无动量，分数必须落在合法区间且不被抬高。
+        let signal = NextSignalEngine.evaluate(enough)
+        XCTAssertNotNil(signal)
+        XCTAssertTrue((signal?.score ?? -1) >= 0 && (signal?.score ?? 101) <= 100)
+        XCTAssertEqual(signal?.trend, "均线交织 · 震荡")
+    }
+
+    func testIncomePlayDampensSameDayChangePenalty() {
+        let bars = dailyBars(Array(repeating: 1.0, count: 40))
+        let price = Decimal(string: "0.97")!
+        let previous = Decimal(string: "1.0")!
+        let plain = NextWorthBuyEngine.evaluate(code: "159941", price: price, previousClose: previous,
+                                                samples: bars, dividendPerShare: 0, iopv: nil,
+                                                costPerUnit: nil, weightPercent: nil, positionLimitPercent: nil)
+        let income = NextWorthBuyEngine.evaluate(code: "515180", price: price, previousClose: previous,
+                                                 samples: bars, dividendPerShare: Decimal(string: "0.04")!,
+                                                 iopv: nil, costPerUnit: nil, weightPercent: nil, positionLimitPercent: nil)
+        XCTAssertNotNil(plain)
+        XCTAssertNotNil(income)
+        XCTAssertTrue(income?.isIncomePlay == true)
+        // 当天跌 3%：普通标的按 -8 计，红利标的只按 -2.67 计。
+        let plainChange = plain?.lines.first(where: { $0.title == "当日涨跌" })?.points ?? 0
+        let incomeChange = income?.lines.first(where: { $0.title == "当日涨跌" })?.points ?? 0
+        XCTAssertEqual(plainChange, -8)
+        XCTAssertTrue(incomeChange > plainChange)
+    }
+
+    func testGridCheckRefusesToGradeWithTooFewBars() {
+        let bars = dailyBars(Array(repeating: 1.0, count: 30))
+        let check = NextGridCheckEngine.evaluate(code: "159941", name: "纳指ETF", samples: bars, isOnExchange: true)
+        XCTAssertEqual(check.grade, .avoid)
+        XCTAssertEqual(check.barCount, 30)
+        XCTAssertTrue(check.warnings.contains { $0.contains("60") })
+    }
+
+    func testAccountAdvisorFlagsConcentrationAndMissingQuote() {
+        let book = NextBook(cash: 1000, positions: [
+            NextPosition(code: "159941", name: "纳指ETF", units: 10_000, bookCost: Decimal(string: "12000")!)
+        ])
+        let quote = NextQuote(code: "159941", name: "纳指ETF", price: Decimal(string: "1.2")!, previousClose: Decimal(string: "1.2")!, time: now, source: "test")
+        let review = NextAccountAdvisor.review(book: book, quotes: ["159941": quote], concentrationLimitPercent: 40)
+        XCTAssertNotNil(review)
+        XCTAssertTrue(review?.findings.contains { $0.title.contains("超过单仓上限") } == true)
+        // 缺报价的持仓要单独提示，不能静默算进比例。
+        let missing = NextBook(cash: 1000, positions: [
+            NextPosition(code: "515180", name: "红利ETF", units: 100, bookCost: 100)
+        ])
+        let missingReview = NextAccountAdvisor.review(book: missing, quotes: [:], concentrationLimitPercent: 40)
+        XCTAssertTrue(missingReview?.findings.contains { $0.title.contains("缺报价") } == true)
+    }
+
+    func testMACDSeriesWarmsUpBeforeReturningValues() {
+        let flat = Array(repeating: 1.0, count: 60)
+        let series = NextMACD.series(flat)
+        XCTAssertEqual(series.count, 60)
+        XCTAssertTrue(series.prefix(33).allSatisfy { $0 == nil })
+        XCTAssertNotNil(series[33])
+        XCTAssertEqual(series[59]?.histogram ?? 1, 0, accuracy: 0.000001)
+    }
+
 }
 
 private extension Data {

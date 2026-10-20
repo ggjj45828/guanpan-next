@@ -66,35 +66,53 @@ struct EditorialSection<Content: View>: View {
     @Environment(\.gp) private var p
     let title: String
     var trailing: String? = nil
+    /// 分组主色。默认森林绿；行情/买卖类用陶红，风险类用 risk，
+    /// 这样一屏扫下来能靠颜色分辨「这是哪一类信息」，而不是一片灰字。
+    var accent: Color? = nil
     @ViewBuilder var content: Content
+    private var tone: Color { accent ?? p.forest }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Capsule().fill(tone.opacity(0.85)).frame(width: 3, height: 15).offset(y: 1)
                 Text(title).font(.system(.headline, design: .serif).weight(.semibold)).foregroundStyle(p.ink)
                 Spacer(minLength: 8)
-                if let trailing { Text(trailing).font(.caption).foregroundStyle(p.muted) }
+                if let trailing { Text(trailing).font(.caption).foregroundStyle(tone.opacity(0.85)) }
             }
             content
         }.padding(.vertical, 14)
-        .overlay(alignment: .bottom) { Rectangle().fill(p.line).frame(height: 0.7) }
+        .overlay(alignment: .bottom) {
+            LinearGradient(colors: [tone.opacity(0.34), p.line.opacity(0.12)], startPoint: .leading, endPoint: .trailing)
+                .frame(height: 0.8)
+        }
     }
 }
 
 struct DataPanel<Content: View>: View {
     @Environment(\.gp) private var p
     let title: String
+    var accent: Color? = nil
     var caption: String? = nil
     @ViewBuilder var content: Content
+    private var tone: Color { accent ?? p.forest }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).font(.system(.subheadline, design: .rounded).weight(.semibold)).foregroundStyle(p.ink)
                 Spacer(minLength: 6)
-                if let caption { Text(caption).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(p.muted) }
+                if let caption { Text(caption).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(tone.opacity(0.8)) }
             }
             content
-        }.padding(13).background(p.paper, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(p.line.opacity(0.82), lineWidth: 0.7))
+        }.padding(13)
+        .background(
+            LinearGradient(colors: [p.paper, tone.opacity(0.09)], startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 15, style: .continuous).stroke(tone.opacity(0.22), lineWidth: 0.9))
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(tone.opacity(0.75)).frame(width: 2.5).padding(.vertical, 14).padding(.leading, 1.2)
+        }
+        .shadow(color: tone.opacity(0.08), radius: 7, x: 0, y: 3)
     }
 }
 
@@ -165,5 +183,18 @@ struct GPActionButton: View {
 struct GPPageBackground<Content: View>: View {
     @Environment(\.gp) private var p
     @ViewBuilder var content: Content
-    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 0) { content }.padding(.horizontal, 20).padding(.bottom, 32).frame(maxWidth: 760).frame(maxWidth: .infinity, alignment: .top) }.background(p.canvas).scrollIndicators(.hidden).scrollDismissesKeyboard(.interactively) }
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) { content }
+                .padding(.horizontal, 14).padding(.bottom, 32)
+                .frame(maxWidth: 820).frame(maxWidth: .infinity, alignment: .top)
+        }
+        // 极浅的双色渐变：纸张底 + 一抹青绿，避免整页糊成一片灰白。
+        .background(
+            LinearGradient(colors: [p.canvas, p.forest.opacity(0.07), p.canvas],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            .ignoresSafeArea())
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+    }
 }

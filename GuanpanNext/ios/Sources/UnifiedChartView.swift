@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// 图表下方副图类型。老工程用「成交量 / 成交额 / MACD」三选一，这里的口径一致。
+enum NextSubchartKind: String, CaseIterable, Identifiable {
+    case volume, amount, macd, off
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .volume: "成交量"; case .amount: "成交额"; case .macd: "MACD"; case .off: "关" }
+    }
+}
+
 /// Shared by ETF detail, full-screen chart, asset history, AI evidence and twin lab.
 /// Price and IOPV share one dynamically fitted price axis so neither curve is
 /// visually detached. Cost remains a reference overlay and never distorts scale.
@@ -24,6 +33,9 @@ struct UnifiedChartView: View {
         return calendar
     }
     @State private var visibleLayers: Set<String> = ["price", "volume", "iopv", "cost", "average", "previous", "ma5", "ma10", "ma20", "ma60", "ma250", "trades", "range"]
+    /// 下方副图：成交量 / 成交额 / MACD / 关。
+    /// 老工程把这三张副图都做了，而且分时图下面就是 MACD —— 这里补齐同样的口径。
+    @State private var subchart: NextSubchartKind = .volume
     private var activeDataset: NextChartDataset? {
         guard let dataset else { return nil }
         return (interval.wrappedValue == .intraday ? dataset.interval == .intraday : dataset.interval == .day) ? dataset : nil
@@ -78,8 +90,12 @@ struct UnifiedChartView: View {
     private var visiblePriceDomain: ClosedRange<Decimal>? {
         var values = samples.flatMap { [$0.low, $0.high, Optional($0.close)].compactMap { $0 } }
         if visibleLayers.contains("iopv") { values.append(contentsOf: samples.compactMap(\.iopv)) }
+        var intradayPrevious: Decimal?
         if interval.wrappedValue == .intraday, visibleLayers.contains("previous"), let code = securityCode,
-           let previous = model.quotes[code]?.quote.previousClose { values.append(previous) }
+           let previous = model.quotes[code]?.quote.previousClose, previous > 0 {
+            intradayPrevious = previous
+            values.append(previous)
+        }
         if let dataset = activeDataset, dataset.interval == .day,
            let first = samples.first?.timestamp, let last = samples.last?.timestamp {
             let moving: [(String, Int)] = [("ma5", 5), ("ma10", 10), ("ma20", 20), ("ma60", 60), ("ma250", 250)]
@@ -96,6 +112,17 @@ struct UnifiedChartView: View {
             }
         }
         guard let low = values.min(), let high = values.max() else { return nil }
+        // 分时口径与老工程一致：**昨收 = 0 轴，上下严格对称**，
+        // 都取「今天实际到达的最大涨跌幅」，不取整、不额外留余量；
+        // 全天几乎不动时兜底 ±0.5%，否则纵轴被压到接近 0，价格线会被放大成剧烈波动。
+        // IOPV / 均价超出时先放宽再对称，避免把曲线画出画布。
+        if interval.wrappedValue == .intraday, let previous = intradayPrevious, previous > 0 {
+            let base = NextNum.double(previous)
+            let up = (NextNum.double(high) - base) / base
+            let down = (base - NextNum.double(low)) / base
+            let move = max(abs(up), abs(down), 0.005)
+            return NextNum.decimal(base * (1 - move))...NextNum.decimal(base * (1 + move))
+        }
         let pad = low == high ? max(abs(low) * Decimal(string: "0.01")!, Decimal(string: "0.0001")!) : (high - low) * Decimal(string: "0.06")!
         return (low - pad)...(high + pad)
     }
@@ -160,7 +187,6 @@ struct UnifiedChartView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     layerButton("价格", key: "price", available: true)
-                    layerButton("成交量", key: "volume", available: samples.contains(where: { $0.volume != nil }))
                     layerButton("IOPV", key: "iopv", available: activeDataset?.iopvSource != nil)
                     layerButton("成本线", key: "cost", available: costPerUnit != nil)
                     layerButton("MA5", key: "ma5", available: (activeDataset?.orderedSamples.count ?? 0) >= 5)
@@ -173,6 +199,18 @@ struct UnifiedChartView: View {
                     layerButton("B/S", key: "trades", available: securityCode.map { code in model.book.fills.contains(where: { $0.code == code }) } ?? false)
                     layerButton("高低", key: "range", available: true)
                 }
+            }
+            HStack(spacing: 6) {
+                Text("副图").font(.system(size: 9)).foregroundStyle(p.muted)
+                ForEach(NextSubchartKind.allCases) { kind in
+                    Button { subchart = kind } label: {
+                        Text(kind.title).font(.system(size: 9, weight: subchart == kind ? .semibold : .regular))
+                            .foregroundStyle(subchart == kind ? p.forest : p.muted)
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(subchart == kind ? p.tint : .clear, in: Capsule())
+                    }.buttonStyle(.plain).accessibilityLabel("副图 \(kind.title)")
+                }
+                Spacer(minLength: 0)
             }
             if interval.wrappedValue == .day && (activeDataset?.orderedSamples.count ?? 0) < 250 {
                 Text("MA250 需要 250 根有效日 K · 当前已归档 \(activeDataset?.orderedSamples.count ?? 0) 根；补足后会自动计算并绘制。")
@@ -266,8 +304,11 @@ struct UnifiedChartView: View {
         // 左侧只留价格刻度的宽度，右侧几乎贴边：手机上横向空间很紧，
         // 原来 43 + 12 的留白让绘图区少了 55pt，看起来整张图偏窄。
         let left: CGFloat = 33, right: CGFloat = 5, top: CGFloat = 9
-        let volumeHeight: CGFloat = 34, bottom: CGFloat = 17
-        let plot = CGRect(x: left, y: top, width: max(1, size.width - left - right), height: max(1, size.height - top - volumeHeight - bottom))
+        let axisHeight: CGFloat = 17
+        let subHeight: CGFloat = subchart == .off ? 0 : 46
+        let subGap: CGFloat = subchart == .off ? 0 : 7
+        let plot = CGRect(x: left, y: top, width: max(1, size.width - left - right),
+                          height: max(40, size.height - top - axisHeight - subHeight - subGap))
         for tick in 0...4 {
             let y = plot.minY + plot.height * CGFloat(tick) / 4
             var grid = Path(); grid.move(to: CGPoint(x: plot.minX, y: y)); grid.addLine(to: CGPoint(x: plot.maxX, y: y))
@@ -388,18 +429,22 @@ struct UnifiedChartView: View {
                 context.draw(Text("成本线超出本段价格轴 · ¥\(NextMoney.text(cost, digits: 3))").font(.system(size: 8, weight: .medium)).foregroundColor(p.muted), at: CGPoint(x: plot.midX, y: labelY))
             }
         }
-        if visibleLayers.contains("volume"), let maxVolume = samples.compactMap(\.volume).max(), maxVolume > 0 {
-            let barWidth = max(1, plot.width / CGFloat(samples.count) * 0.55)
-            for point in samples {
-                guard let volume = point.volume else { continue }
-                let h = volumeHeight * cg(volume / maxVolume)
-                let rect = CGRect(x: x(point.timestamp) - barWidth / 2, y: size.height - bottom - h, width: barWidth, height: h)
-                context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(p.chartBlue.opacity(0.28)))
+        if subchart != .off, subHeight > 1 {
+            let subRect = CGRect(x: left, y: plot.maxY + subGap, width: plot.width, height: subHeight)
+            var separator = Path()
+            separator.move(to: CGPoint(x: plot.minX, y: subRect.minY - subGap / 2))
+            separator.addLine(to: CGPoint(x: plot.maxX, y: subRect.minY - subGap / 2))
+            context.stroke(separator, with: .color(p.line.opacity(0.8)), lineWidth: 0.7)
+            switch subchart {
+            case .volume: drawVolumeBars(context: &context, in: subRect, xOf: x)
+            case .amount: drawAmountBars(context: &context, in: subRect, xOf: x)
+            case .macd: drawMACD(context: &context, in: subRect, time: time, xOf: x)
+            case .off: break
             }
         }
         if let selectedTime = displayedCrosshairTime {
             let crossX = x(selectedTime)
-            var cross = Path(); cross.move(to: CGPoint(x: crossX, y: plot.minY)); cross.addLine(to: CGPoint(x: crossX, y: plot.maxY))
+            var cross = Path(); cross.move(to: CGPoint(x: crossX, y: plot.minY)); cross.addLine(to: CGPoint(x: crossX, y: plot.maxY + subGap + subHeight))
             context.stroke(cross, with: .color(p.terracotta), style: StrokeStyle(lineWidth: 0.8, dash: [3, 3]))
         }
         if interval.wrappedValue == .intraday {
@@ -425,6 +470,115 @@ struct UnifiedChartView: View {
             context.draw(Text("\(time.lowerBound.formatted(date: .abbreviated, time: .omitted))").font(.system(size: 8, design: .monospaced)).foregroundColor(p.muted), at: CGPoint(x: plot.minX + 12, y: size.height - 5))
             context.draw(Text("\(time.upperBound.formatted(date: .abbreviated, time: .omitted))").font(.system(size: 8, design: .monospaced)).foregroundColor(p.muted), at: CGPoint(x: plot.maxX - 12, y: size.height - 5))
         }
+    }
+
+    // MARK: - 副图
+
+    /// 量柱涨跌配色（与老工程一致）：逐根与上一根收盘比，第一根用昨收作基准。
+    /// 国内口径红涨绿跌。收盘序列在调用处算一次，避免循环里反复重建 `samples`。
+    private func volumeTones() -> [Color] {
+        let closes = samples.map(\.close)
+        let first = securityCode.flatMap { model.quotes[$0]?.quote.previousClose }
+        return closes.enumerated().map { index, close in
+            let baseline = index > 0 ? closes[index - 1] : (first ?? close)
+            return close >= baseline ? p.terracotta : p.jade
+        }
+    }
+
+    private func drawVolumeBars(context: inout GraphicsContext, in rect: CGRect, xOf: (Date) -> CGFloat) {
+        let bars = samples
+        guard let maxVolume = bars.compactMap(\.volume).max(), maxVolume > 0 else {
+            context.draw(Text("无成交量数据").font(.system(size: 8)).foregroundColor(p.muted), at: CGPoint(x: rect.midX, y: rect.midY))
+            return
+        }
+        let barWidth = max(1, min(9, rect.width / CGFloat(max(1, bars.count)) * 0.62))
+        let tones = volumeTones()
+        for (index, point) in bars.enumerated() {
+            guard let volume = point.volume, tones.indices.contains(index) else { continue }
+            let height = (rect.height - 12) * cg(volume / maxVolume)
+            let barRect = CGRect(x: xOf(point.timestamp) - barWidth / 2, y: rect.maxY - max(1, height), width: barWidth, height: max(1, height))
+            context.fill(Path(roundedRect: barRect, cornerRadius: 0.8), with: .color(tones[index].opacity(0.72)))
+        }
+        context.draw(Text("量 \(NextMoney.text(maxVolume, digits: 0))").font(.system(size: 7.5, design: .monospaced)).foregroundColor(p.muted),
+                     at: CGPoint(x: rect.minX + 30, y: rect.minY + 5))
+    }
+
+    private func drawAmountBars(context: inout GraphicsContext, in rect: CGRect, xOf: (Date) -> CGFloat) {
+        // 日 K 没有成交额列，按「量（手）×100×收盘价」估算，界面上标明是估算。
+        let bars = samples
+        let turnovers = bars.map { point -> Decimal in
+            guard let volume = point.volume, volume > 0 else { return 0 }
+            return volume * 100 * point.close
+        }
+        guard let maxTurnover = turnovers.max(), maxTurnover > 0 else {
+            context.draw(Text("无成交额数据").font(.system(size: 8)).foregroundColor(p.muted), at: CGPoint(x: rect.midX, y: rect.midY))
+            return
+        }
+        let barWidth = max(1, min(9, rect.width / CGFloat(max(1, bars.count)) * 0.62))
+        let tones = volumeTones()
+        for (index, point) in bars.enumerated() {
+            let value = turnovers[index]
+            guard value > 0, tones.indices.contains(index) else { continue }
+            let height = (rect.height - 12) * cg(value / maxTurnover)
+            let barRect = CGRect(x: xOf(point.timestamp) - barWidth / 2, y: rect.maxY - max(1, height), width: barWidth, height: max(1, height))
+            context.fill(Path(roundedRect: barRect, cornerRadius: 0.8), with: .color(tones[index].opacity(0.45)))
+        }
+        context.draw(Text("额 \(amountText(maxTurnover))·估算").font(.system(size: 7.5, design: .monospaced)).foregroundColor(p.muted),
+                     at: CGPoint(x: rect.minX + 46, y: rect.minY + 5))
+    }
+
+    private func amountText(_ value: Decimal) -> String {
+        let amount = NextNum.double(value)
+        if amount >= 100_000_000 { return String(format: "%.2f亿", amount / 100_000_000) }
+        if amount >= 10_000 { return String(format: "%.1f万", amount / 10_000) }
+        return String(format: "%.0f", amount)
+    }
+
+    /// MACD 副图：柱 + DIF/DEA。分时用当前交易日的分钟收盘序列，
+    /// 日 K 用全量日线（缩放只改变可视区间，不改变已经算好的 EMA）。
+    private func drawMACD(context: inout GraphicsContext, in rect: CGRect, time: ClosedRange<Date>, xOf: (Date) -> CGFloat) {
+        let source = interval.wrappedValue == .intraday ? samples : (activeDataset?.orderedSamples ?? [])
+        guard source.count >= 35 else {
+            context.draw(Text("MACD 需 35 根以上数据（当前 \(source.count) 根）").font(.system(size: 8)).foregroundColor(p.muted),
+                         at: CGPoint(x: rect.midX, y: rect.midY))
+            return
+        }
+        let points = NextMACD.series(source.map { NextNum.double($0.close) })
+        let visible = zip(source, points).filter { pair in
+            pair.1 != nil && pair.0.timestamp >= time.lowerBound && pair.0.timestamp <= time.upperBound
+        }
+        guard let maxAbs = visible.compactMap({ $0.1 }).map({ max(abs($0.dif), abs($0.dea), abs($0.histogram)) }).max(), maxAbs > 0 else {
+            context.draw(Text("MACD 数据不足").font(.system(size: 8)).foregroundColor(p.muted), at: CGPoint(x: rect.midX, y: rect.midY))
+            return
+        }
+        func y(_ value: Double) -> CGFloat { rect.midY - (rect.height - 12) / 2 * CGFloat(value / maxAbs) }
+        var zero = Path()
+        zero.move(to: CGPoint(x: rect.minX, y: rect.midY))
+        zero.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        context.stroke(zero, with: .color(p.line.opacity(0.9)), lineWidth: 0.6)
+        let barWidth = max(0.8, min(6, rect.width / CGFloat(max(1, visible.count)) * 0.55))
+        for (sample, point) in visible {
+            guard let point else { continue }
+            let centerX = xOf(sample.timestamp)
+            let top = min(y(0), y(point.histogram))
+            let height = max(0.8, abs(y(point.histogram) - y(0)))
+            let color = point.histogram >= 0 ? p.terracotta : p.jade
+            context.fill(Path(roundedRect: CGRect(x: centerX - barWidth / 2, y: top, width: barWidth, height: height), cornerRadius: 0.5),
+                         with: .color(color.opacity(0.8)))
+        }
+        func line(_ keyPath: (NextMACDPoint) -> Double, color: Color, width: CGFloat) {
+            var path = Path(); var started = false
+            for (sample, point) in visible {
+                guard let point else { continue }
+                let position = CGPoint(x: xOf(sample.timestamp), y: y(keyPath(point)))
+                if !started { path.move(to: position); started = true } else { path.addLine(to: position) }
+            }
+            if started { context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)) }
+        }
+        line({ $0.dif }, color: p.chartGold, width: 1.2)
+        line({ $0.dea }, color: p.chartBlue, width: 1.2)
+        context.draw(Text("MACD(12,26,9)").font(.system(size: 7.5, design: .monospaced)).foregroundColor(p.muted),
+                     at: CGPoint(x: rect.minX + 48, y: rect.minY + 5))
     }
 
     private func label(_ interval: NextChartInterval) -> String { switch interval { case .intraday: "分时"; case .fiveDay: "5日"; case .day: "日K"; case .week: "周K"; case .month: "月K"; case .threeMonth: "近3月"; case .year: "近1年"; case .all: "全部" } }

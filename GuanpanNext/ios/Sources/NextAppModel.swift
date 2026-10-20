@@ -684,8 +684,62 @@ struct LocalPreferences: Codable {
             }
         }
     }
-    func refreshNASResearch(_ code: String) async {
-        guard !preferences.nasBaseURL.isEmpty else {
+    /// 派息自动化：批量拉取派息历史，并按已确认派息自动登记「待收」记录。
+    ///
+    /// 只登记：已实施（isEstimated != true）、除息日已过且在近 400 天内、
+    /// 且本机尚未登记过的派息。登记出来的是 `status == .expected` 的待确认记录，
+    /// **不会自动往现金里加钱** —— 实际到账金额以券商为准，仍需点一次确认；
+    /// 这样既有自动记录，又不会把「估算的派息」冒充成「已到账的现金」。
+    func syncAllDividendHistory() async {
+        let codes = Array(Set(book.positions.map(\.code) + preferences.watch)).sorted()
+        guard !codes.isEmpty else { return }
+        if !preferences.nasBaseURL.isEmpty {
+            for code in codes { await refreshDividendHistory(code) }
+        }
+        registerAutomaticDividendDrafts()
+    }
+
+    func registerAutomaticDividendDrafts() {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let today = Date()
+        let todayText = formatter.string(from: today)
+        guard let cutoff = Calendar(identifier: .gregorian).date(byAdding: .day, value: -400, to: today) else { return }
+        let cutoffText = formatter.string(from: cutoff)
+        var updated = book
+        var added: [String] = []
+        for position in book.positions where position.units > 0 {
+            let events = NextDividendAnalytics.merged(book.dividendEvents + (dividendEvents[position.code] ?? []))
+            for event in events where event.code == position.code && event.isEstimated != true
+                && event.date <= todayText && event.date >= cutoffText {
+                let marker = "自动登记|\(event.code)|\(event.date)"
+                if updated.incomeEvents.contains(where: { $0.note.hasPrefix(marker) }) { continue }
+                let gross = event.amountPerShare * Decimal(position.units)
+                guard gross > 0 else { continue }
+                let exDate = formatter.date(from: event.date)
+                let payDate = formatter.date(from: event.payDate ?? event.date) ?? exDate ?? today
+                let draft = NextIncomeEvent(kind: .etfDistribution, code: event.code, name: position.name,
+                                            exDate: exDate, payDate: payDate, units: position.units,
+                                            perUnit: event.amountPerShare, grossAmount: gross, tax: 0,
+                                            note: "\(marker)|\(position.units) 份")
+                guard (try? draft.validate()) != nil else { continue }
+                updated.incomeEvents.append(draft)
+                added.append("\(position.name) \(event.date) ¥\(NextMoney.text(gross))")
+            }
+        }
+        guard !added.isEmpty else { return }
+        do {
+            try commitRealLedger(updated, action: "自动登记派息待收",
+                                 reason: "按持仓份额与已实施派息自动登记 \(added.count) 笔：\(added.prefix(3).joined(separator: "、"))")
+            notice = "已按持仓自动登记 \(added.count) 笔派息待收；确认到账后再计入现金。"
+        } catch {
+            notice = "派息自动登记未写入：\(error.localizedDescription)"
+        }
+    }
+
+    func refreshNASResearch(_ code: String) async {        guard !preferences.nasBaseURL.isEmpty else {
             researchStatus[code] = "未配置 NAS · 显示本机研究缓存"
             return
         }
