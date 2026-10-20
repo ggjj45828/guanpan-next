@@ -98,6 +98,7 @@ private struct PrimaryNavigation<Content: View>: View {
     var body: some View {
         NavigationStack(path: $path) {
             content
+                .gpKeyboardDismiss()
                 .navigationTitle(title).navigationBarTitleDisplayMode(.large)
                 .toolbar(path.isEmpty ? .hidden : .visible, for: .navigationBar)
                 .toolbar {
@@ -423,7 +424,7 @@ private struct InstrumentDetailScreen: View {
                 }
                 if !model.notice.isEmpty { Text(model.notice).font(.caption).foregroundStyle(p.muted).padding(.vertical, 8) }
             }
-        }.navigationTitle(name).navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle(name).navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
             .sheet(item: $tradeRequest) { TradeEntrySheet(request: $0) }
             .sheet(isPresented: $addIncome) { IncomeRecordSheet(initialCode: code) { event in do { try model.addIncomeEvent(event) } catch { model.errorMessage = error.localizedDescription } } }
             .onAppear { model.preferences.navigation.selectedSecurity = code; model.preferences = model.preferences; Task { await model.registerNASArchive(code); await model.refreshDaily(code); await model.refreshDividendHistory(code) } }
@@ -469,7 +470,7 @@ private struct FullscreenChartScreen: View {
                 DataPanel(title: "十字光标数据") { if let crosshair { GPDataRow(title: "时间", value: crosshair.formatted(date: .numeric, time: .shortened)) } else { Text("拖动图表定位历史时点；返回详情后周期和光标状态继续保留。").font(.caption).foregroundStyle(p.muted) } }
                 Spacer(minLength: 0)
             }.padding(16).background(p.canvas).frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.navigationTitle("全屏行情分析").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("全屏行情分析").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
             .onAppear { Task { await model.refreshDaily(code) } }
     }
 }
@@ -1137,7 +1138,7 @@ private struct IncomeRecordSheet: View {
                 }
                 if let error { Section { Text(error).font(.caption).foregroundStyle(p.risk) } }
             }
-            .navigationTitle("记录收息计划").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("记录收息计划").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
@@ -1188,7 +1189,7 @@ private struct AddPositionSheet: View {
     var body: some View {
         NavigationStack {
             Form { Section("证券信息") { TextField("6 位场内代码", text: $code).keyboardType(.numberPad); TextField("名称（自动填入）", text: $name); Text(lookupStatus).font(.caption).foregroundStyle(.secondary); TextField("数量", text: $units).keyboardType(.numberPad); TextField("持仓总成本", text: $cost).keyboardType(.decimalPad) }; Section { Text("只写入你确认的新场内账本。不会自动导入旧版混合资产。真实交易由你在券商完成。").font(.caption).foregroundStyle(p.muted) } }
-                .navigationTitle("录入持仓").navigationBarTitleDisplayMode(.inline)
+                .navigationTitle("录入持仓").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
                 .onChange(of: code) { _, value in
                     guard value.count == 6, value.allSatisfy(\.isNumber) else { name = ""; lookupStatus = "输入 6 位代码后自动查询名称"; return }
                     lookupStatus = "正在查询证券名称…"
@@ -1249,6 +1250,7 @@ private struct TradeEntrySheet: View {
             }
             .navigationTitle(request.side == "buy" ? "记录买入" : "记录卖出")
             .navigationBarTitleDisplayMode(.inline)
+            .gpKeyboardDismiss()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("核对") { confirm = true }.disabled(!nameResolved || Int(units) == nil || price.isEmpty || fee.isEmpty) }
@@ -1487,7 +1489,7 @@ private struct SearchSheet: View {
                         }
                     }
                 }
-            }.navigationTitle("全局搜索").navigationBarTitleDisplayMode(.inline).toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            }.navigationTitle("全局搜索").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss().toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
                 .onAppear { model.searchText = model.preferences.navigation.searchQuery }
                 .onChange(of: model.searchText) { _, query in model.preferences.navigation.searchQuery = query; model.preferences = model.preferences }
                 .navigationDestination(for: GPRoute.self) { RouteDestination(route: $0) }
@@ -1525,7 +1527,7 @@ private struct AlertCenterScreen: View {
                 HStack { Picker("开始", selection: quietStart) { ForEach(0..<24, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) } }; Picker("结束", selection: quietEnd) { ForEach(0..<24, id: \.self) { Text(String(format: "%02d:00", $0)).tag($0) } } }.pickerStyle(.menu)
                 Text("\(model.preferences.notifications.quietHours.startMinute / 60):00 – \(model.preferences.notifications.quietHours.endMinute / 60):00；静默期间通知保留在记录中，不重复弹出。").font(.caption).foregroundStyle(p.muted)
             }
-        }.navigationTitle("通知中心").navigationBarTitleDisplayMode(.inline).task {
+        }.navigationTitle("通知中心").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss().task {
             if priceCode.isEmpty, let code = model.preferences.navigation.selectedSecurity { priceCode = code }
             await model.refreshNotificationStatus()
         }
@@ -1552,7 +1554,7 @@ private struct LedgerHistoryScreen: View {
                 }
                 ForEach(model.book.incomeEvents.reversed()) { income in GPDataRow(title: "\(income.kind.title) · \(income.name) · \(income.status.title)", value: "+¥\(NextMoney.text(income.netAmount))", note: "\(income.status == .received ? income.receivedAt?.formatted(date: .numeric, time: .shortened) ?? "已到账" : "预计到账 \(income.payDate.formatted(date: .numeric, time: .omitted))") · 税前 ¥\(NextMoney.text(income.grossAmount)) · 税费 ¥\(NextMoney.text(income.tax))") }
             }
-        }.navigationTitle("资产流水与审计").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("资产流水与审计").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
     }
 }
 
@@ -1577,7 +1579,7 @@ private struct DecisionHistoryScreen: View {
                     }
                 }
             }
-        }.navigationTitle("历史决策").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("历史决策").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
     }
 }
 
@@ -1645,7 +1647,7 @@ private struct DividendHistoryScreen: View {
                 }
             }
         }
-        .navigationTitle("派息历史").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("派息历史").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
         .task {
             for security in securities { await model.refreshDividendHistory(security) }
         }
@@ -1672,7 +1674,7 @@ private struct BackupRestoreScreen: View {
             GPActionButton(title: "选择备份并校验", secondary: true, systemImage: "square.and.arrow.down") { isImporting = true }
             Text("恢复前会检查版本、结构和校验值，再显示数据数量供你确认。若安全副本写入失败，恢复会停止。")
                 .font(.caption).foregroundStyle(p.muted).padding(.vertical, 8)
-        }.navigationTitle("备份与恢复").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("备份与恢复").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
             .fileExporter(isPresented: $isExporting, document: document, contentType: .json, defaultFilename: "观盘Pro-安全备份") { result in
                 if case .failure(let error) = result { model.errorMessage = "导出失败：\(error.localizedDescription)" }
             }
@@ -1763,7 +1765,7 @@ private struct TwinDetailScreen: View {
                     GPActionButton(title: "连接 NAS 并运行回测", secondary: true, systemImage: "arrow.clockwise") { Task { await model.runTwinBacktest(strategy) } }
                 }
             }
-        }.navigationTitle("策略详情").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("策略详情").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
     }
 }
 

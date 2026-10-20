@@ -198,3 +198,30 @@ struct GPPageBackground<Content: View>: View {
         .scrollDismissesKeyboard(.interactively)
     }
 }
+
+// MARK: - 键盘收起
+
+/// 数字键盘没有回车键，输入完必须点别的区域才能收起来。
+/// 这里统一给一个键盘上方的「完成」按钮，并让内容下拉时立即收起键盘。
+struct GPKeyboardDismiss: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { GPKeyboardDismiss.resign() }
+                        .font(.caption.weight(.semibold))
+                        .accessibilityIdentifier("keyboard.done")
+                }
+            }
+            .scrollDismissesKeyboard(.immediately)
+    }
+    static func resign() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+}
+
+extension View {
+    /// 给页面/表单加「完成」键盘工具条。可重复应用，不会叠加出多个按钮。
+    func gpKeyboardDismiss() -> some View { modifier(GPKeyboardDismiss()) }
+}
