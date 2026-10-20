@@ -528,7 +528,7 @@ struct NextGoal: Codable, Equatable {
               concentrationLimit > 0, concentrationLimit <= 100,
               targetWeights.keys.allSatisfy({ $0.count == 6 && $0.allSatisfy(\.isNumber) }),
               targetWeights.values.allSatisfy({ !$0.isNaN && $0 >= 0 && $0 <= 100 }),
-              targetWeights.isEmpty || abs(totalWeight - 100) <= Decimal("0.01")! else { throw NextError.invalid("目标、预算或目标仓位比例无效（目标仓位合计须为 100%）") }
+              targetWeights.isEmpty || abs(totalWeight - 100) <= Decimal(string: "0.01")! else { throw NextError.invalid("目标、预算或目标仓位比例无效（目标仓位合计须为 100%）") }
     }
 }
 struct NextEvidence: Codable, Identifiable, Equatable {
