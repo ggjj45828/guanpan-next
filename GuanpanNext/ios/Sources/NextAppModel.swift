@@ -204,6 +204,26 @@ struct LocalPreferences: Codable {
         try commitRealLedger(updated, action: "录入场内持仓", reason: "用户确认保存")
         if !preferences.nasBaseURL.isEmpty { Task { await registerNASArchive(code) } }
     }
+    /// 删除一条持仓。走的是同一条审计通道，可在「资产流水 → 撤销」里回退。
+    func deletePosition(_ code: String) throws {
+        guard book.positions.contains(where: { $0.code == code }) else { throw NextError.invalid("账本里没有这只持仓") }
+        var updated = book
+        updated.positions.removeAll { $0.code == code }
+        try commitRealLedger(updated, action: "删除场内持仓", reason: "用户确认删除 \(code)")
+    }
+
+    /// 修正录入错误的份额或总成本。**不改现金、不虚构成交**，只订正账本里的持仓事实。
+    func updatePosition(_ code: String, units: Int, totalCost: Decimal) throws {
+        guard units > 0, totalCost > 0, !totalCost.isNaN else { throw NextError.invalid("份额与总成本必须大于 0") }
+        guard let index = book.positions.firstIndex(where: { $0.code == code }) else { throw NextError.invalid("账本里没有这只持仓") }
+        var updated = book
+        let previous = updated.positions[index]
+        updated.positions[index].units = units
+        updated.positions[index].bookCost = totalCost
+        try commitRealLedger(updated, action: "修正持仓份额与成本",
+                             reason: "用户订正 \(code)：\(previous.units) 份 / ¥\(NextMoney.text(previous.bookCost)) → \(units) 份 / ¥\(NextMoney.text(totalCost))")
+    }
+
     func recordTrade(code: String, name: String, side: String, units: Int, price: Decimal, fee: Decimal) throws {
         guard code.count == 6, code.allSatisfy(\.isNumber), units > 0, price > 0,
               side == "buy" || side == "sell", fee >= 0, !fee.isNaN else { throw NextError.invalid("成交代码、方向、价格、份额或手续费无效") }

@@ -241,7 +241,15 @@ private struct OverviewScreen: View {
                 }
                 EditorialSection(title: "持仓速览", trailing: "\(book.positions.count) 只") {
                     if book.positions.isEmpty { GPStatus(title: "场内账本从空白开始", detail: "添加你确认的证券持仓；没有验证的备份不会被覆盖。", symbol: "tray") }
-                    else { ForEach(book.positions.prefix(5)) { position in InstrumentRow(code: position.code, name: position.name, units: position.units, quote: model.quotes[position.code]) } }
+                    else {
+                        ForEach(book.positions.sorted { lhs, rhs in
+                            let left = (model.quotes[lhs.code]?.quote.price ?? 0) * Decimal(lhs.units)
+                            let right = (model.quotes[rhs.code]?.quote.price ?? 0) * Decimal(rhs.units)
+                            return left == right ? lhs.code < rhs.code : left > right
+                        }) { position in
+                            InstrumentRow(code: position.code, name: position.name, units: position.units, quote: model.quotes[position.code])
+                        }
+                    }
                     NavigationLink(value: GPRoute.instrument(model.watch.first ?? "159941")) { Label("浏览关注证券", systemImage: "arrow.up.right").font(.caption.weight(.semibold)).foregroundStyle(p.forest) }.padding(.top, 3)
                 }
                 EditorialSection(title: "接着做") {
@@ -333,7 +341,7 @@ private struct MarketScreen: View {
     }
 }
 
-private struct InstrumentRow: View {
+struct InstrumentRow: View {
     @Environment(\.gp) private var p
     let code: String; let name: String; var units: Int?; let quote: NextCachedQuote?
     private var validQuote: NextQuote? { guard let quote, quote.usableForDisplay(at: Date()) else { return nil }; return quote.quote }
@@ -977,14 +985,38 @@ private struct AssetsScreen: View {
     @Environment(\.gp) private var p
     @State private var addPosition = false
     @State private var addIncome = false
-    @State private var pendingIncome: UUID?
     @State private var cashAmount = ""
     @State private var cashReason = "用户记录的场内现金变动"
     @State private var cashDirection: Decimal = 1
-    @State private var confirmCash = false
-    @State private var confirmUndo = false
-    @State private var pendingDelete: String?
-    @State private var tradeRequest: GPTradeRequest?
+    /// 同一视图上挂多个 confirmationDialog，SwiftUI 只保证最后一个能弹。
+    /// 之前收益到账 / 现金变更 / 撤销 / 删除四个弹窗互相压制，删除点不动就是这个原因。
+    /// 现在统一成一个状态驱动一个弹窗。
+    @State private var assetsConfirm: AssetsConfirm?
+
+    private enum AssetsConfirm: Identifiable {
+        case income(UUID), cash, undo
+        var id: String {
+            switch self {
+            case .income(let id): return "income-\(id)"
+            case .cash: return "cash"
+            case .undo: return "undo"
+            }
+        }
+        var title: String {
+            switch self {
+            case .income: return "确认这笔收益已实际到账？"
+            case .cash: return "确认真实账本变更？"
+            case .undo: return "撤销最近账本变更？"
+            }
+        }
+        var message: String {
+            switch self {
+            case .income: return "只有收到券商或银行实际到账后才确认。本操作会把税后净额写入真实现金和审计流水，不会下单。"
+            case .cash: return "本操作会改变真实场内账本，写入审计记录；不会向券商下单。"
+            case .undo: return "撤销前会检查当前账本版本，仅当账本仍匹配该审计版本时生效。"
+            }
+        }
+    }
     private var valuation: NextAssetValuation { model.book.valuation(using: model.quotes, at: Date()) }
     private var confirmedDividendPerShare: Decimal {
         let cutoff = Calendar.current.date(byAdding: .day, value: -365, to: Date()) ?? .distantPast
@@ -1014,14 +1046,7 @@ private struct AssetsScreen: View {
                     HStack { Button { addPosition = true } label: { Label("录入已确认持仓", systemImage: "plus") }.font(.caption.weight(.semibold)); Spacer(); NavigationLink(value: GPRoute.fills) { Label("资产流水", systemImage: "list.bullet.rectangle") }.font(.caption) }.tint(p.forest)
                     if model.book.positions.isEmpty { GPStatus(title: "账本为空", detail: "只录入你确认的场内证券，不自动导入旧账本或场外基金。", symbol: "tray") }
                     ForEach(model.book.positions) { position in
-                        HStack(spacing: 4) {
-                            NavigationLink(value: GPRoute.instrument(position.code)) { InstrumentRow(code: position.code, name: position.name, units: position.units, quote: model.quotes[position.code]) }.buttonStyle(.plain)
-                            Menu {
-                                Button("记录买入", systemImage: "arrow.down.circle") { tradeRequest = GPTradeRequest(code: position.code, side: "buy") }
-                                Button("记录卖出", systemImage: "arrow.up.circle") { tradeRequest = GPTradeRequest(code: position.code, side: "sell") }
-                                Button("删除持仓", systemImage: "trash", role: .destructive) { pendingDelete = position.code }
-                            } label: { Image(systemName: "ellipsis").foregroundStyle(p.muted).frame(width: 38, height: 44).contentShape(Rectangle()) }.accessibilityLabel("\(position.name) 更多操作")
-                        }
+                        PositionRow(position: position, quote: model.quotes[position.code])
                     }
                 }
                 AccountReviewPanel()
@@ -1049,7 +1074,7 @@ private struct AssetsScreen: View {
                                     .font(.caption).foregroundStyle(p.muted)
                             }
                             Spacer()
-                            if event.status == .expected { Button("确认到账") { pendingIncome = event.id }.font(.caption.weight(.semibold)).tint(p.forest) }
+                            if event.status == .expected { Button("确认到账") { assetsConfirm = .income(event.id) }.font(.caption.weight(.semibold)).tint(p.forest) }
                         }
                     }
                     let allEvents = NextDividendAnalytics.merged(model.book.dividendEvents + model.dividendEvents.values.flatMap { $0 })
@@ -1060,28 +1085,39 @@ private struct AssetsScreen: View {
                 EditorialSection(title: "现金变动") {
                     HStack { Button("转入") { cashDirection = 1 }; Button("转出") { cashDirection = -1 }.foregroundStyle(p.risk) }.buttonStyle(.bordered)
                     compactField("金额", text: $cashAmount); compactField("用途/备注", text: $cashReason)
-                    GPActionButton(title: "审核并记录现金变动", secondary: true) { confirmCash = true }
+                    GPActionButton(title: "审核并记录现金变动", secondary: true) { assetsConfirm = .cash }
                     if let latest = model.book.cashMovements.last { GPDataRow(title: latest.reason, value: "\(latest.amount >= 0 ? "+" : "")¥\(NextMoney.text(latest.amount))", note: latest.date.formatted(date: .numeric, time: .shortened)) }
                 }
                 EditorialSection(title: "安全与数据") {
                     NavigationLink(value: GPRoute.fills) { IntentRow(icon: "clock.arrow.circlepath", title: "审计与撤销", detail: "查看真实账本修改记录") }
                     NavigationLink(value: GPRoute.backups) { IntentRow(icon: "externaldrive.badge.timemachine", title: "备份与恢复", detail: "先校验备份，再确认恢复") }
-                    Button { confirmUndo = true } label: { IntentRow(icon: "arrow.uturn.backward", title: "撤销最近账本变更", detail: "仅当账本仍匹配该审计版本时可撤销") }.buttonStyle(.plain)
+                    Button { assetsConfirm = .undo } label: { IntentRow(icon: "arrow.uturn.backward", title: "撤销最近账本变更", detail: "仅当账本仍匹配该审计版本时可撤销") }.buttonStyle(.plain)
                 }
             }
         }.sheet(isPresented: $addPosition) { AddPositionSheet { code, name, units, cost in do { try model.addPosition(code: code, name: name, units: units, cost: cost) } catch { model.errorMessage = error.localizedDescription } } }
         .sheet(isPresented: $addIncome) { IncomeRecordSheet { event in do { try model.addIncomeEvent(event) } catch { model.errorMessage = error.localizedDescription } } }
-        .sheet(item: $tradeRequest) { TradeEntrySheet(request: $0) }
-        .confirmationDialog("确认这笔收益已实际到账？", isPresented: Binding(get: { pendingIncome != nil }, set: { if !$0 { pendingIncome = nil } }), titleVisibility: .visible) {
-            Button("确认到账并计入现金", role: .destructive) { if let id = pendingIncome { do { try model.receiveIncomeEvent(id) } catch { model.errorMessage = error.localizedDescription } }; pendingIncome = nil }
-            Button("取消", role: .cancel) { pendingIncome = nil }
-        } message: { Text("只有收到券商或银行实际到账后才确认。本操作会把税后净额写入真实现金和审计流水，不会下单。") }
-        .confirmationDialog("确认真实账本变更？", isPresented: $confirmCash, titleVisibility: .visible) { Button("确认记录", role: .destructive) { do { try model.adjustRealCash(cashDirection * NextMoney.parse(cashAmount), reason: cashReason); cashAmount = "" } catch { model.errorMessage = error.localizedDescription } }; Button("取消", role: .cancel) { } } message: { Text("本操作会改变真实场内账本，写入审计记录；不会向券商下单。") }
-        .confirmationDialog("撤销最近账本变更？", isPresented: $confirmUndo, titleVisibility: .visible) { Button("确认撤销", role: .destructive) { do { try model.undoLatestLedgerChange() } catch { model.errorMessage = error.localizedDescription } }; Button("取消", role: .cancel) { } } message: { Text("撤销前会检查当前账本版本。") }
-        .confirmationDialog("确认删除这条持仓？", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible) {
-            Button("确认删除", role: .destructive) { if let code = pendingDelete { var updated = model.book; updated.positions.removeAll { $0.code == code }; do { try model.commitRealLedger(updated, action: "删除场内持仓", reason: "用户确认删除") } catch { model.errorMessage = error.localizedDescription }; pendingDelete = nil } }
-            Button("取消", role: .cancel) { pendingDelete = nil }
-        } message: { Text("变更会写入账本审计记录，可在记录有效时撤销。") }
+        .confirmationDialog(assetsConfirm?.title ?? "", isPresented: Binding(get: { assetsConfirm != nil }, set: { if !$0 { assetsConfirm = nil } }), titleVisibility: .visible) {
+            if let action = assetsConfirm {
+                switch action {
+                case .income(let id):
+                    Button("确认到账并计入现金", role: .destructive) {
+                        do { try model.receiveIncomeEvent(id) } catch { model.errorMessage = error.localizedDescription }
+                        assetsConfirm = nil
+                    }
+                case .cash:
+                    Button("确认记录", role: .destructive) {
+                        do { try model.adjustRealCash(cashDirection * NextMoney.parse(cashAmount), reason: cashReason); cashAmount = "" } catch { model.errorMessage = error.localizedDescription }
+                        assetsConfirm = nil
+                    }
+                case .undo:
+                    Button("确认撤销", role: .destructive) {
+                        do { try model.undoLatestLedgerChange() } catch { model.errorMessage = error.localizedDescription }
+                        assetsConfirm = nil
+                    }
+                }
+                Button("取消", role: .cancel) { assetsConfirm = nil }
+            }
+        } message: { Text(assetsConfirm?.message ?? "") }
     }
 }
 
@@ -1207,13 +1243,13 @@ private struct AddPositionSheet: View {
     let onSave: (String, String, Int, Decimal) -> Void
 }
 
-private struct GPTradeRequest: Identifiable {
+struct GPTradeRequest: Identifiable {
     let code: String
     let side: String
     var id: String { code + side }
 }
 
-private struct TradeEntrySheet: View {
+struct TradeEntrySheet: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.dismiss) private var dismiss
     let request: GPTradeRequest

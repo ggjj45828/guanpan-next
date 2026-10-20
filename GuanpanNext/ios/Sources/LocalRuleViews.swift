@@ -401,3 +401,119 @@ private struct GlobalIndexCard: View {
         .accessibilityLabel("\(quote.name) \(quote.price > 0 ? NextNum.text(quote.price) : "无数据") \(quote.price > 0 ? NextNum.signed(quote.changePercent) + "%" : "")")
     }
 }
+
+// MARK: - 持仓行与修正
+
+/// 资产页的持仓行：买入、卖出、修正份额/成本、删除都收进这一行的菜单里。
+///
+/// 关键点：**弹窗挂在这一行自己身上**。之前这些弹窗全挂在资产页根视图上，
+/// 同一个页面上四个 `confirmationDialog` 互相压制，删除点下去没有反应。
+struct PositionRow: View {
+    @EnvironmentObject private var model: NextAppModel
+    @Environment(\.gp) private var p
+    let position: NextPosition
+    let quote: NextCachedQuote?
+    @State private var sheet: RowSheet?
+    @State private var confirmDelete = false
+
+    private enum RowSheet: Identifiable {
+        case trade(GPTradeRequest), edit
+        var id: String {
+            switch self {
+            case .trade(let request): return "trade-\(request.id)"
+            case .edit: return "edit"
+            }
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            NavigationLink(value: GPRoute.instrument(position.code)) {
+                InstrumentRow(code: position.code, name: position.name, units: position.units, quote: quote)
+            }.buttonStyle(.plain)
+            Menu {
+                Button("记录买入", systemImage: "arrow.down.circle") { sheet = .trade(GPTradeRequest(code: position.code, side: "buy")) }
+                Button("记录卖出", systemImage: "arrow.up.circle") { sheet = .trade(GPTradeRequest(code: position.code, side: "sell")) }
+                Button("修正份额 / 成本", systemImage: "pencil") { sheet = .edit }
+                Divider()
+                Button("删除持仓", systemImage: "trash", role: .destructive) { confirmDelete = true }
+            } label: {
+                Image(systemName: "ellipsis").foregroundStyle(p.muted).frame(width: 38, height: 44).contentShape(Rectangle())
+            }.accessibilityLabel("\(position.name) 更多操作")
+        }
+        .sheet(item: $sheet) { item in
+            switch item {
+            case .trade(let request): TradeEntrySheet(request: request)
+            case .edit: PositionEditSheet(position: position)
+            }
+        }
+        .confirmationDialog("确认删除 \(position.name)？", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("删除持仓", role: .destructive) {
+                do { try model.deletePosition(position.code) } catch { model.errorMessage = error.localizedDescription }
+            }
+            Button("取消", role: .cancel) { }
+        } message: { Text("会写入账本审计记录，可在「资产流水 → 撤销最近账本变更」回退。") }
+    }
+}
+
+/// 修正录入错误的份额与总成本。只改账本事实，不产生成交、不动现金。
+struct PositionEditSheet: View {
+    @EnvironmentObject private var model: NextAppModel
+    @Environment(\.dismiss) private var dismiss
+    let position: NextPosition
+    @State private var units = ""
+    @State private var totalCost = ""
+    @State private var error: String?
+    @State private var confirm = false
+
+    private var parsedUnits: Int? { Int(units) }
+    private var parsedCost: Decimal? { try? NextMoney.parse(totalCost) }
+    private var canSave: Bool {
+        guard let parsedUnits, parsedUnits > 0, let parsedCost, parsedCost > 0 else { return false }
+        return true
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("\(position.name) · \(position.code)") {
+                    TextField("持有份额", text: $units).keyboardType(.numberPad)
+                    TextField("持仓总成本（元）", text: $totalCost).keyboardType(.decimalPad)
+                    Text("当前 \(position.units) 份 · 总成本 ¥\(NextMoney.text(position.bookCost)) · 每份 ¥\(NextMoney.text(position.costPerUnit, digits: 4))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if canSave, let parsedUnits, let parsedCost {
+                        Text("修改后每份成本 ¥\(NextMoney.text(parsedCost / Decimal(parsedUnits), digits: 4))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Section {
+                    Text("只订正账本里的份额与成本，不产生成交、不改现金；修改会写入审计记录并可撤销。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let error {
+                    Section { Text(error).font(.caption).foregroundStyle(.red) }
+                }
+            }
+            .navigationTitle("修正持仓")
+            .navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("保存") { confirm = true }.disabled(!canSave) }
+            }
+            .confirmationDialog("确认修正这条持仓？", isPresented: $confirm, titleVisibility: .visible) {
+                Button("确认保存") {
+                    do {
+                        guard let parsedUnits, let parsedCost else { throw NextError.invalid("份额或成本格式无效") }
+                        try model.updatePosition(position.code, units: parsedUnits, totalCost: parsedCost)
+                        dismiss()
+                    } catch { self.error = error.localizedDescription }
+                }
+                Button("取消", role: .cancel) { }
+            } message: { Text("\(position.code) 改为 \(units) 份 / 总成本 ¥\(totalCost)。") }
+        }
+        .onAppear {
+            if units.isEmpty { units = String(position.units) }
+            if totalCost.isEmpty { totalCost = NSDecimalNumber(decimal: position.bookCost).stringValue }
+        }
+    }
+}
