@@ -84,8 +84,12 @@ struct UnifiedChartView: View {
            let first = samples.first?.timestamp, let last = samples.last?.timestamp {
             let moving: [(String, Int)] = [("ma5", 5), ("ma10", 10), ("ma20", 20), ("ma60", 60), ("ma250", 250)]
             let source = dataset.orderedSamples
-            for (key, period) in moving where visibleLayers.contains(key) && source.count >= period && (key != "ma250" || interval.wrappedValue != .intraday) {
-                let average = NextMovingAverage.series(source, period: period)
+            // MA250 在历史不足 250 根时按实际可用根数降级，否则这条线永远不出现。
+            for (key, period) in moving where visibleLayers.contains(key)
+                && source.count >= (key == "ma250" ? 2 : period)
+                && (key != "ma250" || interval.wrappedValue != .intraday) {
+                let effective = key == "ma250" ? min(period, source.count) : period
+                let average = NextMovingAverage.series(source, period: effective)
                 for index in source.indices where source[index].timestamp >= first && source[index].timestamp <= last {
                     if let value = average[index] { values.append(value) }
                 }
@@ -163,7 +167,7 @@ struct UnifiedChartView: View {
                     layerButton("MA10", key: "ma10", available: (activeDataset?.orderedSamples.count ?? 0) >= 10)
                     layerButton("MA20", key: "ma20", available: (activeDataset?.orderedSamples.count ?? 0) >= 20)
                     layerButton("MA60", key: "ma60", available: (activeDataset?.orderedSamples.count ?? 0) >= 60)
-                    layerButton("MA250", key: "ma250", available: activeDataset?.interval == .day && (activeDataset?.orderedSamples.count ?? 0) >= 250)
+                    layerButton("MA250", key: "ma250", available: activeDataset?.interval == .day && (activeDataset?.orderedSamples.count ?? 0) >= 2)
                     layerButton("均价", key: "average", available: activeDataset?.interval == .intraday && samples.contains(where: { $0.volume != nil }))
                     layerButton("昨收", key: "previous", available: activeDataset?.interval == .intraday && securityCode.flatMap { model.quotes[$0]?.quote.previousClose } != nil)
                     layerButton("B/S", key: "trades", available: securityCode.map { code in model.book.fills.contains(where: { $0.code == code }) } ?? false)
@@ -214,7 +218,10 @@ struct UnifiedChartView: View {
                         if visibleLayers.contains("ma10") && activeDataset?.interval == .day && (activeDataset?.orderedSamples.count ?? 0) >= 10 { legend("MA10", color: p.chartBlue) }
                         if visibleLayers.contains("ma20") && activeDataset?.interval == .day && (activeDataset?.orderedSamples.count ?? 0) >= 20 { legend("MA20", color: p.jade) }
                         if visibleLayers.contains("ma60") && activeDataset?.interval == .day && (activeDataset?.orderedSamples.count ?? 0) >= 60 { legend("MA60", color: p.chartViolet) }
-                        if visibleLayers.contains("ma250") && activeDataset?.interval == .day && (activeDataset?.orderedSamples.count ?? 0) >= 250 { legend("MA250", color: p.terracotta) }
+                        if visibleLayers.contains("ma250") && activeDataset?.interval == .day {
+                            let bars = activeDataset?.orderedSamples.count ?? 0
+                            legend(bars >= 250 ? "MA250" : "MA250·\(bars)根", color: p.terracotta)
+                        }
                         if visibleLayers.contains("previous") && activeDataset?.interval == .intraday { legend("昨收", color: p.muted) }
                         if activeDataset?.iopvSource != nil { legend("IOPV · 同轴", color: p.chartViolet) }
                         if costPerUnit != nil { legend("成本", color: p.chartCost) }
@@ -256,7 +263,9 @@ struct UnifiedChartView: View {
 
     private func draw(context: inout GraphicsContext, size: CGSize) {
         guard let dataset = activeDataset, let domain = visiblePriceDomain, let time = visibleTimeDomain, samples.count > 0 else { return }
-        let left: CGFloat = 43, right: CGFloat = 12, top: CGFloat = 9
+        // 左侧只留价格刻度的宽度，右侧几乎贴边：手机上横向空间很紧，
+        // 原来 43 + 12 的留白让绘图区少了 55pt，看起来整张图偏窄。
+        let left: CGFloat = 33, right: CGFloat = 5, top: CGFloat = 9
         let volumeHeight: CGFloat = 34, bottom: CGFloat = 17
         let plot = CGRect(x: left, y: top, width: max(1, size.width - left - right), height: max(1, size.height - top - volumeHeight - bottom))
         for tick in 0...4 {
@@ -297,7 +306,7 @@ struct UnifiedChartView: View {
                     context.fill(Path(roundedRect: rect, cornerRadius: 0.6), with: .color(color))
                 }
             } else {
-                context.stroke(pricePath, with: .color(p.chartBlue), style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
+                context.stroke(pricePath, with: .color(p.chartBlue), style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round))
             }
         }
         if visibleLayers.contains("iopv") {
@@ -312,10 +321,14 @@ struct UnifiedChartView: View {
         // Moving averages include earlier bars outside the zoom window.
         let fullSamples = dataset.orderedSamples
         for (key, period, color, width) in [("ma5", 5, p.chartGold, 1.2), ("ma10", 10, p.chartBlue, 1.1), ("ma20", 20, p.jade, 1.15), ("ma60", 60, p.chartViolet, 1.1), ("ma250", 250, p.terracotta, 1.25)]
-        where visibleLayers.contains(key) && fullSamples.count >= period && (key != "ma250" || dataset.interval == .day) {
-            let averages = NextMovingAverage.series(fullSamples, period: period)
+        where visibleLayers.contains(key)
+            && fullSamples.count >= (key == "ma250" ? 2 : period)
+            && (key != "ma250" || dataset.interval == .day) {
+            // 与 visiblePriceDomain 保持一致：MA250 历史不足时按可用根数降级，缩放不影响。
+            let effective = key == "ma250" ? min(period, fullSamples.count) : period
+            let averages = NextMovingAverage.series(fullSamples, period: effective)
             var path = Path(); var started = false
-            for (index, point) in fullSamples.enumerated() where index >= period - 1 && point.timestamp >= time.lowerBound && point.timestamp <= time.upperBound {
+            for (index, point) in fullSamples.enumerated() where index >= effective - 1 && point.timestamp >= time.lowerBound && point.timestamp <= time.upperBound {
                 guard let average = averages[index] else { continue }
                 let position = CGPoint(x: x(point.timestamp), y: priceY(average))
                 if !started { path.move(to: position); started = true } else { path.addLine(to: position) }
