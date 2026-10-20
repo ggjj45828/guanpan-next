@@ -396,8 +396,21 @@ private struct InstrumentDetailScreen: View {
                     else if model.rules[code]?.isVerified != true { GPStatus(title: "交易规则尚未验证", detail: "不会假设 ETF 是 T+0，也不会固定推断手数或费用。", symbol: "checkmark.shield") }
                     else { OrderBookView(snapshot: model.orderBooks[code]!) }
                 }
-                EditorialSection(title: "账户与规则") {
-                    if let position { GPDataRow(title: "持有数量", value: "\(position.units) 份"); GPDataRow(title: "账本成本", value: "¥\(NextMoney.text(position.costPerUnit, digits: 4))"); GPDataRow(title: "来源", value: "本机真实账本") }
+                EditorialSection(title: "账户与规则", accent: p.chartGold) {
+                    if let basis = model.book.costBasis(for: code) {
+                        GPDataRow(title: "持有数量", value: "\(basis.units) 份")
+                        GPDataRow(title: "买入均价（加权平均）", value: "¥\(NextMoney.text(basis.averageCost, digits: 4))",
+                                  note: "只由买入决定、含买入手续费；卖出不改变这个数")
+                        if let diluted = basis.dilutedCost {
+                            GPDataRow(title: "摊薄成本（券商口径）", value: "¥\(NextMoney.text(diluted, digits: 4))" + (basis.isNegativeDiluted ? " · 负成本" : ""),
+                                      note: "买入总额减去卖出所得后摊到当前份额；与同花顺的「成本价」同一算法",
+                                      valueColor: basis.isNegativeDiluted ? p.terracotta : nil)
+                        } else {
+                            GPDataRow(title: "摊薄成本（券商口径）", value: "无法计算",
+                                      note: "这只持仓是补录的、没有买入流水，无法还原摊薄成本")
+                        }
+                        GPDataRow(title: "来源", value: "本机真实账本", note: "改动写入审计记录，可在资产流水撤销")
+                    }
                     else { Text("尚未录入真实账本；研究与模拟不会读取真实现金作为下单资金。").font(.caption).foregroundStyle(p.muted) }
                     if let rules = model.rules[code] { GPDataRow(title: "结算规则", value: rules.settlement == .unknown ? "未知" : rules.settlement.rawValue.uppercased(), note: rules.source); if let lot = rules.lotSize { GPDataRow(title: "交易单位", value: "\(lot) 份") } }
                     else { GPDataRow(title: "ETF 交易规则", value: "未接入来源") }

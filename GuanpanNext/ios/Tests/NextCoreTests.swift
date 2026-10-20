@@ -584,6 +584,50 @@ final class NextCoreTests: XCTestCase {
         XCTAssertNotNil(quotes[2].observedAt)
     }
 
+    func testCostBasisKeepsAverageCostAndComputesDilutedCost() {
+        // 买 1000 份 @1.00（费 0.10），再卖 500 份 @1.20（费 0.10），剩 500 份。
+        let book = NextBook(cash: 0, positions: [
+            NextPosition(code: "159941", name: "纳指ETF", units: 500, bookCost: Decimal(string: "500.05")!)
+        ], fills: [
+            NextFill(date: now, code: "159941", side: "buy", units: 1000, price: 1, fee: Decimal(string: "0.10")!, realized: 0),
+            NextFill(date: now, code: "159941", side: "sell", units: 500, price: Decimal(string: "1.20")!, fee: Decimal(string: "0.10")!, realized: 0)
+        ])
+        let basis = book.costBasis(for: "159941")
+        XCTAssertNotNil(basis)
+        // 买入均价：只由买入决定，(1000 + 0.10) / 1000。
+        XCTAssertEqual(basis?.averageCost ?? 0, Decimal(string: "1.0001")!)
+        // 摊薄成本：(1000.10 − 599.90) / 500 = 0.8004，卖出盈利把成本压低。
+        XCTAssertEqual(basis?.dilutedCost ?? 0, Decimal(string: "0.8004")!)
+        XCTAssertTrue(basis?.hasFullHistory == true)
+    }
+
+    func testCostBasisRefusesDilutedCostWithoutBuyFills() {
+        // 补录的已有持仓没有买入流水，摊薄口径不成立，不能凭空造一个成本。
+        let book = NextBook(cash: 0, positions: [
+            NextPosition(code: "515180", name: "红利ETF", units: 100, bookCost: 120)
+        ])
+        let basis = book.costBasis(for: "515180")
+        XCTAssertNotNil(basis)
+        XCTAssertNil(basis?.dilutedCost)
+        XCTAssertFalse(basis?.hasFullHistory == true)
+        XCTAssertEqual(basis?.averageCost ?? 0, Decimal(string: "1.2")!)
+    }
+
+    func testDailyChangeUsesBuyPriceForTodaysPurchases() {
+        // 昨仓 1000 份（昨收 1.00），今天再买 500 份 @1.02，现价 1.05。
+        let book = NextBook(cash: 1000, positions: [
+            NextPosition(code: "159941", name: "纳指ETF", units: 1500, bookCost: Decimal(string: "1510.1")!)
+        ], fills: [
+            NextFill(date: now, code: "159941", side: "buy", units: 500, price: Decimal(string: "1.02")!, fee: Decimal(string: "0.10")!, realized: 0)
+        ])
+        let quote = NextQuote(code: "159941", name: "纳指ETF", price: Decimal(string: "1.05")!,
+                              previousClose: 1, time: now.addingTimeInterval(-5), source: "test")
+        let stamp = NextDataStamp(source: "test", observedAt: now, quality: .live, detail: "")
+        let valuation = book.valuation(using: ["159941": NextCachedQuote(quote: quote, stamp: stamp)], at: now)
+        // 昨仓：(1.05 − 1.00) × 1000 = 50；今买：(1.05 − 1.02) × 500 − 0.10 = 14.9
+        XCTAssertEqual(valuation.dailyChange, Decimal(string: "64.9")!)
+    }
+
 }
 
 private extension Data {

@@ -669,7 +669,46 @@ struct NextAssetValuation: Equatable {
     let quality: NextDataQuality?
     var isComplete: Bool { pricedPositions == totalPositions }
 }
+/// 持仓成本口径。券商软件里通常能看到两种，含义完全不同：
+///
+/// - **买入均价（移动加权平均）**：只由买入决定，卖出不改变每份成本。
+///   账本里 `bookCost / units` 就是这一种，天然可靠，不依赖成交历史是否完整。
+/// - **摊薄成本**：把卖出所得也冲减进成本 —— `(累计买入金额 + 买入费用 − 累计卖出金额 + 卖出费用) / 当前份额`。
+///   卖出盈利会把成本压低，甚至出现负成本；这是同花顺等软件默认显示的「成本价」。
+///
+/// 摊薄成本**只有成交历史完整时才算得准**。补录的已有持仓没有买入流水，
+/// 这种情况下 `hasFullHistory` 为 false，摊薄值退回加权平均，不会凭空造出一个假成本。
+struct NextCostBasis: Equatable {
+    let code: String
+    let units: Int
+    /// 账本里的持仓总成本（加权平均口径，含买入手续费）。
+    let bookCost: Decimal
+    let averageCost: Decimal
+    let dilutedCost: Decimal?
+    let hasFullHistory: Bool
+    var isNegativeDiluted: Bool { (dilutedCost ?? 0) < 0 }
+}
+
 extension NextBook {
+    /// 计算一只持仓的两种成本口径。
+    func costBasis(for code: String) -> NextCostBasis? {
+        guard let position = positions.first(where: { $0.code == code }) else { return nil }
+        let related = fills.filter { $0.code == code }
+        let buys = related.filter { $0.side == "buy" }
+        let sells = related.filter { $0.side == "sell" }
+        let average = position.units > 0 ? position.bookCost / Decimal(position.units) : 0
+        // 补录持仓没有买入流水，摊薄口径无法成立。
+        let hasFullHistory = !buys.isEmpty
+        var diluted: Decimal?
+        if hasFullHistory, position.units > 0 {
+            let buyCost = buys.reduce(Decimal.zero) { $0 + $1.price * Decimal($1.units) + $1.fee }
+            let sellNet = sells.reduce(Decimal.zero) { $0 + $1.price * Decimal($1.units) - $1.fee }
+            diluted = (buyCost - sellNet) / Decimal(position.units)
+        }
+        return NextCostBasis(code: code, units: position.units, bookCost: position.bookCost,
+                             averageCost: average, dilutedCost: diluted, hasFullHistory: hasFullHistory)
+    }
+
     func valuation(using quotes: [String: NextCachedQuote], at now: Date) -> NextAssetValuation {
         var partial = cash
         var priced = 0
@@ -690,7 +729,25 @@ extension NextBook {
         }
         let complete = priced == positions.filter({ $0.units > 0 }).count
         let quality = qualities.max { qualityRank($0) < qualityRank($1) }
-        let delta = complete && allQuotesFresh ? partial - previousTotal : nil
+        // 当日参考盈亏的券商口径：
+        //   昨仓 ＝ (现价 − 昨收) × 当前份额
+        //   今买 ＝ (昨收 − 买入价) × 份额 − 费用   ← 补回被「按昨收」多算的部分
+        //   今卖 ＝ (卖出价 − 昨收) × 份额 − 费用
+        // 只按 (现价−昨收) × 当前份额 会把当日买入的份额也当成昨天就有，
+        // 当天有买卖时必然和同花顺对不上。
+        var intradayAdjustment = Decimal.zero
+        var marketCalendar = Calendar(identifier: .gregorian)
+        marketCalendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        for fill in fills where marketCalendar.isDate(fill.date, inSameDayAs: now) {
+            guard let cached = quotes[fill.code] else { continue }
+            let previous = cached.quote.previousClose
+            if fill.side == "buy" {
+                intradayAdjustment += (previous - fill.price) * Decimal(fill.units) - fill.fee
+            } else {
+                intradayAdjustment += (fill.price - previous) * Decimal(fill.units) - fill.fee
+            }
+        }
+        let delta = complete && allQuotesFresh ? partial - previousTotal + intradayAdjustment : nil
         let deltaPercent = delta.flatMap { previousTotal > 0 ? $0 / previousTotal * 100 : nil }
         return NextAssetValuation(total: complete ? partial : nil, partialTotal: partial, dailyChange: delta, dailyChangePercent: deltaPercent, pricedPositions: priced,
                                   totalPositions: positions.filter({ $0.units > 0 }).count, earliestQuote: earliest, quality: quality)
