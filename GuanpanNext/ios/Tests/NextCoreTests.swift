@@ -9,6 +9,46 @@ final class NextCoreTests: XCTestCase {
     func etfRules(_ code: String = "159941", settlement: NextSettlementRule = .t0, assetClass: NextAssetClass = .etf) -> NextInstrumentRules {
         NextInstrumentRules(code: code, market: "SZ", assetClass: assetClass, settlement: settlement, lotSize: 100, feePerTrade: Decimal(string: "0.10"), source: "verified test fixture", verifiedAt: now)
     }
+    func testIncomeAndDividendDataRoundTripsAndDoesNotRequireOldBookKeys() throws {
+        let planned = NextIncomeEvent(kind: .etfDistribution, code: "563020", name: "红利ETF",
+            exDate: now, payDate: now.addingTimeInterval(86400), units: 100,
+            perUnit: Decimal(string: "0.012"), grossAmount: Decimal(string: "1.20")!, tax: Decimal(string: "0.10")!)
+        try planned.validate()
+        var book = NextBook(cash: 50, incomeEvents: [planned],
+            dividendEvents: [NextETFDividendEvent(code: "563020", date: "2026-06-10", amountPerShare: Decimal(string: "0.012")!,
+                isEstimated: false, recordDate: "2026-06-09", payDate: "2026-06-15")])
+        let encoded = try JSONEncoder().encode(book)
+        let decoded = try JSONDecoder().decode(NextBook.self, from: encoded)
+        XCTAssertEqual(decoded.incomeEvents.first?.netAmount, Decimal(string: "1.10"))
+        XCTAssertEqual(decoded.dividendEvents.count, 1)
+        XCTAssertEqual(decoded.dividendEvents[0].recordDate, "2026-06-09")
+        XCTAssertEqual(decoded.dividendEvents[0].payDate, "2026-06-15")
+        XCTAssertNoThrow(try decoded.validate())
+        let old = "{\"schemaVersion\":1,\"id\":\"\(UUID().uuidString)\",\"cash\":0,\"positions\":[],\"fills\":[],\"history\":[]}"
+        XCTAssertNoThrow(try JSONDecoder().decode(NextBook.self, from: Data(old.utf8)))
+        book.incomeEvents[0].tax = Decimal(string: "2.00")!
+        XCTAssertThrowsError(try book.incomeEvents[0].validate())
+    }
+    func testBookRejectsMalformedFillAndHistoryValuesBeforeBackup() throws {
+        let malformedFill = NextFill(date: now, code: "159941", side: "purchase", units: 100,
+                                     price: 1.2, fee: 0.1, realized: 0)
+        XCTAssertThrowsError(try NextBook(fills: [malformedFill]).validate())
+        let malformedPoint = NextAssetPoint(date: now, total: -1, externalFlow: 0)
+        XCTAssertThrowsError(try NextBook(history: [malformedPoint]).validate())
+        let validFill = NextFill(date: now, code: "159941", side: "buy", units: 100,
+                                 price: 1.2, fee: 0.1, realized: 0)
+        XCTAssertNoThrow(try NextBook(fills: [validFill]).validate())
+    }
+    func testVerifiedDividendFallbacksRemainHistoricalAndEstimatedEventsAreSeparate() {
+        let events = NextDividendAnalytics.merged([
+            NextETFDividendEvent(code: "159545", date: "2026-05-15", amountPerShare: Decimal(string: "0.014")!, isEstimated: true),
+            NextETFDividendEvent(code: "159941", date: "2026-05-15", amountPerShare: Decimal(string: "0.100")!)
+        ])
+        XCTAssertTrue(events.contains { $0.code == "159545" && $0.isEstimated == true })
+        XCTAssertTrue(events.contains { $0.code == "159941" && $0.date == "2026-05-15" })
+        XCTAssertTrue(events.contains { $0.code == "563020" && $0.isEstimated != true })
+    }
+
     func testMissingQuoteDoesNotPretendAssetTotal() {
         var book = NextBook(); book.cash = 100
         book.positions = [NextPosition(code: "159941", name: "纳指ETF", units: 100, bookCost: 120)]
@@ -165,6 +205,37 @@ final class NextCoreTests: XCTestCase {
         XCTAssertEqual(NextTwinStrategy.G.title, "AI 多因子自主模拟交易")
         XCTAssertEqual(NextTwinStrategy.H.title, "用户自定义策略")
     }
+    func testPatientLimitPlanIsAValidatedReminderAndRequiresFreshQuote() throws {
+        let plan = NextPatientLimitPlan(id: UUID(), code: "159941", name: "纳指ETF", limitPrice: Decimal(string: "1.35")!, units: 100,
+            createdAt: now, expiresAt: now.addingTimeInterval(86400))
+        try plan.validate()
+        XCTAssertTrue(plan.shouldTrigger(with: quote(time: now, price: Decimal(string: "1.35")!), at: now))
+        XCTAssertFalse(plan.shouldTrigger(with: quote(time: now, price: Decimal(string: "1.36")!), at: now))
+        XCTAssertFalse(plan.shouldTrigger(with: quote(time: now.addingTimeInterval(-121), price: 1.2), at: now))
+        XCTAssertFalse(plan.shouldTrigger(with: NextQuote(code: "563020", name: "其他ETF", price: 1, previousClose: 1, time: now, source: "test"), at: now))
+        var paused = plan; paused.state = "已暂停"
+        try paused.validate()
+        XCTAssertFalse(paused.shouldTrigger(with: quote(time: now, price: 1.2), at: now))
+        var invalid = plan
+        invalid.state = "已成交"
+        XCTAssertThrowsError(try invalid.validate())
+    }
+    func testBacktestResultIsValidatedCachedAndKeptOutOfRealBook() throws {
+        let result = NextTwinBacktest(runId: "test-run", strategy: "B", engine: "point-in-time daily OHLC replay", realOrder: false,
+            queueAccuracy: "daily bars cannot prove order-book queue fills", aiSignalAccuracy: "proxy", source: "NAS daily K",
+            startDate: "2026-10-19", endDate: "2026-10-20", sessions: 2, codes: ["159941"], initialWeights: ["159941": "1"], parameters: [:], feePerFill: "0.10",
+            initialCash: "10000", externalContributions: "0", endingEquity: "10000", totalReturn: "0", annualizedReturn: "0",
+            annualizedVolatility: "0", sharpe: "0", calmar: "0", maxDrawdown: "0", feesPaid: "0", tradeCount: 0,
+            openPositions: ["159941": 0], pendingOrders: [],
+            curve: [.init(date: "2026-10-19", equity: "10000", cash: "10000", nav: "1", externalFlow: "0"),
+                    .init(date: "2026-10-20", equity: "10000", cash: "10000", nav: "1", externalFlow: "0")], fills: [])
+        try result.validate()
+        XCTAssertNotNil(result.equityChartDataset())
+        var archive = NextAppArchive(); archive.twinBacktests["B"] = result
+        let copied = try NextArchiveEnvelope(archive: archive).archive()
+        XCTAssertEqual(copied.twinBacktests["B"], result)
+        XCTAssertTrue(copied.book.positions.isEmpty)
+    }
     func testChartUsesActualTimeAndPriceDomainDoesNotExpandForIOPV() throws {
         let first = NextChartSample(timestamp: now, open: 1.0, high: 1.1, low: 0.9, close: 1.05, iopv: 4, volume: 100)
         let later = NextChartSample(timestamp: now.addingTimeInterval(3600), open: 1.1, high: 1.2, low: 1.0, close: 1.15, iopv: 4.1, volume: 200)
@@ -181,6 +252,24 @@ final class NextCoreTests: XCTestCase {
         XCTAssertFalse(rules.isVerified)
         let confirmed = NextInstrumentRules(code: "159941", market: "SZ", assetClass: .etf, settlement: .t0, lotSize: 100, feePerTrade: Decimal(string: "0.10"), source: "official", verifiedAt: now)
         XCTAssertTrue(confirmed.isVerified)
+    }
+    func testOfficialETFBacktestRuleDoesNotInventSettlement() {
+        let sz = NextInstrumentRules.verifiedETFMarketRule(code: "159941", market: "SZSE", at: now)
+        let sh = NextInstrumentRules.verifiedETFMarketRule(code: "563020", market: "SSE", at: now)
+        XCTAssertEqual(sz?.lotSize, 100)
+        XCTAssertEqual(sh?.lotSize, 100)
+        XCTAssertTrue(sz?.isHistoricalBacktestEligible == true)
+        XCTAssertFalse(sz?.isVerified ?? true)
+        XCTAssertEqual(sz?.settlement, .unknown)
+        XCTAssertNil(NextInstrumentRules.verifiedETFMarketRule(code: "123456", market: "SZSE", at: now))
+    }
+    func testForegroundMarketClockUsesChinaSessionsAndWeekdays() {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai"); formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        XCTAssertTrue(NextMarketClock.isRegularSession(formatter.date(from: "2026-10-20 10:00")!))
+        XCTAssertTrue(NextMarketClock.isRegularSession(formatter.date(from: "2026-10-20 14:00")!))
+        XCTAssertFalse(NextMarketClock.isRegularSession(formatter.date(from: "2026-10-20 12:00")!))
+        XCTAssertFalse(NextMarketClock.isRegularSession(formatter.date(from: "2026-10-18 10:00")!))
     }
     func testTwinFundingIsMatchedAcrossAThroughHAndNeverTouchesRealBook() throws {
         let real = NextBook()
@@ -217,6 +306,14 @@ final class NextCoreTests: XCTestCase {
         XCTAssertEqual(try envelope.archive().decisionHistory, [decision])
         let legacy = try JSONDecoder().decode(NextAppArchive.self, from: Data("{}".utf8))
         XCTAssertTrue(legacy.decisionHistory.isEmpty)
+    }
+    func testGoalTargetWeightsAreValidatedAndOlderSettingsStillDecode() throws {
+        let legacy = try JSONDecoder().decode(NextGoal.self, from: Data("{\"years\":10,\"monthlyBudget\":1000,\"concentrationLimit\":40}".utf8))
+        XCTAssertTrue(legacy.targetWeights.isEmpty)
+        var goal = NextGoal(targetWeights: ["159941": 60, "563020": 40])
+        XCTAssertNoThrow(try goal.validate())
+        goal.targetWeights["563020"] = 30
+        XCTAssertThrowsError(try goal.validate())
     }
     func testDailyChartCacheKeySurvivesBackupValidation() throws {
         let sample = NextChartSample(timestamp: now, open: 1.0, high: 1.1, low: 0.9, close: 1.05, iopv: nil, volume: 100)
@@ -269,6 +366,64 @@ final class NextCoreTests: XCTestCase {
         XCTAssertNil(dataset.samples[0].iopv)
         XCTAssertNil(dataset.iopvSource)
         try dataset.validate()
+    }
+    func testFixedIntradayAxisCoversFullSessionAndCompressesLunch() throws {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai"); formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        let open = try XCTUnwrap(formatter.date(from: "2026-10-20 09:30"))
+        let morningEnd = try XCTUnwrap(formatter.date(from: "2026-10-20 11:30"))
+        let lunch = try XCTUnwrap(formatter.date(from: "2026-10-20 12:15"))
+        let afternoon = try XCTUnwrap(formatter.date(from: "2026-10-20 13:00"))
+        let close = try XCTUnwrap(formatter.date(from: "2026-10-20 15:00"))
+        XCTAssertEqual(NextIntradayAxis.minute(open), 0)
+        XCTAssertEqual(NextIntradayAxis.minute(morningEnd), 120)
+        XCTAssertEqual(NextIntradayAxis.minute(lunch), 126, accuracy: 0.001)
+        XCTAssertEqual(NextIntradayAxis.minute(afternoon), 132)
+        XCTAssertEqual(NextIntradayAxis.minute(close), NextIntradayAxis.length)
+        XCTAssertEqual(NextIntradayAxis.length, 252)
+        XCTAssertEqual(NextIntradayAxis.ticks.first?.1, "09:30")
+        XCTAssertEqual(NextIntradayAxis.ticks.last?.1, "15:00")
+        XCTAssertTrue(NextIntradayAxis.sameTradingDay(open, close))
+        XCTAssertFalse(NextIntradayAxis.sameTradingDay(open, close.addingTimeInterval(86_400)))
+    }
+    func testIntradayArchiveSelectsOneTradingDayAndDefaultsToNewest() throws {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai"); formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        let first = try XCTUnwrap(formatter.date(from: "2026-10-19 09:30"))
+        let second = try XCTUnwrap(formatter.date(from: "2026-10-20 09:30"))
+        let samples = [
+            NextChartSample(timestamp: first, open: nil, high: nil, low: nil, close: 1, iopv: nil, volume: nil),
+            NextChartSample(timestamp: second, open: nil, high: nil, low: nil, close: 2, iopv: nil, volume: nil)
+        ]
+        XCTAssertEqual(NextIntradayAxis.sessionSamples(from: samples, selectedDate: first).map(\.close), [1])
+        XCTAssertEqual(NextIntradayAxis.sessionSamples(from: samples, selectedDate: nil).map(\.close), [2])
+    }
+    func testSimpleMovingAveragesUseDailyCloseAndStayUnavailableUntilFullWindow() throws {
+        let bars = (1...5).map { value in
+            NextChartSample(timestamp: now.addingTimeInterval(Double(value) * 86_400), open: nil, high: nil, low: nil,
+                            close: Decimal(value), iopv: nil, volume: nil)
+        }
+        XCTAssertEqual(NextMovingAverage.series(bars, period: 3), [nil, nil, 2, 3, 4])
+        XCTAssertTrue(NextMovingAverage.series(bars, period: 250).allSatisfy { $0 == nil })
+        let fullHistory = (1...250).map { value in
+            NextChartSample(timestamp: now.addingTimeInterval(Double(value) * 86_400), open: nil, high: nil, low: nil,
+                            close: Decimal(value), iopv: nil, volume: nil)
+        }
+        XCTAssertEqual(NextMovingAverage.series(fullHistory, period: 250)[249], Decimal(string: "125.5"))
+    }
+    func testChartStateDecodesBeforeMovingAverageDefaultsWereAdded() throws {
+        let oldState = #"{"interval":"day","visibleLayers":["price","cost"],"lowerBound":null,"upperBound":null,"crosshairTime":null,"scale":1}"#.data(using: .utf8)!
+        let state = try JSONDecoder().decode(NextChartState.self, from: oldState)
+        XCTAssertEqual(state.interval, "day")
+        XCTAssertNil(state.movingAverageDefaultsApplied)
+        XCTAssertNil(state.latestIntradaySessionDate)
+    }
+    func testChartPriceDomainIncludesIOPVWhenItExtendsBeyondPriceBars() throws {
+        let sample = NextChartSample(timestamp: now, open: 1.0, high: 1.1, low: 0.9, close: 1.05, iopv: 1.4, volume: 100)
+        let chart = NextChartDataset(code: "159941", interval: .intraday, samples: [sample], costPerUnit: nil, costObservedAt: nil, priceSource: "feed", iopvSource: "verified ETF quote", observedAt: now)
+        let domain = try XCTUnwrap(chart.priceDomain)
+        XCTAssertLessThan(domain.lowerBound, 0.9)
+        XCTAssertGreaterThan(domain.upperBound, 1.4)
     }
     func testLiveETFIOPVOnlyEnrichesNearestCurrentMinutePoint() throws {
         let first = NextChartSample(timestamp: now, open: nil, high: nil, low: nil, close: 1.2, iopv: nil, volume: 100)

@@ -12,18 +12,25 @@ enum GPTheme: String, CaseIterable, Identifiable, Codable {
 struct GPPalette {
     let scheme: ColorScheme
     let comfort: Bool
-    var canvas: Color { comfort ? Color(hex: 0xF1F0E5) : scheme == .dark ? Color(hex: 0x111915) : Color(hex: 0xF7F5EF) }
-    var paper: Color { comfort ? Color(hex: 0xFAF9F1) : scheme == .dark ? Color(hex: 0x19231D) : Color(hex: 0xFFFEFA) }
-    var raised: Color { scheme == .dark ? Color(hex: 0x202C25) : Color(hex: 0xF0EEE6) }
-    var ink: Color { scheme == .dark ? Color(hex: 0xEEF2E9) : Color(hex: 0x202B24) }
-    var muted: Color { scheme == .dark ? Color(hex: 0xA3AEA3) : Color(hex: 0x747B72) }
-    var line: Color { scheme == .dark ? Color(hex: 0x344038) : Color(hex: 0xE1DED4) }
-    var forest: Color { scheme == .dark ? Color(hex: 0xA7C9A8) : Color(hex: 0x315D4A) }
+    // The pale blue-lilac paper tint borrows the calm color layering the user
+    // liked in the reference, while typography and editorial grouping remain A.
+    var canvas: Color { comfort ? Color(hex: 0xF1F0E5) : scheme == .dark ? Color(hex: 0x131824) : Color(hex: 0xF1F2F9) }
+    var paper: Color { comfort ? Color(hex: 0xFAF9F1) : scheme == .dark ? Color(hex: 0x1B2130) : Color(hex: 0xFCFCFF) }
+    var raised: Color { comfort ? Color(hex: 0xE8E7DA) : scheme == .dark ? Color(hex: 0x252C3C) : Color(hex: 0xE9EBF4) }
+    var ink: Color { comfort ? Color(hex: 0x263329) : scheme == .dark ? Color(hex: 0xEEF0F8) : Color(hex: 0x252A3B) }
+    var muted: Color { comfort ? Color(hex: 0x707568) : scheme == .dark ? Color(hex: 0xA6AEC0) : Color(hex: 0x73798C) }
+    var line: Color { comfort ? Color(hex: 0xD8D7CA) : scheme == .dark ? Color(hex: 0x353D50) : Color(hex: 0xDFE2EC) }
+    var forest: Color { comfort ? Color(hex: 0x42634E) : scheme == .dark ? Color(hex: 0x9CC8BD) : Color(hex: 0x315D58) }
     var forestDeep: Color { Color(hex: 0x244638) }
-    var terracotta: Color { scheme == .dark ? Color(hex: 0xE2A475) : Color(hex: 0xB46B42) }
-    var jade: Color { scheme == .dark ? Color(hex: 0x83C4A0) : Color(hex: 0x347E63) }
-    var risk: Color { scheme == .dark ? Color(hex: 0xEF9587) : Color(hex: 0xB9564D) }
-    var tint: Color { scheme == .dark ? Color(hex: 0x26392D) : Color(hex: 0xE5ECE4) }
+    var terracotta: Color { comfort ? Color(hex: 0xA66642) : scheme == .dark ? Color(hex: 0xE2A475) : Color(hex: 0xB46B58) }
+    var jade: Color { comfort ? Color(hex: 0x3D765D) : scheme == .dark ? Color(hex: 0x83C4A0) : Color(hex: 0x347E63) }
+    var risk: Color { comfort ? Color(hex: 0xAA574C) : scheme == .dark ? Color(hex: 0xEF9587) : Color(hex: 0xC24E58) }
+    var tint: Color { comfort ? Color(hex: 0xE4E9DC) : scheme == .dark ? Color(hex: 0x263342) : Color(hex: 0xE5E8F3) }
+    var heroSurface: Color { comfort ? Color(hex: 0xF0EFE2) : scheme == .dark ? Color(hex: 0x20283A) : Color(hex: 0xE8EAF7) }
+    var chartBlue: Color { comfort ? Color(hex: 0x547D91) : scheme == .dark ? Color(hex: 0x8CA9E8) : Color(hex: 0x607EC5) }
+    var chartViolet: Color { comfort ? Color(hex: 0x806C96) : scheme == .dark ? Color(hex: 0xC0A4E8) : Color(hex: 0x8872B7) }
+    var chartGold: Color { comfort ? Color(hex: 0x9B7D42) : scheme == .dark ? Color(hex: 0xE2C178) : Color(hex: 0xB08A3C) }
+    var chartCost: Color { comfort ? Color(hex: 0xA45F6C) : scheme == .dark ? Color(hex: 0xE38FA3) : Color(hex: 0xB85C78) }
 }
 
 private struct GPPaletteKey: EnvironmentKey {
