@@ -684,6 +684,58 @@ final class NextCoreTests: XCTestCase {
         XCTAssertEqual(summary?.maxDrawdownPercent ?? 0, 31.25, accuracy: 0.0001)
     }
 
+    func testCatalogSearchMatchesNameAndInitialsButNotEmptyQuery() {
+        XCTAssertTrue(InstrumentCatalog.search("").isEmpty)
+        XCTAssertTrue(InstrumentCatalog.search("红利").contains { $0.code == "515180" })
+        XCTAssertTrue(InstrumentCatalog.search("nz").contains { $0.code == "159941" })
+        XCTAssertTrue(InstrumentCatalog.search("5103").contains { $0.code == "510300" })
+        XCTAssertTrue(InstrumentCatalog.search("不存在的名字").isEmpty)
+    }
+
+    func testInstrumentGroupClassifiesKnownPrefixedCodes() {
+        XCTAssertEqual(NextInstrumentGroup.classify(code: "515180", name: "红利ETF"), .dividend)
+        XCTAssertEqual(NextInstrumentGroup.classify(code: "513100", name: "纳指100ETF"), .overseas)
+        XCTAssertEqual(NextInstrumentGroup.classify(code: "510300", name: "沪深300ETF"), .broad)
+        XCTAssertEqual(NextInstrumentGroup.classify(code: "511010", name: "国债ETF"), .bond)
+        XCTAssertEqual(NextInstrumentGroup.classify(code: "600519", name: "贵州茅台"), .equity)
+    }
+
+    func testForwardAdjustmentLowersHistoryAfterDividendOnly() {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let before = formatter.date(from: "2026-01-05")!
+        let after = formatter.date(from: "2026-03-05")!
+        let samples = [
+            NextChartSample(timestamp: before, open: 1.0, high: 1.1, low: 0.9, close: 1.0, iopv: nil, volume: 100),
+            NextChartSample(timestamp: after, open: 1.0, high: 1.1, low: 0.9, close: 1.0, iopv: nil, volume: 100)
+        ]
+        let events = [NextETFDividendEvent(code: "510300", date: "2026-02-01", amountPerShare: Decimal(string: "0.05")!)]
+        let adjusted = NextPriceAdjustment.forwardAdjusted(samples, events: events, code: "510300")
+        // 除息日之前的那根下调 0.05，之后的保持原值。
+        XCTAssertEqual(adjusted[0].close, Decimal(string: "0.95")!)
+        XCTAssertEqual(adjusted[1].close, 1.0)
+        // 没有派息事件时原样返回。
+        XCTAssertEqual(NextPriceAdjustment.forwardAdjusted(samples, events: [], code: "510300"), samples)
+    }
+
+    func testBenchmarkReturnUsesSameWindow() {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let start = formatter.date(from: "2026-01-01")!
+        let samples = (0..<5).map { index -> NextChartSample in
+            let price = Decimal(string: String(format: "%.1f", 100 + Double(index) * 10))!
+            return NextChartSample(timestamp: start.addingTimeInterval(Double(index) * 86_400),
+                                   open: price, high: price, low: price, close: price, iopv: nil, volume: 1)
+        }
+        // 从第 100 点到第 140 点：+40%
+        let value = NextBenchmark.returnPercent(samples: samples, from: start, to: start.addingTimeInterval(4 * 86_400))
+        XCTAssertEqual(value ?? 0, 40, accuracy: 0.0001)
+        XCTAssertNil(NextBenchmark.returnPercent(samples: [], from: start, to: start))
+    }
+
 }
 
 private extension Data {

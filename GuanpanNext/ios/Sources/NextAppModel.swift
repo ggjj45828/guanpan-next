@@ -333,11 +333,16 @@ struct LocalPreferences: Codable {
             preferences = preferences
         }
     }
-    func addPriceAlert(code: String, price: Decimal, direction: NextPriceAlertDirection) throws {
-        guard code.count == 6, code.allSatisfy(\.isNumber), !preferences.notifications.priceRules.contains(where: { $0.code == code && $0.price == price && $0.direction == direction }) else {
-            throw NextError.invalid("价格提醒代码无效或已存在")
+    func addPriceAlert(code: String, price: Decimal, direction: NextPriceAlertDirection,
+                       metric: NextAlertMetric = .price) throws {
+        let duplicated = preferences.notifications.priceRules.contains {
+            $0.code == code && $0.price == price && $0.direction == direction && $0.resolvedMetric == metric
         }
-        let rule = NextPriceAlertRule(code: code, name: quotes[code]?.quote.name ?? code, price: price, direction: direction)
+        guard code.count == 6, code.allSatisfy(\.isNumber), !duplicated else {
+            throw NextError.invalid("提醒代码无效，或相同条件的提醒已存在")
+        }
+        let rule = NextPriceAlertRule(code: code, name: quotes[code]?.quote.name ?? InstrumentCatalog.name(for: code) ?? code,
+                                      price: price, direction: direction, metric: metric)
         try rule.validate()
         preferences.notifications.priceRules.append(rule); preferences = preferences
     }
@@ -396,7 +401,8 @@ struct LocalPreferences: Codable {
         var triggered: [(NextPriceAlertRule, NextQuote)] = []
         for quote in values where quote.isFresh(at: Date()) {
             for index in rules.indices where rules[index].enabled && rules[index].code == quote.code {
-                let match = rules[index].direction == .atOrAbove ? quote.price >= rules[index].price : quote.price <= rules[index].price
+                guard let current = rules[index].value(for: quote) else { continue }
+                let match = rules[index].direction == .atOrAbove ? current >= rules[index].price : current <= rules[index].price
                 if match && !rules[index].isInsideTrigger { triggered.append((rules[index], quote)) }
                 rules[index].isInsideTrigger = match
             }
@@ -404,7 +410,14 @@ struct LocalPreferences: Codable {
         preferences.notifications.priceRules = rules; preferences = preferences
         for (rule, quote) in triggered {
             let relation = rule.direction == .atOrAbove ? "达到或高于" : "达到或低于"
-            postLocalAlert(level: "价格", fingerprint: "price-rule-\(rule.id.uuidString)", title: "\(rule.name) 价格提醒", detail: "最新价 ¥\(NextMoney.text(quote.price, digits: 4))，已\(relation)你设置的 ¥\(NextMoney.text(rule.price, digits: 4))。", stamp: NextDataStamp(source: quote.source, observedAt: quote.time, quality: .live, detail: "价格规则触发"))
+            let metric = rule.resolvedMetric
+            let current = rule.value(for: quote) ?? quote.price
+            let currentText = metric == .price ? "¥\(NextMoney.text(current, digits: 4))" : "\(NextNum.signed(NextNum.double(current)))%"
+            let thresholdText = metric == .price ? "¥\(NextMoney.text(rule.price, digits: 4))" : "\(NextNum.signed(NextNum.double(rule.price)))%"
+            let title = metric == .price ? "\(rule.name) 价格提醒" : "\(rule.name) \(metric.title)提醒"
+            postLocalAlert(level: metric.title, fingerprint: "price-rule-\(rule.id.uuidString)", title: title,
+                           detail: "当前\(metric.title) \(currentText)，已\(relation)你设置的 \(thresholdText)。",
+                           stamp: NextDataStamp(source: quote.source, observedAt: quote.time, quality: .live, detail: "\(metric.title)规则触发"))
         }
     }
     func configureNAS(baseURL: String) throws {

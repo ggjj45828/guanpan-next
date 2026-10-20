@@ -9,10 +9,33 @@ struct HoldingsBreakdownPanel: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
     @AppStorage("guanpan.next.costMode") private var modeRaw = NextCostDisplayMode.diluted.rawValue
+    @State private var benchmarkCode = "000300"
 
     private var mode: NextCostDisplayMode { NextCostDisplayMode(rawValue: modeRaw) ?? .diluted }
     private var summary: NextPortfolioSummary {
         NextPortfolioCalculator.summary(book: model.book, quotes: model.quotes, at: Date(), mode: mode)
+    }
+    private var benchmarkName: String {
+        NextBenchmark.options.first { $0.code == benchmarkCode }?.name ?? benchmarkCode
+    }
+    /// 基准涨幅取与组合完全相同的起止日期，避免「同一段时间」口径不一致。
+    private var benchmarkReturn: Double? {
+        guard let performance = NextPerformanceCalculator.summary(points: model.book.history),
+              let dataset = model.chartData["\(benchmarkCode):day"] else { return nil }
+        return NextBenchmark.returnPercent(samples: dataset.orderedSamples,
+                                           from: performance.startDate, to: performance.endDate)
+    }
+    private func rebalanceRows(from data: NextPortfolioSummary) -> [RebalanceRow] {
+        guard data.totalValue > 0 else { return [] }
+        return model.book.positions.compactMap { position in
+            guard let target = model.goal.targetWeights[position.code], target > 0,
+                  let row = data.positions.first(where: { $0.code == position.code }) else { return nil }
+            return RebalanceRow(id: position.code, name: position.name,
+                                targetPercent: NextNum.double(target),
+                                currentPercent: row.weightPercent,
+                                deltaAmount: data.totalValue * target / 100 - row.marketValue)
+        }
+        .sorted { abs(NextNum.double($0.deltaAmount)) > abs(NextNum.double($1.deltaAmount)) }
     }
 
     var body: some View {
@@ -41,7 +64,20 @@ struct HoldingsBreakdownPanel: View {
             }
             Text(mode.detail).font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
             if let performance = NextPerformanceCalculator.summary(points: model.book.history) {
-                PerformanceBlock(summary: performance, sampleCount: model.book.history.count)
+                HStack(spacing: 6) {
+                    Text("基准").font(.system(size: 10)).foregroundStyle(p.muted)
+                    ForEach(NextBenchmark.options) { option in
+                        Button { benchmarkCode = option.code } label: {
+                            Text(option.name).font(.system(size: 9.5, weight: benchmarkCode == option.code ? .semibold : .regular))
+                                .foregroundStyle(benchmarkCode == option.code ? p.chartViolet : p.muted)
+                                .padding(.horizontal, 7).padding(.vertical, 4)
+                                .background(benchmarkCode == option.code ? p.chartViolet.opacity(0.14) : .clear, in: Capsule())
+                        }.buttonStyle(.plain)
+                    }
+                    Spacer(minLength: 0)
+                }
+                PerformanceBlock(summary: performance, sampleCount: model.book.history.count,
+                                 benchmarkName: benchmarkName, benchmarkReturn: benchmarkReturn)
             } else {
                 Text("还没有足够的资产快照，暂不计算区间收益（至少需要 2 个）。")
                     .font(.caption2).foregroundStyle(p.muted)
@@ -53,6 +89,20 @@ struct HoldingsBreakdownPanel: View {
                 ForEach(data.positions) { item in
                     HoldingsSummaryRow(item: item, palette: p)
                 }
+            }
+
+            let rebalance = rebalanceRows(from: data)
+            if !rebalance.isEmpty {
+                Divider().overlay(p.line.opacity(0.7)).padding(.vertical, 4)
+                Text("再平衡（按你设定的目标仓位）").font(.caption.weight(.medium)).foregroundStyle(p.ink)
+                ForEach(rebalance) { row in
+                    GPDataRow(title: "\(row.name) 目标 \(NextNum.percent(row.targetPercent, digits: 1)) · 当前 \(NextNum.percent(row.currentPercent, digits: 1))",
+                              value: "\(row.deltaAmount >= 0 ? "需买入" : "需卖出") ¥\(NextMoney.text(abs(row.deltaAmount)))",
+                              note: "按总资产与目标比例折算；不含税费与最小交易单位",
+                              valueColor: row.deltaAmount >= 0 ? p.risk : p.jade)
+                }
+                Text("目标仓位只在「设置 → 你的目标与资金」里设定；这里只算差额，不生成订单。")
+                    .font(.caption2).foregroundStyle(p.muted)
             }
 
             if data.realizedTotal != 0 || !data.recentSells.isEmpty {
@@ -99,8 +149,14 @@ private struct HoldingsSummaryRow: View {
                 Text("占比 \(NextNum.percent(item.weightPercent, digits: 1))").foregroundStyle(p.muted)
             }
             .font(.system(size: 9.5, design: .monospaced))
-            Text("\(item.units) 份 · 成本 ¥\(NextMoney.text(item.costPerUnit, digits: 4))（\(item.costSource)）")
-                .font(.system(size: 9)).foregroundStyle(p.muted.opacity(0.9))
+            HStack(spacing: 6) {
+                Text(NextInstrumentGroup.classify(code: item.code, name: item.name).rawValue)
+                    .font(.system(size: 8.5, weight: .semibold)).foregroundStyle(p.chartViolet)
+                    .padding(.horizontal, 5).padding(.vertical, 1.5)
+                    .background(p.chartViolet.opacity(0.12), in: Capsule())
+                Text("\(item.units) 份 · 成本 ¥\(NextMoney.text(item.costPerUnit, digits: 4))（\(item.costSource)）")
+                    .font(.system(size: 9)).foregroundStyle(p.muted.opacity(0.9))
+            }
         }
         .padding(.vertical, 7)
         .overlay(alignment: .bottom) { Rectangle().fill(p.line.opacity(0.65)).frame(height: 0.5) }
@@ -113,6 +169,8 @@ private struct PerformanceBlock: View {
     @Environment(\.gp) private var p
     let summary: NextPerformanceSummary
     let sampleCount: Int
+    let benchmarkName: String
+    let benchmarkReturn: Double?
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             if summary.hasEnoughSamples {
@@ -125,6 +183,15 @@ private struct PerformanceBlock: View {
                     GPValue(label: "最大回撤", value: "-" + NextNum.percent(summary.maxDrawdownPercent, digits: 1),
                             footnote: "快照净值峰谷", emphasis: p.terracotta)
                 }
+                if let benchmarkReturn {
+                    GPDataRow(title: "\(benchmarkName) 同期",
+                              value: NextNum.signed(benchmarkReturn) + "%",
+                              note: "超额 " + NextNum.signed(summary.cumulativePercent - benchmarkReturn) + "%（组合 − 基准）",
+                              valueColor: summary.cumulativePercent >= benchmarkReturn ? p.risk : p.jade)
+                } else {
+                    Text("基准日 K 未归档，暂时无法比较「跑没跑赢」。可在行情页打开 \(benchmarkName) 的日 K 触发归档。")
+                        .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                }
                 Text("自 \(summary.startDate.formatted(date: .numeric, time: .omitted)) 起，共 \(sampleCount) 个资产快照；按日收益连乘（时间加权近似）。")
                     .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
             } else {
@@ -133,4 +200,12 @@ private struct PerformanceBlock: View {
             }
         }
     }
+}
+
+private struct RebalanceRow: Identifiable {
+    let id: String
+    let name: String
+    let targetPercent: Double
+    let currentPercent: Double
+    let deltaAmount: Decimal
 }

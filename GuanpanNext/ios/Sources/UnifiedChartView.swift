@@ -36,13 +36,27 @@ struct UnifiedChartView: View {
     /// 下方副图：成交量 / 成交额 / MACD / 关。
     /// 老工程把这三张副图都做了，而且分时图下面就是 MACD —— 这里补齐同样的口径。
     @State private var subchart: NextSubchartKind = .volume
+    /// 日 K 是否前复权。分红除息会在原始价上留下缺口，长期均线会被拉歪；
+    /// 默认开启（与券商一致），可切换成不复权看真实成交价。
+    @State private var adjustedPrices = true
     private var activeDataset: NextChartDataset? {
         guard let dataset else { return nil }
         return (interval.wrappedValue == .intraday ? dataset.interval == .intraday : dataset.interval == .day) ? dataset : nil
     }
 
+    /// 应用复权后的全量样本。分时不受影响；日线在开启复权时按派息事件下调历史价。
+    private var workingSamples: [NextChartSample] {
+        guard let dataset = activeDataset else { return [] }
+        let base = dataset.orderedSamples
+        guard interval.wrappedValue != .intraday, dataset.interval == .day,
+              adjustedPrices, let code = securityCode else { return base }
+        let events = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[code] ?? []))
+        return NextPriceAdjustment.forwardAdjusted(base, events: events, code: code)
+    }
+
     private var samples: [NextChartSample] {
-        guard let all = activeDataset?.orderedSamples, !all.isEmpty else { return [] }
+        let all = workingSamples
+        guard !all.isEmpty else { return [] }
         // Intraday coordinates represent one exchange session. When an archive
         // contains multiple days, never overlay them on the same fixed axis.
         let sessionSamples = interval.wrappedValue == .intraday
@@ -99,7 +113,7 @@ struct UnifiedChartView: View {
         if let dataset = activeDataset, dataset.interval == .day,
            let first = samples.first?.timestamp, let last = samples.last?.timestamp {
             let moving: [(String, Int)] = [("ma5", 5), ("ma10", 10), ("ma20", 20), ("ma60", 60), ("ma250", 250)]
-            let source = dataset.orderedSamples
+            let source = workingSamples
             // MA250 在历史不足 250 根时按实际可用根数降级，否则这条线永远不出现。
             for (key, period) in moving where visibleLayers.contains(key)
                 && source.count >= (key == "ma250" ? 2 : period)
@@ -211,6 +225,15 @@ struct UnifiedChartView: View {
                     }.buttonStyle(.plain).accessibilityLabel("副图 \(kind.title)")
                 }
                 Spacer(minLength: 0)
+                if interval.wrappedValue == .day {
+                    Button { adjustedPrices.toggle() } label: {
+                        Text(adjustedPrices ? "前复权" : "不复权")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(adjustedPrices ? p.chartViolet : p.muted)
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(adjustedPrices ? p.chartViolet.opacity(0.14) : .clear, in: Capsule())
+                    }.buttonStyle(.plain).accessibilityLabel(adjustedPrices ? "当前前复权，点击切换不复权" : "当前不复权，点击切换前复权")
+                }
             }
             if interval.wrappedValue == .day && (activeDataset?.orderedSamples.count ?? 0) < 250 {
                 Text("MA250 需要 250 根有效日 K · 当前已归档 \(activeDataset?.orderedSamples.count ?? 0) 根；补足后会自动计算并绘制。")
@@ -360,7 +383,7 @@ struct UnifiedChartView: View {
             context.stroke(iopvPath, with: .color(p.chartViolet), style: StrokeStyle(lineWidth: 1.45, lineCap: .round, lineJoin: .round, dash: [4, 2]))
         }
         // Moving averages include earlier bars outside the zoom window.
-        let fullSamples = dataset.orderedSamples
+        let fullSamples = workingSamples
         for (key, period, color, width) in [("ma5", 5, p.chartGold, 1.2), ("ma10", 10, p.chartBlue, 1.1), ("ma20", 20, p.jade, 1.15), ("ma60", 60, p.chartViolet, 1.1), ("ma250", 250, p.terracotta, 1.25)]
         where visibleLayers.contains(key)
             && fullSamples.count >= (key == "ma250" ? 2 : period)
@@ -537,7 +560,7 @@ struct UnifiedChartView: View {
     /// MACD 副图：柱 + DIF/DEA。分时用当前交易日的分钟收盘序列，
     /// 日 K 用全量日线（缩放只改变可视区间，不改变已经算好的 EMA）。
     private func drawMACD(context: inout GraphicsContext, in rect: CGRect, time: ClosedRange<Date>, xOf: (Date) -> CGFloat) {
-        let source = interval.wrappedValue == .intraday ? samples : (activeDataset?.orderedSamples ?? [])
+        let source = interval.wrappedValue == .intraday ? samples : workingSamples
         guard source.count >= 35 else {
             context.draw(Text("MACD 需 35 根以上数据（当前 \(source.count) 根）").font(.system(size: 8)).foregroundColor(p.muted),
                          at: CGPoint(x: rect.midX, y: rect.midY))

@@ -880,17 +880,54 @@ enum NextPriceAlertDirection: String, Codable, CaseIterable, Identifiable, Equat
     var id: String { rawValue }
     var title: String { self == .atOrAbove ? "上涨至或高于" : "下跌至或低于" }
 }
+/// 提醒的判定维度。价格只是其中一种 —— 攒股息的标的更关心「股息率/溢价」，
+/// 短线更关心「今日涨跌幅」，所以规则允许按维度设置。
+enum NextAlertMetric: String, Codable, CaseIterable, Identifiable {
+    case price, changePercent, premiumPercent
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .price: return "价格"
+        case .changePercent: return "涨跌幅"
+        case .premiumPercent: return "溢折价"
+        }
+    }
+    var unit: String { self == .price ? "元" : "%" }
+}
+
 struct NextPriceAlertRule: Codable, Identifiable, Equatable {
     var id = UUID()
     let code: String
     let name: String
+    /// 阈值。价格类为元，涨跌幅/溢折价为百分数（可为负，例如折价 -2%）。
     let price: Decimal
     let direction: NextPriceAlertDirection
+    /// 旧版本规则没有这个字段，缺省按「价格」处理。
+    var metric: NextAlertMetric? = nil
     var enabled = true
     var isInsideTrigger = false
+    var resolvedMetric: NextAlertMetric { metric ?? .price }
+
+    /// 当前值是否满足规则。拿不到 IOPV 时溢折价规则不触发，而不是拿 0 当折价。
+    func value(for quote: NextQuote) -> Decimal? {
+        switch resolvedMetric {
+        case .price: return quote.price
+        case .changePercent: return quote.changePercent
+        case .premiumPercent:
+            guard let iopv = quote.iopv, iopv > 0 else { return nil }
+            return (quote.price / iopv - 1) * 100
+        }
+    }
+
     func validate() throws {
-        guard code.count == 6, code.allSatisfy(\.isNumber), !name.isEmpty, price > 0 else {
-            throw NextError.invalid("价格提醒的代码、名称或价格无效")
+        guard code.count == 6, code.allSatisfy(\.isNumber), !name.isEmpty, !price.isNaN else {
+            throw NextError.invalid("提醒的代码、名称或阈值无效")
+        }
+        switch resolvedMetric {
+        case .price:
+            guard price > 0, price <= 100000 else { throw NextError.invalid("价格提醒的阈值必须大于 0") }
+        case .changePercent, .premiumPercent:
+            guard abs(price) <= 100 else { throw NextError.invalid("百分比提醒的阈值应在 ±100 之间") }
         }
     }
 }

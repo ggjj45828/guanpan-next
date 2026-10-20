@@ -1476,6 +1476,10 @@ private struct SearchSheet: View {
         let query = model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let known = Set(model.watch + model.book.positions.map(\.code) + model.quotes.keys)
         let candidates = known.union(query.count == 6 && query.allSatisfy(\.isNumber) ? [query] : [])
+        let knownCodes = Set(candidates)
+        for item in InstrumentCatalog.search(model.searchText) where !knownCodes.contains(item.code) {
+            hits.append(GPSearchHit(id: "catalog-\(item.code)", category: "目录", title: item.name, detail: "\(item.code) · 内置目录（离线可搜，行情仍需联网）", symbol: "book", route: .instrument(item.code), securityCode: item.code))
+        }
         for code in candidates.sorted() {
             let name = model.book.positions.first(where: { $0.code == code })?.name ?? model.quotes[code]?.quote.name ?? knownName(code)
             guard matches(code, name) else { continue }
@@ -1556,6 +1560,7 @@ private struct AlertCenterScreen: View {
     @State private var priceCode = ""
     @State private var price = ""
     @State private var direction: NextPriceAlertDirection = .atOrBelow
+    @State private var metric: NextAlertMetric = .price
     var body: some View {
         GPPageBackground {
             EditorialSection(title: "通知记录", trailing: "去重与静默时段") {
@@ -1565,12 +1570,16 @@ private struct AlertCenterScreen: View {
                 if model.preferences.notifications.alerts.isEmpty { GPStatus(title: "暂无通知记录", detail: "网络或 NAS 未连接时仍可查看本机已有提醒。", symbol: "bell.slash") }
                 ForEach(model.preferences.notifications.alerts) { alert in DataPanel(title: alert.title, caption: alert.level) { Text(alert.detail).font(.subheadline); Text(alert.stamp.label(now: Date())).font(.caption2.monospaced()).foregroundStyle(p.muted); Text(alert.delivery).font(.caption2).foregroundStyle(p.muted); if !alert.read { Button("标为已读") { guard let index = model.preferences.notifications.alerts.firstIndex(where: { $0.id == alert.id }) else { return }; model.preferences.notifications.alerts[index].read = true; model.preferences = model.preferences }.font(.caption.weight(.semibold)).tint(p.forest) } } }
             }
-            EditorialSection(title: "价格提醒") {
-                HStack { TextField("代码", text: $priceCode).keyboardType(.numberPad).textFieldStyle(.roundedBorder); TextField("价格", text: $price).keyboardType(.decimalPad).textFieldStyle(.roundedBorder) }
+            EditorialSection(title: "条件提醒", accent: p.terracotta) {
+                Picker("维度", selection: $metric) { ForEach(NextAlertMetric.allCases) { Text($0.title).tag($0) } }.pickerStyle(.segmented)
+                HStack {
+                    TextField("代码", text: $priceCode).keyboardType(.numberPad).textFieldStyle(.roundedBorder)
+                    TextField(metric == .price ? "价格（元）" : "阈值（%，可填负）", text: $price).keyboardType(.decimalPad).textFieldStyle(.roundedBorder)
+                }
                 Picker("条件", selection: $direction) { ForEach(NextPriceAlertDirection.allCases) { Text($0.title).tag($0) } }.pickerStyle(.segmented)
-                Button("添加价格提醒") { do { try model.addPriceAlert(code: priceCode.trimmingCharacters(in: .whitespacesAndNewlines), price: try NextMoney.parse(price), direction: direction); price = "" } catch { model.errorMessage = error.localizedDescription } }.font(.caption.weight(.semibold)).tint(p.forest)
+                Button("添加\(metric.title)提醒") { do { try model.addPriceAlert(code: priceCode.trimmingCharacters(in: .whitespacesAndNewlines), price: try NextMoney.parse(price), direction: direction, metric: metric); price = "" } catch { model.errorMessage = error.localizedDescription } }.font(.caption.weight(.semibold)).tint(p.forest)
                 if model.preferences.notifications.priceRules.isEmpty { Text("仅以新鲜行情触发；缓存行情不会触发价格提醒。添加后可在任意刷新行情时检查。") .font(.caption).foregroundStyle(p.muted) }
-                ForEach(model.preferences.notifications.priceRules) { rule in HStack { VStack(alignment: .leading, spacing: 3) { Text("\(rule.name) · \(rule.code)").font(.subheadline.weight(.semibold)); Text("\(rule.direction.title) ¥\(NextMoney.text(rule.price, digits: 4)) · \(rule.enabled ? "已启用" : "已暂停")").font(.caption).foregroundStyle(p.muted) }; Spacer(); Button(rule.enabled ? "暂停" : "启用") { guard let index = model.preferences.notifications.priceRules.firstIndex(where: { $0.id == rule.id }) else { return }; model.preferences.notifications.priceRules[index].enabled.toggle(); model.preferences = model.preferences }.font(.caption); Button("删除", role: .destructive) { model.removePriceAlert(rule.id) }.font(.caption) } }
+                ForEach(model.preferences.notifications.priceRules) { rule in HStack { VStack(alignment: .leading, spacing: 3) { Text("\(rule.name) · \(rule.code)").font(.subheadline.weight(.semibold)); Text("\(rule.resolvedMetric.title) \(rule.direction.title) " + (rule.resolvedMetric == .price ? "¥\(NextMoney.text(rule.price, digits: 4))" : "\(NextNum.signed(NextNum.double(rule.price)))%") + " · \(rule.enabled ? "已启用" : "已暂停")").font(.caption).foregroundStyle(p.muted) }; Spacer(); Button(rule.enabled ? "暂停" : "启用") { guard let index = model.preferences.notifications.priceRules.firstIndex(where: { $0.id == rule.id }) else { return }; model.preferences.notifications.priceRules[index].enabled.toggle(); model.preferences = model.preferences }.font(.caption); Button("删除", role: .destructive) { model.removePriceAlert(rule.id) }.font(.caption) } }
             }
             EditorialSection(title: "静默时段") {
                 Toggle("在此期间只记录、不弹出", isOn: quietEnabled).tint(p.forest)
@@ -1587,11 +1596,25 @@ private struct AlertCenterScreen: View {
 private struct LedgerHistoryScreen: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
+    @State private var exportURL: URL?
     var body: some View {
         GPPageBackground {
             EditorialSection(title: "账本修改审计", trailing: "\(model.ledger.events.count) 条") {
                 if model.ledger.events.isEmpty { GPStatus(title: "暂无变更记录", detail: "每次真实账本写入都将记录前后版本和原因。", symbol: "checkmark.shield") }
                 ForEach(model.ledger.events.reversed()) { event in DataPanel(title: event.action, caption: event.at.formatted(date: .numeric, time: .shortened)) { Text(event.reason).font(.caption); GPDataRow(title: "账前现金", value: "¥\(NextMoney.text(event.before.cash))"); GPDataRow(title: "账后现金", value: "¥\(NextMoney.text(event.after.cash))"); if event.undoneAt != nil { Text("已撤销").font(.caption).foregroundStyle(p.terracotta) } } }
+            }
+            EditorialSection(title: "导出", accent: p.chartGold) {
+                if let exportURL {
+                    ShareLink(item: exportURL) { Label("导出 CSV（持仓 / 成交 / 收益 / 现金）", systemImage: "square.and.arrow.up") }
+                        .font(.caption.weight(.semibold)).tint(p.forest)
+                } else {
+                    Text("正在准备导出文件…").font(.caption).foregroundStyle(p.muted)
+                }
+                Button { exportURL = NextCSVExport.write(book: model.book, quotes: model.quotes) } label: {
+                    Label("重新生成", systemImage: "arrow.clockwise").font(.caption)
+                }.tint(p.forest)
+                Text("含 BOM，Excel 直接打开不乱码；只导出本机账本，不含行情缓存与图片。")
+                    .font(.caption2).foregroundStyle(p.muted)
             }
             EditorialSection(title: "真实资产流水") {
                 ForEach(model.book.cashMovements.reversed()) { flow in GPDataRow(title: flow.reason, value: "\(flow.amount >= 0 ? "+" : "")¥\(NextMoney.text(flow.amount))", note: flow.date.formatted(date: .numeric, time: .shortened)) }
@@ -1605,6 +1628,7 @@ private struct LedgerHistoryScreen: View {
                 ForEach(model.book.incomeEvents.reversed()) { income in GPDataRow(title: "\(income.kind.title) · \(income.name) · \(income.status.title)", value: "+¥\(NextMoney.text(income.netAmount))", note: "\(income.status == .received ? income.receivedAt?.formatted(date: .numeric, time: .shortened) ?? "已到账" : "预计到账 \(income.payDate.formatted(date: .numeric, time: .omitted))") · 税前 ¥\(NextMoney.text(income.grossAmount)) · 税费 ¥\(NextMoney.text(income.tax))") }
             }
         }.navigationTitle("资产流水与审计").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
+        .task { if exportURL == nil { exportURL = NextCSVExport.write(book: model.book, quotes: model.quotes) } }
     }
 }
 
