@@ -628,6 +628,62 @@ final class NextCoreTests: XCTestCase {
         XCTAssertEqual(valuation.dailyChange, Decimal(string: "64.9")!)
     }
 
+    func testPortfolioSummaryComparesAverageAndDilutedCost() {
+        let yesterday = now.addingTimeInterval(-86_400)
+        let book = NextBook(cash: 0, positions: [
+            NextPosition(code: "159941", name: "纳指ETF", units: 500, bookCost: Decimal(string: "500.05")!)
+        ], fills: [
+            NextFill(date: yesterday, code: "159941", side: "buy", units: 1000, price: 1,
+                     fee: Decimal(string: "0.10")!, realized: 0),
+            NextFill(date: yesterday, code: "159941", side: "sell", units: 500,
+                     price: Decimal(string: "1.20")!, fee: Decimal(string: "0.10")!, realized: Decimal(string: "99.90")!)
+        ])
+        let quote = NextQuote(code: "159941", name: "纳指ETF", price: Decimal(string: "1.30")!,
+                              previousClose: Decimal(string: "1.28")!, time: now.addingTimeInterval(-5), source: "test")
+        let stamp = NextDataStamp(source: "test", observedAt: now, quality: .live, detail: "")
+        let quotes = ["159941": NextCachedQuote(quote: quote, stamp: stamp)]
+
+        let average = NextPortfolioCalculator.summary(book: book, quotes: quotes, at: now, mode: .average)
+        let diluted = NextPortfolioCalculator.summary(book: book, quotes: quotes, at: now, mode: .diluted)
+        // 市值 500 × 1.30 = 650；均价成本 500.05 → 149.95；摊薄成本 400.20 → 249.80
+        XCTAssertEqual(average.floatingProfit, Decimal(string: "149.95")!)
+        XCTAssertEqual(diluted.floatingProfit, Decimal(string: "249.80")!)
+        // 昨日成交不参与今日调整：(1.30 − 1.28) × 500 = 10
+        XCTAssertEqual(average.dailyChange, Decimal(string: "10")!)
+        XCTAssertEqual(average.positions.first?.weightPercent ?? 0, 100, accuracy: 0.0001)
+        XCTAssertEqual(average.realizedTotal, Decimal(string: "99.90")!)
+    }
+
+    func testPortfolioSummaryWithholdsDailyChangeWhenQuoteMissing() {
+        let book = NextBook(cash: 1000, positions: [
+            NextPosition(code: "159941", name: "纳指ETF", units: 500, bookCost: 500),
+            NextPosition(code: "515180", name: "红利ETF", units: 100, bookCost: 120)
+        ])
+        let quote = NextQuote(code: "159941", name: "纳指ETF", price: 1, previousClose: 1,
+                              time: now.addingTimeInterval(-5), source: "test")
+        let stamp = NextDataStamp(source: "test", observedAt: now, quality: .live, detail: "")
+        let summary = NextPortfolioCalculator.summary(book: book,
+            quotes: ["159941": NextCachedQuote(quote: quote, stamp: stamp)], at: now, mode: .average)
+        XCTAssertFalse(summary.isComplete)
+        XCTAssertNil(summary.dailyChange)
+        XCTAssertEqual(summary.positions.count, 1)
+    }
+
+    func testPerformanceSummaryRemovesExternalFlows() {
+        let points = [
+            NextAssetPoint(date: now, total: 1000, externalFlow: 0),
+            NextAssetPoint(date: now.addingTimeInterval(86_400), total: 1600, externalFlow: 500),
+            NextAssetPoint(date: now.addingTimeInterval(172_800), total: 1100, externalFlow: 0)
+        ]
+        let summary = NextPerformanceCalculator.summary(points: points)
+        // 第 2 天：(1600 − 500) / 1000 − 1 = +10%；第 3 天：1100 / 1600 − 1 = −31.25%
+        // 连乘 1.10 × 0.6875 = 0.75625 → −24.375%
+        XCTAssertEqual(summary?.cumulativePercent ?? 0, -24.375, accuracy: 0.0001)
+        XCTAssertNil(summary?.annualizedPercent)
+        XCTAssertEqual(summary?.dayCount, 2)
+        XCTAssertEqual(summary?.maxDrawdownPercent ?? 0, 31.25, accuracy: 0.0001)
+    }
+
 }
 
 private extension Data {
