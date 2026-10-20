@@ -1158,7 +1158,7 @@ private struct IncomeRecordSheet: View {
                 note: note.trimmingCharacters(in: .whitespacesAndNewlines))
             try event.validate()
             onSave(event); dismiss()
-        } catch { error = error.localizedDescription }
+        } catch { self.error = error.localizedDescription }
     }
 }
 
@@ -1571,9 +1571,13 @@ private struct DividendHistoryScreen: View {
         let watched = model.watch
         return Array(Set(held + watched + (code.map { [$0] } ?? []))).sorted()
     }
+    // 这两个字符串原本直接内联在 EditorialSection 的实参里，跟后面的大闭包一起
+    // 让编译器类型检查超时（error: unable to type-check this expression in reasonable time）。
+    private var sectionTitle: String { code.map { "\($0) 派息记录" } ?? "全部 ETF 派息记录" }
+    private var sectionTrailing: String { "\(events.count) 条" }
     var body: some View {
         GPPageBackground {
-            EditorialSection(title: code.map { "\($0) 派息记录" } ?? "全部 ETF 派息记录", trailing: "\(events.count) 条") {
+            EditorialSection(title: sectionTitle, trailing: sectionTrailing) {
                 Text("这里记录基金公告或历史数据源中的派息事件，不等于你在除息日实际持有的份额，也不代表现金已到账。已到账金额请以券商流水核对后录入资产账本。")
                     .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 if events.isEmpty {
@@ -1683,7 +1687,7 @@ private struct TwinDetailScreen: View {
                     if run.fills.isEmpty { Text("该区间内策略没有成交；曲线仍包含现金余额和共同外部资金流。").font(.caption).foregroundStyle(p.muted) }
                     else {
                         LazyVStack(spacing: 0) {
-                            ForEach(run.fills) { fill in
+                            ForEach(run.fills, id: \.id) { fill in
                                 GPDataRow(title: "\(fill.date) · \(fill.code)", value: "\(fill.side == "buy" ? "买入" : "卖出") \(fill.units) 份", note: "¥\(fill.price) · 费用 ¥\(fill.fee) · 成交额 ¥\(fill.gross)")
                                 Divider().overlay(p.rule)
                             }
