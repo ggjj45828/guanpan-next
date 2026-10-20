@@ -315,3 +315,89 @@ private struct AccountFindingRow: View {
         .overlay(alignment: .bottom) { Rectangle().fill(p.line.opacity(0.7)).frame(height: 0.5) }
     }
 }
+
+// MARK: - 全球指数看板
+
+/// 行情页顶部的指数条：上证、纳指100、日经、韩国、恒生科技。
+/// 数据源与坑位说明见 `GlobalIndices.swift`；这里只负责显示，
+/// 失败时如实写「取不到」，不拿缓存假装实时。
+struct GlobalIndexStrip: View {
+    @Environment(\.gp) private var p
+    @State private var quotes: [GlobalIndexQuote] = []
+    @State private var message = ""
+    @State private var loading = false
+
+    private var shown: [GlobalIndexQuote] {
+        if !quotes.isEmpty { return quotes }
+        return GlobalIndexFeed.catalog.map {
+            GlobalIndexQuote(symbol: $0.symbol, name: $0.name, price: 0, changePercent: 0,
+                             previousClose: nil, observedAt: nil, isStale: false)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Capsule().fill(p.chartViolet.opacity(0.85)).frame(width: 3, height: 12)
+                Text("全球指数").font(.system(size: 11, weight: .semibold)).foregroundStyle(p.ink)
+                Spacer(minLength: 4)
+                if loading { ProgressView().scaleEffect(0.55).frame(width: 14, height: 14) }
+                Button { Task { await load() } } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold)).foregroundStyle(p.forest)
+                        .frame(width: 26, height: 26).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("刷新全球指数")
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    ForEach(shown) { quote in GlobalIndexCard(quote: quote) }
+                }
+            }
+            if !message.isEmpty {
+                Text(message).font(.system(size: 9)).foregroundStyle(p.muted)
+            }
+        }
+        .padding(.vertical, 6)
+        .task { if quotes.isEmpty { await load() } }
+    }
+
+    private func load() async {
+        loading = true
+        defer { loading = false }
+        do {
+            let fresh = try await GlobalIndexFeed.fetch()
+            quotes = fresh
+            message = fresh.contains(where: \.isStale) ? "有指数为上一交易时段收盘价（已标注）" : ""
+        } catch {
+            message = "指数暂时取不到：\(error.localizedDescription)"
+        }
+    }
+}
+
+private struct GlobalIndexCard: View {
+    @Environment(\.gp) private var p
+    let quote: GlobalIndexQuote
+    private var tone: Color {
+        if quote.price <= 0 { return p.muted }
+        return quote.changePercent >= 0 ? p.risk : p.jade
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 3) {
+                Text(GlobalIndexFeed.shortName(quote.symbol)).font(.system(size: 10, weight: .medium)).foregroundStyle(p.ink).lineLimit(1)
+                if quote.isStale { Text("旧").font(.system(size: 7, weight: .bold)).foregroundStyle(p.terracotta) }
+            }
+            Text(quote.price > 0 ? NextNum.text(quote.price) : "—")
+                .font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(quote.price > 0 ? p.ink : p.muted)
+            Text(quote.price > 0 ? "\(NextNum.signed(quote.changePercent))%" : "点击刷新")
+                .font(.system(size: 9.5, weight: .medium, design: .monospaced)).foregroundStyle(tone)
+        }
+        .frame(width: 78, alignment: .leading)
+        .padding(.horizontal, 8).padding(.vertical, 7)
+        .background(
+            LinearGradient(colors: [p.paper, tone.opacity(0.10)], startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(tone.opacity(0.22), lineWidth: 0.8))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(quote.name) \(quote.price > 0 ? NextNum.text(quote.price) : "无数据") \(quote.price > 0 ? NextNum.signed(quote.changePercent) + "%" : "")")
+    }
+}

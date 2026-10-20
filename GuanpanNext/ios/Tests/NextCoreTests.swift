@@ -551,6 +551,39 @@ final class NextCoreTests: XCTestCase {
         XCTAssertEqual(series[59]?.histogram ?? 1, 0, accuracy: 0.000001)
     }
 
+    func testGlobalIndexParserReadsFiveUserSelectedIndices() {
+        // 这一段是 2026-10-20 12:59 从新浪实际抓到的响应（原样）。
+        let body = """
+        var hq_str_s_sh000001="上证指数,3727.7542,-3.1658,-0.08,2485176,44185013";
+        var hq_str_gb_$ndx="纳斯达克100,29529.3445,1.17,2026-10-20 05:30:00,341.7958,29539.3116,29788.7588,29461.3209";
+        var hq_str_b_NKY="日经225指数,64056.2800,-860.42,-1.33,2:12 AM,14:12:00,2026-10-20,12:59:20,64755.4900";
+        var hq_str_b_KOSPI="韩国KOSPI指数,5522.8000,-245.21,-4.25,2:27 AM,14:27:00,2026-10-20,12:59:20,5733.5700";
+        var hq_str_rt_hkHSTECH="HSTECH,恒生科技指数,4055.520,4108.240,4083.660,4033.240,4058.390,-49.850,-1.210,0.000,0.000,22406330,546961768,0.000,0.000,6198.680,4042.050,2026/10/20,12:59:56";
+        """
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let now = formatter.date(from: "2026-10-20 13:00:00")!
+        let quotes = GlobalIndexFeed.parse(body, now: now)
+        // 顺序与本地目录一致：上证、纳指100、日经、韩国、恒生科技。
+        XCTAssertEqual(quotes.map(\.symbol), GlobalIndexFeed.catalog.map { $0.symbol })
+        XCTAssertEqual(quotes.count, 5)
+        XCTAssertEqual(quotes[0].price, 3727.7542, accuracy: 0.0001)
+        XCTAssertEqual(quotes[0].changePercent, -0.08, accuracy: 0.0001)
+        XCTAssertEqual(quotes[1].price, 29529.3445, accuracy: 0.0001)
+        XCTAssertEqual(quotes[1].changePercent, 1.17, accuracy: 0.0001)
+        XCTAssertEqual(quotes[2].price, 64056.28, accuracy: 0.0001)
+        XCTAssertEqual(quotes[3].price, 5522.80, accuracy: 0.0001)
+        // 港股用第 6 位现价、第 8 位涨跌幅，不是第 1/2 位。
+        XCTAssertEqual(quotes[4].price, 4058.39, accuracy: 0.0001)
+        XCTAssertEqual(quotes[4].changePercent, -1.21, accuracy: 0.0001)
+        XCTAssertEqual(quotes[4].previousClose ?? 0, 4108.24, accuracy: 0.0001)
+        // 最新时点与本地时间相差 1 小时以内，不能判陈旧。
+        XCTAssertFalse(quotes[1].isStale)
+        XCTAssertNotNil(quotes[2].observedAt)
+    }
+
 }
 
 private extension Data {

@@ -268,6 +268,11 @@ private struct MarketScreen: View {
     var body: some View {
         List {
             Section {
+                GlobalIndexStrip()
+            }
+            .listRowBackground(p.canvas)
+            .listRowSeparator(.hidden)
+            Section {
                 HStack(alignment: .top) { Text("用熟悉的证券代码开始，详情里再展开行情、图表与研究。").font(.subheadline).foregroundStyle(p.muted); Spacer(); Button { Task { await model.refreshQuotes(codes: visibleCodes) } } label: { Label("刷新", systemImage: "arrow.clockwise").font(.caption.weight(.semibold)) }.disabled(visibleCodes.isEmpty) }
                     .listRowBackground(p.canvas)
                 HStack(spacing: 8) { TextField("添加 6 位证券代码", text: $entry).keyboardType(.numberPad).textFieldStyle(.roundedBorder).submitLabel(.done).onSubmit(add); Button(selectedFilter == "持仓" ? "录入" : "添加", action: add).buttonStyle(.borderedProminent).tint(p.forest) }

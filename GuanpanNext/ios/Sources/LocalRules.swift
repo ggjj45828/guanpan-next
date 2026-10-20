@@ -15,6 +15,19 @@ enum NextNum {
     static func percent(_ value: Double, digits: Int = 2) -> String {
         String(format: "%.\(digits)f%%", value)
     }
+    /// 指数点位等展示用。复用同一个 NumberFormatter，避免在 body 里反复构造。
+    private static let displayFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.numberStyle = .decimal
+        return formatter
+    }()
+    static func text(_ value: Double, digits: Int = 2) -> String {
+        guard value.isFinite else { return "—" }
+        displayFormatter.minimumFractionDigits = digits
+        displayFormatter.maximumFractionDigits = digits
+        return displayFormatter.string(from: NSNumber(value: value)) ?? "—"
+    }
     static func signed(_ value: Double, digits: Int = 2) -> String {
         (value >= 0 ? "+" : "") + String(format: "%.\(digits)f", value)
     }
