@@ -391,7 +391,7 @@ private struct InstrumentDetailScreen: View {
                     HStack { Button { Task { await model.refreshInstrument(code) } } label: { Label("刷新行情与分时", systemImage: "arrow.clockwise").font(.caption.weight(.semibold)) }; Spacer(); NavigationLink(value: GPRoute.chart(code)) { Label("全屏分析", systemImage: "arrow.up.left.and.arrow.down.right").font(.caption.weight(.semibold)) }.accessibilityIdentifier("chart.fullscreen") }.tint(p.forest)
                 }
                 WorthBuyPanel(code: code)
-                EditorialSection(title: "交易盘口", accent: p.chartViolet, trailing: model.rules[code]?.isVerified == true ? "规则已验证" : "规则待验证") {
+                EditorialSection(title: "交易盘口", trailing: model.rules[code]?.isVerified == true ? "规则已验证" : "规则待验证", accent: p.chartViolet) {
                     if model.orderBooks[code] == nil { GPStatus(title: "盘口数据尚未连接", detail: "五档报价未到达前不展示模拟档位或推测成交。", symbol: "rectangle.split.3x1") }
                     else if model.rules[code]?.isVerified != true { GPStatus(title: "交易规则尚未验证", detail: "不会假设 ETF 是 T+0，也不会固定推断手数或费用。", symbol: "checkmark.shield") }
                     else { OrderBookView(snapshot: model.orderBooks[code]!) }
@@ -415,7 +415,7 @@ private struct InstrumentDetailScreen: View {
                     if let rules = model.rules[code] { GPDataRow(title: "结算规则", value: rules.settlement == .unknown ? "未知" : rules.settlement.rawValue.uppercased(), note: rules.source); if let lot = rules.lotSize { GPDataRow(title: "交易单位", value: "\(lot) 份") } }
                     else { GPDataRow(title: "ETF 交易规则", value: "未接入来源") }
                 }
-                EditorialSection(title: "分红与收息参考", accent: p.chartGold, trailing: "历史数据") {
+                EditorialSection(title: "分红与收息参考", trailing: "历史数据", accent: p.chartGold) {
                     NavigationLink(value: GPRoute.dividends(code)) { IntentRow(icon: "calendar", title: "查看完整派息历史", detail: "登记日、除息日、发放日与数据来源") }.buttonStyle(.plain)
                     let heldUnits = position?.units ?? 0
                     GPDataRow(title: "近365日已记录每份派息", value: "¥\(NextMoney.text(recentDividendPerShare, digits: 4))",
@@ -1055,7 +1055,7 @@ private struct AssetsScreen: View {
                         GPValue(label: "当日盈亏", value: valuation.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: valuation.dailyChangePercent.map { "昨收 \(NextMoney.text($0))%" } ?? "需新鲜报价", emphasis: valuation.dailyChange.map { $0 >= 0 ? p.risk : p.jade })
                     }.padding(.top, 3)
                 }.padding(.top, 15)
-                EditorialSection(title: "持仓明细", accent: p.jade, trailing: "\(model.book.positions.count) 项") {
+                EditorialSection(title: "持仓明细", trailing: "\(model.book.positions.count) 项", accent: p.jade) {
                     HStack { Button { addPosition = true } label: { Label("录入已确认持仓", systemImage: "plus") }.font(.caption.weight(.semibold)); Spacer(); NavigationLink(value: GPRoute.fills) { Label("资产流水", systemImage: "list.bullet.rectangle") }.font(.caption) }.tint(p.forest)
                     if model.book.positions.isEmpty { GPStatus(title: "账本为空", detail: "只录入你确认的场内证券，不自动导入旧账本或场外基金。", symbol: "tray") }
                     ForEach(model.book.positions) { position in
@@ -1063,7 +1063,7 @@ private struct AssetsScreen: View {
                     }
                 }
                 AccountReviewPanel()
-                EditorialSection(title: "分红与收息", accent: p.chartGold, trailing: "真实账本") {
+                EditorialSection(title: "分红与收息", trailing: "真实账本", accent: p.chartGold) {
                     NavigationLink(value: GPRoute.dividends(nil)) { IntentRow(icon: "calendar", title: "完整 ETF 派息历史", detail: "按证券查看全部已采集事件") }.buttonStyle(.plain)
                     let received = model.book.incomeEvents.filter { $0.status == .received }.reduce(Decimal.zero) { $0 + $1.netAmount }
                     let expected = model.book.incomeEvents.filter { $0.status == .expected }.reduce(Decimal.zero) { $0 + $1.netAmount }
