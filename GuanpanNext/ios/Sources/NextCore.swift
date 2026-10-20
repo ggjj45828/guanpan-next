@@ -459,8 +459,14 @@ struct NextChartDataset: Codable, Equatable {
     let observedAt: Date
 
     var orderedSamples: [NextChartSample] { samples.sorted { $0.timestamp < $1.timestamp } }
-    var priceDomain: ClosedRange<Decimal>? {
-        let values = orderedSamples.flatMap { [$0.low, $0.high, Optional($0.close), $0.iopv].compactMap { $0 } }
+    /// 价格轴默认把 IOPV 也算进去（IOPV 与成交价共轴）。
+    /// 但 IOPV 图层是可以关掉的：关掉时纵轴不应该还被它撑开，
+    /// 否则成交价会被压成一条平线（例如 IOPV 4.1 而价格只有 1.05）。
+    /// 所以额外提供 `includingIOPV`：画图侧按图层可见性传参，纯数据场景保持默认行为。
+    var priceDomain: ClosedRange<Decimal>? { priceDomain(includingIOPV: true) }
+    func priceDomain(includingIOPV: Bool) -> ClosedRange<Decimal>? {
+        var values = orderedSamples.flatMap { [$0.low, $0.high, Optional($0.close)].compactMap { $0 } }
+        if includingIOPV { values.append(contentsOf: orderedSamples.compactMap(\.iopv)) }
         guard let low = values.min(), let high = values.max() else { return nil }
         if low == high { let pad = max(abs(low) * Decimal(string: "0.01")!, Decimal(string: "0.0001")!); return (low - pad)...(high + pad) }
         let pad = (high - low) * Decimal(string: "0.06")!

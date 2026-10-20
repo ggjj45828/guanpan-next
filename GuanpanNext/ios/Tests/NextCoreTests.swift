@@ -236,17 +236,20 @@ final class NextCoreTests: XCTestCase {
         XCTAssertEqual(copied.twinBacktests["B"], result)
         XCTAssertTrue(copied.book.positions.isEmpty)
     }
-    // v3.1.0 r4 起，IOPV 与成交价共用同一根价格轴（见 NextCore.priceDomain 的注释
-    // 「the IOPV price itself shares the chart's price axis」）。
-    // 因此这里不再要求「价格轴不被 IOPV 撑大」，而是要求价格轴必须覆盖两者。
-    func testChartPriceDomainCoversBothTradePriceAndIOPV() throws {
+    // IOPV 图层是可选的：关掉时纵轴只按成交价，不被 IOPV 撑开；
+    // 打开时才把 IOPV 纳入同一根价格轴（UnifiedChartView 也按 visibleLayers 处理）。
+    func testChartPriceDomainFollowsIOPVLayerVisibility() throws {
         let first = NextChartSample(timestamp: now, open: 1.0, high: 1.1, low: 0.9, close: 1.05, iopv: 4, volume: 100)
         let later = NextChartSample(timestamp: now.addingTimeInterval(3600), open: 1.1, high: 1.2, low: 1.0, close: 1.15, iopv: 4.1, volume: 200)
         let chart = NextChartDataset(code: "159941", interval: .intraday, samples: [later, first], costPerUnit: 1.02, costObservedAt: now, priceSource: "feed", iopvSource: "feed", observedAt: now)
         try chart.validate()
         XCTAssertEqual(chart.orderedSamples.map(\.timestamp), [now, now.addingTimeInterval(3600)])
-        XCTAssertGreaterThanOrEqual(chart.priceDomain!.upperBound, Decimal(string: "4.1")!)
-        XCTAssertLessThanOrEqual(chart.priceDomain!.lowerBound, Decimal(string: "0.9")!)
+        // 关闭 IOPV 图层：价格轴只由成交价决定，上界不越过 2
+        XCTAssertLessThan(chart.priceDomain(includingIOPV: false)!.upperBound, 2)
+        // 打开 IOPV 图层：价格轴必须覆盖 IOPV
+        XCTAssertGreaterThanOrEqual(chart.priceDomain(includingIOPV: true)!.upperBound, Decimal(string: "4.1")!)
+        // 属性入口保持默认（含 IOPV），与既有调用兼容
+        XCTAssertEqual(chart.priceDomain, chart.priceDomain(includingIOPV: true))
         XCTAssertNotNil(chart.iopvPremiumDomain)
         XCTAssertEqual(chart.timeDomain!.upperBound, now.addingTimeInterval(3600))
     }
