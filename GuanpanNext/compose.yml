@@ -5,7 +5,7 @@ services:
   guanpan-next:
     build: ./server
     ports:
-      - "8786:8786"
+      - "30001:8786"
     environment:
       GUANPAN_NEXT_DATA: /data
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}

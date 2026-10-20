@@ -99,7 +99,7 @@ final class NativeNavigationTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-ui-testing", "1"]
         app.launch()
-        let searchButton = byLabel(app, "全局搜索证券")
+        let searchButton = byId(app, "search.open")
         XCTAssertTrue(searchButton.waitForExistence(timeout: 10))
         searchButton.tap()
         XCTAssertTrue(app.navigationBars["全局搜索"].waitForExistence(timeout: 5))
@@ -152,5 +152,35 @@ final class NativeNavigationTests: XCTestCase {
         largeText.tabBars.buttons["资产"].tap()
         XCTAssertTrue(largeText.staticTexts["真实资产"].waitForExistence(timeout: 5))
         attach(largeText, "assets-accessibility-text")
+    }
+
+    func testDeepSeekKeyEntryIsPresentInSettings() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ui-testing", "1"]
+        app.launch()
+        let settingsEntry = byId(app, "settings.open")
+        XCTAssertTrue(settingsEntry.waitForExistence(timeout: 10))
+        settingsEntry.tap()
+        let keyField = byId(app, "settings.deepseek.key")
+        XCTAssertTrue(keyField.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "DeepSeek 连接")).firstMatch.exists)
+        attach(app, "settings-deepseek-key-entry")
+    }
+
+    func testGNASAccountControlsAreVisibleInLaboratory() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ui-testing", "1"]
+        app.launch()
+        app.tabBars.buttons["量化"].tap()
+        let refresh = byId(app, "laboratory.g.refresh")
+        XCTAssertTrue(refresh.waitForExistence(timeout: 8))
+        app.swipeUp()
+        let start = byId(app, "laboratory.g.start")
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        start.tap()
+        let confirm = app.buttons["启动独立虚拟账户"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 3))
+        app.buttons["取消"].tap()
+        attach(app, "laboratory-nas-g-controls")
     }
 }

@@ -6,18 +6,22 @@ explicit and revision-checked.
 """
 import json
 import os
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
-from domain import Conflict, InvalidData, NextDatabase
-from market import fetch_tencent_quotes, fetch_tencent_daily, symbol_for
+from ai import provider_status, analyze_user_context, AIProviderError, profile_from_environment
+from domain import Conflict, InvalidData, NextDatabase, convert_legacy_web_book
+from market import fetch_indices, fetch_tencent_quotes, fetch_tencent_daily, fetch_dividend_events, fetch_kline, symbol_for
 from workers import start_workers
+from backtest import run_backtest
+from simulations import apply_action, create_account
 
 WEB_ROOT = Path(__file__).with_name("web")
 
 
-def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fetch_tencent_daily):
+def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fetch_tencent_daily, dividend_fetcher=fetch_dividend_events):
     class Handler(BaseHTTPRequestHandler):
         server_version = "GuanpanNext/1"
 
@@ -26,7 +30,7 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
             pass
 
         def reply(self, status, value):
-            body = json.dumps(value, ensure_ascii=False).encode()
+            body = json.dumps(value, ensure_ascii=False, default=float).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -34,8 +38,8 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers(); self.wfile.write(body)
 
-        def html(self):
-            body = (WEB_ROOT / "index.html").read_bytes()
+        def html(self, name="index.html"):
+            body = (WEB_ROOT / name).read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -47,21 +51,80 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
             parsed = urlparse(self.path); path = parsed.path
             if path in ("/", "/index.html"):
                 return self.html()
+            if path in ("/market", "/market.html"):
+                return self.html("market.html")
             if path == "/health":
-                return self.reply(200, {"service": "guanpan-next", "schemaVersion": 1, "authentication": "none", "web": True, "workers": database.worker_status()})
+                return self.reply(200, {"service": "guanpan-next", "schemaVersion": 1, "authentication": "none", "web": True,
+                                        "workers": database.worker_health(), "aiProvider": provider_status()})
+            if path == "/api/data":
+                try: return self.reply(200, {"ok": True, **database.get_legacy_inbox("main")})
+                except InvalidData as error: return self.reply(400, {"error": str(error)})
+            if path == "/v1/legacy/books/main":
+                try:
+                    legacy = database.get_legacy_inbox("main")
+                    if legacy["data"] is None:
+                        return self.reply(200, {"revision": legacy["revision"], "book": None, "summary": None})
+                    converted = convert_legacy_web_book(legacy["data"])
+                    return self.reply(200, {"revision": legacy["revision"], **converted})
+                except InvalidData as error: return self.reply(422, {"error": str(error), "revision": database.get_legacy_inbox("main")["revision"]})
             if path.startswith("/v1/research/"):
                 try:
                     code = path.rsplit("/", 1)[-1]; symbol_for(code)
                     return self.reply(200, {"factors": database.get_research("factors-" + code),
                                             "ai": database.get_research("deepseek-" + code),
-                                            "providerConfigured": bool(os.environ.get("DEEPSEEK_API_KEY"))})
+                                            "providerConfigured": provider_status()["configured"],
+                                            "providerStatus": provider_status()})
                 except (InvalidData, ValueError) as error: return self.reply(400, {"error": str(error)})
+            if path.startswith("/v1/backtests/runs/"):
+                try:
+                    run_id = path.rsplit("/", 1)[-1]
+                    result = database.get_experiment("backtest-" + run_id)
+                    return self.reply(200, result) if result else self.reply(404, {"error": "backtest run not found"})
+                except InvalidData as error: return self.reply(400, {"error": str(error)})
+            if path.startswith("/v1/simulations/"):
+                try:
+                    parts = path.strip("/").split("/")
+                    if len(parts) not in (3, 4): raise InvalidData("invalid simulation path")
+                    strategy = parts[2]
+                    current = database.get_twin_account(strategy)
+                    if len(parts) == 4:
+                        if parts[3] != "history": raise InvalidData("unknown simulation resource")
+                        return self.reply(200, {"strategy": strategy, "history": database.twin_account_history(strategy)})
+                    return self.reply(200, {"strategy": strategy, **current})
+                except InvalidData as error: return self.reply(400, {"error": str(error)})
+            if path == "/v1/market/indices":
+                try: return self.reply(200, {"indices": fetch_indices()})
+                except Exception: return self.reply(502, {"error": "index source unavailable"})
+            if path == "/v1/market/kline":
+                symbol = parse_qs(parsed.query).get("symbol", [""])[0]
+                try: return self.reply(200, {"symbol": symbol, "bars": fetch_kline(symbol)})
+                except (ValueError, InvalidData) as error: return self.reply(400, {"error": str(error)})
+                except Exception: return self.reply(502, {"error": "index kline source unavailable"})
             if path.startswith("/v1/market/minute/"):
                 try:
                     code = path.rsplit("/", 1)[-1]; symbol_for(code)
                     day = parse_qs(parsed.query).get("day", [datetime.now().astimezone().date().isoformat()])[0]
                     return self.reply(200, database.get_minute(code, day))
                 except (InvalidData, ValueError) as error: return self.reply(400, {"error": str(error)})
+            if path.startswith("/v1/market/dividends/"):
+                try:
+                    code = path.rsplit("/", 1)[-1]; symbol_for(code)
+                    cached = database.get_dividend_events(code)
+                    now = datetime.now(timezone.utc)
+                    fresh = False
+                    if cached:
+                        try: fresh = (now - datetime.fromisoformat(cached["fetchedAt"])).total_seconds() < 24 * 3600
+                        except ValueError: pass
+                    if not fresh:
+                        try:
+                            rows = dividend_fetcher(code)
+                            database.put_dividend_events(code, rows, now.isoformat())
+                            cached = database.get_dividend_events(code)
+                        except Exception:
+                            if cached is None: raise
+                    return self.reply(200, cached or {"code": code, "source": "NAS dividend archive", "fetchedAt": None, "events": []})
+                except (InvalidData, ValueError) as error: return self.reply(400, {"error": str(error)})
+                except Exception: return self.reply(503, {"error": "no dividend archive or verified source available"})
             if path.startswith("/v1/market/daily/"):
                 try:
                     code = path.rsplit("/", 1)[-1]; symbol_for(code)
@@ -98,6 +161,90 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                     return self.reply(413, {"error": "invalid body size"})
                 value = json.loads(self.rfile.read(length))
                 if not isinstance(value, dict): raise InvalidData("JSON object required")
+                if path == "/v1/ai/analyze":
+                    if value.get("userConfirmed") is not True:
+                        return self.reply(400, {"error": "此分析必须由 iOS 页面明确确认后发起"})
+                    try:
+                        result = analyze_user_context(value.get("context"), profile=profile_from_environment())
+                        result["createdAt"] = datetime.now(timezone.utc).isoformat()
+                        return self.reply(200, result)
+                    except AIProviderError as error:
+                        return self.reply(503, {"error": str(error)})
+                    except ValueError as error:
+                        return self.reply(400, {"error": str(error)})
+                    except Exception:
+                        return self.reply(502, {"error": "DeepSeek 分析失败；未生成建议"})
+                if path.startswith("/v1/simulations/"):
+                    parts = path.strip("/").split("/")
+                    if len(parts) != 3: raise InvalidData("invalid simulation path")
+                    strategy = parts[2]
+                    if value.get("userConfirmed") is not True:
+                        raise InvalidData("virtual account changes require explicit confirmation")
+                    expected = value.get("expectedRevision")
+                    if type(expected) is not int or expected < 0:
+                        raise InvalidData("expectedRevision is required")
+                    action = value.get("action")
+                    now = datetime.now(timezone.utc).isoformat()
+                    current = database.get_twin_account(strategy)
+                    if current["revision"] != expected:
+                        raise Conflict("simulation revision changed")
+                    if action == "start":
+                        if set(value) != {"action", "userConfirmed", "expectedRevision", "config"}:
+                            raise InvalidData("simulation start fields are invalid")
+                        if current["account"] is not None and current["account"].get("status") != "reset":
+                            raise InvalidData("account already exists; pause it or reset it before restarting")
+                        config = value.get("config")
+                        account = create_account(strategy, config, now)
+                    else:
+                        if current["account"] is None: raise InvalidData("start this virtual account first")
+                        if set(value) - {"action", "userConfirmed", "expectedRevision", "amount", "reason"}:
+                            raise InvalidData("unexpected simulation action fields")
+                        action_request = {"action": action}
+                        if action == "reset": action_request["userConfirmed"] = value.get("userConfirmed")
+                        if action in ("fund", "withdraw"):
+                            for key in ("amount", "reason"):
+                                if key in value: action_request[key] = value[key]
+                        account = apply_action(current["account"], action_request, now)
+                    revision = database.put_twin_account(strategy, expected, account)
+                    return self.reply(200, {"strategy": strategy, "revision": revision, "account": account, "realOrder": False})
+                if path == "/api/data":
+                    if value.get("mode") != "legacy-stage-confirmed":
+                        raise InvalidData("legacy staging requires explicit migration action")
+                    revision = database.put_legacy_inbox("main", value.get("expectedRevision"), value.get("data"))
+                    return self.reply(200, {"ok": True, "revision": revision})
+                if path.startswith("/v1/backtests/"):
+                    strategy = path.rsplit("/", 1)[-1]
+                    if value.get("strategy") != strategy:
+                        raise InvalidData("path and request strategy do not match")
+                    codes = value.get("codes")
+                    if not isinstance(codes, list) or not 1 <= len(codes) <= 12:
+                        raise InvalidData("choose 1–12 ETF codes")
+                    bars, dividends = {}, {}
+                    now = datetime.now(timezone.utc)
+                    for code in codes:
+                        symbol_for(code)
+                        cached = database.get_daily(code)
+                        if cached is None:
+                            try:
+                                rows = daily_fetcher(code)
+                                database.put_daily(code, rows, now.isoformat())
+                                cached = database.get_daily(code)
+                            except Exception:
+                                return self.reply(503, {"error": f"no verified daily archive or source for {code}"})
+                        if cached is None or len(cached["bars"]) < 2:
+                            return self.reply(422, {"error": f"at least two archived daily bars are required for {code}"})
+                        bars[code] = cached["bars"]
+                        distribution = database.get_dividend_events(code)
+                        dividends[code] = distribution["events"] if distribution else []
+                    result = run_backtest(value, bars, dividends)
+                    run_id = uuid.uuid4().hex
+                    result["runId"] = run_id
+                    result["createdAt"] = now.isoformat()
+                    database.put_experiment("backtest-" + run_id, result)
+                    return self.reply(200, result)
+                if path == "/v1/legacy/books/main":
+                    converted = convert_legacy_web_book(value.get("data", value))
+                    return self.reply(200, {"revision": database.get_legacy_inbox("main")["revision"], **converted})
                 if path.startswith("/v1/real/books/"):
                     if value.get("mode") != "manual-confirmed":
                         raise InvalidData("real books require explicit manual confirmation")

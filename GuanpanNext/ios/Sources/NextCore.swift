@@ -55,6 +55,115 @@ struct NextCashMovement: Codable, Identifiable, Equatable {
     let amount: Decimal
     let reason: String
 }
+enum NextDividendAnalytics {
+    static let verifiedHistory = [
+        NextETFDividendEvent(code: "515180", date: "2025-10-21", amountPerShare: Decimal(string: "0.061")!),
+        NextETFDividendEvent(code: "563020", date: "2025-12-10", amountPerShare: Decimal(string: "0.012")!),
+        NextETFDividendEvent(code: "563020", date: "2026-06-10", amountPerShare: Decimal(string: "0.012")!),
+        NextETFDividendEvent(code: "563020", date: "2026-09-11", amountPerShare: Decimal(string: "0.012")!),
+        NextETFDividendEvent(code: "159545", date: "2025-11-12", amountPerShare: Decimal(string: "0.010")!),
+        NextETFDividendEvent(code: "159545", date: "2026-02-11", amountPerShare: Decimal(string: "0.015")!)
+    ]
+    static func merged(_ supplied: [NextETFDividendEvent]) -> [NextETFDividendEvent] {
+        var byKey: [String: NextETFDividendEvent] = [:]
+        for item in verifiedHistory + supplied {
+            let key = item.id
+            if let previous = byKey[key], previous.isEstimated != true && item.isEstimated == true { continue }
+            byKey[key] = item
+        }
+        return byKey.values.sorted { $0.date == $1.date ? $0.code < $1.code : $0.date < $1.date }
+    }
+    static func recentVerifiedPerShare(code: String, events: [NextETFDividendEvent], today: String) -> Decimal {
+        let calendar = Calendar(identifier: .gregorian)
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(identifier: "Asia/Shanghai"); formatter.dateFormat = "yyyy-MM-dd"
+        guard let day = formatter.date(from: today), let cutoff = calendar.date(byAdding: .day, value: -365, to: day) else { return 0 }
+        let cutoffText = formatter.string(from: cutoff)
+        let hits = merged(events).filter { $0.code == code && $0.isEstimated != true && $0.date >= cutoffText && $0.date <= today }
+        if hits.count == 2, let first = formatter.date(from: hits[0].date), let last = formatter.date(from: hits[1].date),
+           last.timeIntervalSince(first) / 86_400 >= 300 { return hits[1].amountPerShare }
+        return hits.reduce(Decimal.zero) { $0 + $1.amountPerShare }
+    }
+    enum ProjectionSource { case recentConfirmed, historicalAverage, inferredEstimate }
+    static func projectedAnnualPerShare(code: String, events: [NextETFDividendEvent], today: String) -> (amount: Decimal, source: ProjectionSource)? {
+        let all = merged(events).filter { $0.code == code && $0.date <= today }
+        let parsedRecent = recentVerifiedPerShare(code: code, events: all, today: today)
+        if parsedRecent > 0 { return (parsedRecent, .recentConfirmed) }
+        let cutoffYear = (Int(today.prefix(4)) ?? 0) - 3
+        let confirmed = all.filter { $0.isEstimated != true && (Int($0.date.prefix(4)) ?? 0) >= cutoffYear }
+        let totals = Dictionary(grouping: confirmed, by: { String($0.date.prefix(4)) }).mapValues { $0.reduce(Decimal.zero) { $0 + $1.amountPerShare } }
+        let sumByYear = totals.values.reduce(Decimal.zero, +)
+        if totals.count >= 2 {
+            let average = sumByYear / Decimal(totals.count)
+            if average > 0 { return (average, .historicalAverage) }
+        }
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(identifier: "Asia/Shanghai"); formatter.dateFormat = "yyyy-MM-dd"
+        let yearAgo = formatter.date(from: today).flatMap { Calendar(identifier: .gregorian).date(byAdding: .day, value: -365, to: $0) }.map { formatter.string(from: $0) } ?? today
+        let estimate = all.filter { $0.isEstimated == true && $0.date >= yearAgo }
+            .reduce(Decimal.zero) { $0 + $1.amountPerShare }
+        return estimate > 0 ? (estimate, .inferredEstimate) : nil
+    }
+}
+
+struct NextETFDividendEvent: Codable, Identifiable, Equatable {
+    var id: String { "\(code)-\(date)" }
+    let code: String
+    let date: String
+    let amountPerShare: Decimal
+    var isEstimated: Bool? = nil
+    var recordDate: String? = nil
+    var payDate: String? = nil
+    func validate() throws {
+        let parts = date.split(separator: "-")
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.dateFormat = "yyyy-MM-dd"
+        formatter.isLenient = false
+        let validDate = formatter.date(from: date).map { formatter.string(from: $0) == date } ?? false
+        let validOptionalDates = [recordDate, payDate].compactMap { $0 }.allSatisfy { value in
+            formatter.date(from: value).map { formatter.string(from: $0) == value } ?? false
+        }
+        guard code.count == 6, code.allSatisfy(\.isNumber), parts.count == 3,
+              date.count == 10, validDate, validOptionalDates, amountPerShare > 0, !amountPerShare.isNaN else {
+            throw NextError.invalid("分红事件的代码、日期或每份金额无效")
+        }
+    }
+}
+
+enum NextIncomeKind: String, Codable, CaseIterable, Identifiable, Equatable {
+    case etfDistribution, cashInterest, other
+    var id: String { rawValue }
+    var title: String { switch self { case .etfDistribution: "ETF 分红"; case .cashInterest: "现金利息"; case .other: "其他收益" } }
+}
+enum NextIncomeStatus: String, Codable, Equatable {
+    case expected, received
+    var title: String { self == .expected ? "待到账" : "已到账" }
+}
+struct NextIncomeEvent: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var kind: NextIncomeKind
+    var code: String?
+    var name: String
+    var exDate: Date?
+    var payDate: Date
+    var units: Int?
+    var perUnit: Decimal?
+    var grossAmount: Decimal
+    var tax: Decimal
+    var status: NextIncomeStatus = .expected
+    var receivedAt: Date?
+    var note: String = ""
+    var netAmount: Decimal { grossAmount - tax }
+    func validate() throws {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              grossAmount > 0, !grossAmount.isNaN, tax >= 0, !tax.isNaN, tax <= grossAmount,
+              units.map({ $0 > 0 }) ?? true,
+              perUnit.map({ $0 > 0 && !$0.isNaN }) ?? true,
+              (code == nil || (code!.count == 6 && code!.allSatisfy(\.isNumber))),
+              status != .received || receivedAt != nil else {
+            throw NextError.invalid("收息记录的金额、税额、证券代码或到账状态无效")
+        }
+        if kind == .etfDistribution { guard code != nil else { throw NextError.invalid("ETF 分红必须关联证券代码") } }
+    }
+}
+
 struct NextBook: Codable, Equatable {
     var schemaVersion = 1
     var id = UUID()
@@ -62,16 +171,40 @@ struct NextBook: Codable, Equatable {
     var positions: [NextPosition] = []
     var fills: [NextFill] = []
     var cashMovements: [NextCashMovement] = []
+    var incomeEvents: [NextIncomeEvent] = []
+    var dividendEvents: [NextETFDividendEvent] = []
     // Only snapshots recorded under the new securities schema belong here.
     var history: [NextAssetPoint] = []
     var importedAt: Date?
+    init(schemaVersion: Int = 1, id: UUID = UUID(), cash: Decimal = 0, positions: [NextPosition] = [], fills: [NextFill] = [], cashMovements: [NextCashMovement] = [], incomeEvents: [NextIncomeEvent] = [], dividendEvents: [NextETFDividendEvent] = [], history: [NextAssetPoint] = [], importedAt: Date? = nil) {
+        self.schemaVersion = schemaVersion; self.id = id; self.cash = cash; self.positions = positions
+        self.fills = fills; self.cashMovements = cashMovements; self.incomeEvents = incomeEvents; self.dividendEvents = dividendEvents; self.history = history; self.importedAt = importedAt
+    }
     func validate() throws {
         guard schemaVersion == 1, !cash.isNaN, cash >= 0,
               Set(positions.map(\.code)).count == positions.count,
-              positions.allSatisfy({ $0.code.count == 6 && $0.code.allSatisfy(\.isNumber) && $0.units >= 0 && !$0.bookCost.isNaN && $0.bookCost >= 0 }),
-              cashMovements.allSatisfy({ !$0.amount.isNaN && !$0.reason.isEmpty }) else {
+              positions.allSatisfy({ $0.code.count == 6 && $0.code.allSatisfy(\.isNumber) && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.units >= 0 && !$0.bookCost.isNaN && $0.bookCost >= 0 }),
+              fills.allSatisfy({ $0.code.count == 6 && $0.code.allSatisfy(\.isNumber) && ($0.side == "buy" || $0.side == "sell") && $0.units > 0 && $0.price > 0 && !$0.price.isNaN && $0.fee >= 0 && !$0.fee.isNaN && !$0.realized.isNaN }),
+              history.allSatisfy({ $0.total >= 0 && !$0.total.isNaN && !$0.externalFlow.isNaN }),
+              cashMovements.allSatisfy({ !$0.amount.isNaN && !$0.reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw NextError.invalid("账本校验失败：现金、持仓或版本无效")
         }
+        for event in incomeEvents { try event.validate() }
+        for event in dividendEvents { try event.validate() }
+    }
+    private enum CodingKeys: String, CodingKey { case schemaVersion, id, cash, positions, fills, cashMovements, incomeEvents, dividendEvents, history, importedAt }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        cash = try values.decodeIfPresent(Decimal.self, forKey: .cash) ?? 0
+        positions = try values.decodeIfPresent([NextPosition].self, forKey: .positions) ?? []
+        fills = try values.decodeIfPresent([NextFill].self, forKey: .fills) ?? []
+        cashMovements = try values.decodeIfPresent([NextCashMovement].self, forKey: .cashMovements) ?? []
+        incomeEvents = try values.decodeIfPresent([NextIncomeEvent].self, forKey: .incomeEvents) ?? []
+        dividendEvents = try values.decodeIfPresent([NextETFDividendEvent].self, forKey: .dividendEvents) ?? []
+        history = try values.decodeIfPresent([NextAssetPoint].self, forKey: .history) ?? []
+        importedAt = try values.decodeIfPresent(Date.self, forKey: .importedAt)
     }
     func total(using quotes: [String: NextQuote]) -> Decimal? {
         var total = cash
@@ -215,6 +348,16 @@ struct NextInstrumentRules: Codable, Equatable {
     let source: String
     let verifiedAt: Date?
     var isVerified: Bool { assetClass != .unknown && settlement != .unknown && lotSize != nil && feePerTrade != nil && verifiedAt != nil && !source.isEmpty && !market.isEmpty }
+    var isHistoricalBacktestEligible: Bool { assetClass == .etf && lotSize != nil && feePerTrade == NextExperiment.fee && verifiedAt != nil && !source.isEmpty && !market.isEmpty }
+    static func verifiedETFMarketRule(code: String, market: String, at date: Date = Date()) -> NextInstrumentRules? {
+        guard code.count == 6, code.allSatisfy(\.isNumber),
+              (code.hasPrefix("15") && market == "SZSE") || ((code.hasPrefix("5") || code.hasPrefix("56")) && market == "SSE") else { return nil }
+        let provenance = market == "SSE"
+            ? "SSE ETF FAQ https://www.sse.com.cn/assortment/fund/etf/question/c/c_20240118_5734754.shtml · 100份；用户指定费率¥0.10；交收未知"
+            : "SZSE 基金竞价交易说明 https://investor.szse.cn/knowledge/fund/trade/t20171113_538865.html · 100份；用户指定费率¥0.10；交收未知"
+        return NextInstrumentRules(code: code, market: market, assetClass: .etf, settlement: .unknown,
+            lotSize: 100, feePerTrade: NextExperiment.fee, source: provenance, verifiedAt: date)
+    }
     func validate() throws {
         guard code.count == 6, code.allSatisfy(\.isNumber),
               (market.isEmpty || market.count <= 16), (source.isEmpty || source.count <= 160),
@@ -247,6 +390,29 @@ struct NextOrderBookSnapshot: Codable, Equatable {
     }
 }
 
+enum NextIntradayAxis {
+    static let length = 252.0
+    static let ticks: [(Double, String)] = [(0, "09:30"), (60, "10:30"), (120, "11:30"), (132, "13:00"), (192, "14:00"), (252, "15:00")]
+    /// Fixed mainland ETF session axis. The lunch break is compressed to a small
+    /// 12-minute visual gap; intraday plots never stretch early samples to fill the day.
+    static func minute(_ date: Date) -> Double {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        let parts = calendar.dateComponents([.hour, .minute], from: date)
+        let minute = Double((parts.hour ?? 9) * 60 + (parts.minute ?? 30))
+        if minute <= 570 { return 0 }
+        if minute <= 690 { return minute - 570 }
+        if minute < 780 { return 120 + Double(minute - 690) / 90 * 12 }
+        if minute <= 900 { return 132 + minute - 780 }
+        return 252
+    }
+    static func sameTradingDay(_ lhs: Date, _ rhs: Date) -> Bool {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        return calendar.isDate(lhs, inSameDayAs: rhs)
+    }
+}
+
 enum NextChartInterval: String, Codable, CaseIterable { case intraday, fiveDay, day, week, month, threeMonth, year, all }
 struct NextChartSample: Codable, Identifiable, Equatable {
     var id: Date { timestamp }
@@ -257,6 +423,30 @@ struct NextChartSample: Codable, Identifiable, Equatable {
     let close: Decimal
     let iopv: Decimal?
     let volume: Decimal?
+}
+enum NextMovingAverage {
+    /// Simple moving average of daily closes. Values remain Decimal through
+    /// accumulation and division; the first period-1 bars are intentionally nil.
+    static func series(_ samples: [NextChartSample], period: Int) -> [Decimal?] {
+        guard period > 0 else { return Array(repeating: nil, count: samples.count) }
+        var prefix: [Decimal] = [0]
+        prefix.reserveCapacity(samples.count + 1)
+        for sample in samples { prefix.append(prefix[prefix.count - 1] + sample.close) }
+        return samples.indices.map { index in
+            guard index + 1 >= period else { return nil }
+            return (prefix[index + 1] - prefix[index + 1 - period]) / Decimal(period)
+        }
+    }
+}
+extension NextIntradayAxis {
+    static func sessionSamples(from samples: [NextChartSample], selectedDate: Date?) -> [NextChartSample] {
+        let ordered = samples.sorted { $0.timestamp < $1.timestamp }
+        guard let latest = ordered.last else { return [] }
+        let day = selectedDate.flatMap { candidate in
+            ordered.contains(where: { sameTradingDay($0.timestamp, candidate) }) ? candidate : nil
+        } ?? latest.timestamp
+        return ordered.filter { sameTradingDay($0.timestamp, day) }
+    }
 }
 struct NextChartDataset: Codable, Equatable {
     let code: String
@@ -269,14 +459,20 @@ struct NextChartDataset: Codable, Equatable {
     let observedAt: Date
 
     var orderedSamples: [NextChartSample] { samples.sorted { $0.timestamp < $1.timestamp } }
-    var priceDomain: ClosedRange<Decimal>? {
-        let values = orderedSamples.flatMap { [$0.low, $0.high, Optional($0.close)].compactMap { $0 } }
+    /// 价格轴默认把 IOPV 也算进去（IOPV 与成交价共轴）。
+    /// 但 IOPV 图层是可以关掉的：关掉时纵轴不应该还被它撑开，
+    /// 否则成交价会被压成一条平线（例如 IOPV 4.1 而价格只有 1.05）。
+    /// 所以额外提供 `includingIOPV`：画图侧按图层可见性传参，纯数据场景保持默认行为。
+    var priceDomain: ClosedRange<Decimal>? { priceDomain(includingIOPV: true) }
+    func priceDomain(includingIOPV: Bool) -> ClosedRange<Decimal>? {
+        var values = orderedSamples.flatMap { [$0.low, $0.high, Optional($0.close)].compactMap { $0 } }
+        if includingIOPV { values.append(contentsOf: orderedSamples.compactMap(\.iopv)) }
         guard let low = values.min(), let high = values.max() else { return nil }
         if low == high { let pad = max(abs(low) * Decimal(string: "0.01")!, Decimal(string: "0.0001")!); return (low - pad)...(high + pad) }
         let pad = (high - low) * Decimal(string: "0.06")!
         return (low - pad)...(high + pad)
     }
-    // IOPV gets its own secondary percent axis; it cannot distort the price axis.
+    // Premium is available for numeric labels; the IOPV price itself shares the chart's price axis.
     var iopvPremiumDomain: ClosedRange<Decimal>? {
         let values = orderedSamples.compactMap { sample -> Decimal? in
             guard let iopv = sample.iopv, iopv != 0 else { return nil }
@@ -320,9 +516,25 @@ struct NextGoal: Codable, Equatable {
     var years = 10
     var monthlyBudget: Decimal = 1000
     var concentrationLimit: Decimal = 40
+    var targetWeights: [String: Decimal] = [:]
+    init(years: Int = 10, monthlyBudget: Decimal = 1000, concentrationLimit: Decimal = 40, targetWeights: [String: Decimal] = [:]) {
+        self.years = years; self.monthlyBudget = monthlyBudget; self.concentrationLimit = concentrationLimit; self.targetWeights = targetWeights
+    }
+    private enum CodingKeys: String, CodingKey { case years, monthlyBudget, concentrationLimit, targetWeights }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        years = try values.decodeIfPresent(Int.self, forKey: .years) ?? 10
+        monthlyBudget = try values.decodeIfPresent(Decimal.self, forKey: .monthlyBudget) ?? 1000
+        concentrationLimit = try values.decodeIfPresent(Decimal.self, forKey: .concentrationLimit) ?? 40
+        targetWeights = try values.decodeIfPresent([String: Decimal].self, forKey: .targetWeights) ?? [:]
+    }
     func validate() throws {
+        let totalWeight = targetWeights.values.reduce(Decimal.zero, +)
         guard years > 0, years <= 50, !monthlyBudget.isNaN, monthlyBudget >= 0,
-              concentrationLimit > 0, concentrationLimit <= 100 else { throw NextError.invalid("目标或预算无效") }
+              concentrationLimit > 0, concentrationLimit <= 100,
+              targetWeights.keys.allSatisfy({ $0.count == 6 && $0.allSatisfy(\.isNumber) }),
+              targetWeights.values.allSatisfy({ !$0.isNaN && $0 >= 0 && $0 <= 100 }),
+              targetWeights.isEmpty || abs(totalWeight - 100) <= Decimal(string: "0.01")! else { throw NextError.invalid("目标、预算或目标仓位比例无效（目标仓位合计须为 100%）") }
     }
 }
 struct NextEvidence: Codable, Identifiable, Equatable {
@@ -387,11 +599,14 @@ enum NextRoute: Codable, Equatable {
 }
 struct NextChartState: Codable, Equatable {
     var interval = "intraday"
-    var visibleLayers: Set<String> = ["price", "cost"]
+    var visibleLayers: Set<String> = ["price", "volume", "iopv", "cost", "average", "previous", "ma5", "ma10", "ma20", "ma60", "ma250", "trades", "range"]
     var lowerBound: Date?
     var upperBound: Date?
     var crosshairTime: Date?
     var scale = 1.0
+    var intradaySessionDate: Date? = nil
+    var latestIntradaySessionDate: Date? = nil
+    var movingAverageDefaultsApplied: Bool? = nil
 }
 struct NextNavigationState: Codable, Equatable {
     var selectedTab: NextTab = .overview
@@ -454,7 +669,46 @@ struct NextAssetValuation: Equatable {
     let quality: NextDataQuality?
     var isComplete: Bool { pricedPositions == totalPositions }
 }
+/// 持仓成本口径。券商软件里通常能看到两种，含义完全不同：
+///
+/// - **买入均价（移动加权平均）**：只由买入决定，卖出不改变每份成本。
+///   账本里 `bookCost / units` 就是这一种，天然可靠，不依赖成交历史是否完整。
+/// - **摊薄成本**：把卖出所得也冲减进成本 —— `(累计买入金额 + 买入费用 − 累计卖出金额 + 卖出费用) / 当前份额`。
+///   卖出盈利会把成本压低，甚至出现负成本；这是同花顺等软件默认显示的「成本价」。
+///
+/// 摊薄成本**只有成交历史完整时才算得准**。补录的已有持仓没有买入流水，
+/// 这种情况下 `hasFullHistory` 为 false，摊薄值退回加权平均，不会凭空造出一个假成本。
+struct NextCostBasis: Equatable {
+    let code: String
+    let units: Int
+    /// 账本里的持仓总成本（加权平均口径，含买入手续费）。
+    let bookCost: Decimal
+    let averageCost: Decimal
+    let dilutedCost: Decimal?
+    let hasFullHistory: Bool
+    var isNegativeDiluted: Bool { (dilutedCost ?? 0) < 0 }
+}
+
 extension NextBook {
+    /// 计算一只持仓的两种成本口径。
+    func costBasis(for code: String) -> NextCostBasis? {
+        guard let position = positions.first(where: { $0.code == code }) else { return nil }
+        let related = fills.filter { $0.code == code }
+        let buys = related.filter { $0.side == "buy" }
+        let sells = related.filter { $0.side == "sell" }
+        let average = position.units > 0 ? position.bookCost / Decimal(position.units) : 0
+        // 补录持仓没有买入流水，摊薄口径无法成立。
+        let hasFullHistory = !buys.isEmpty
+        var diluted: Decimal?
+        if hasFullHistory, position.units > 0 {
+            let buyCost = buys.reduce(Decimal.zero) { $0 + $1.price * Decimal($1.units) + $1.fee }
+            let sellNet = sells.reduce(Decimal.zero) { $0 + $1.price * Decimal($1.units) - $1.fee }
+            diluted = (buyCost - sellNet) / Decimal(position.units)
+        }
+        return NextCostBasis(code: code, units: position.units, bookCost: position.bookCost,
+                             averageCost: average, dilutedCost: diluted, hasFullHistory: hasFullHistory)
+    }
+
     func valuation(using quotes: [String: NextCachedQuote], at now: Date) -> NextAssetValuation {
         var partial = cash
         var priced = 0
@@ -475,7 +729,25 @@ extension NextBook {
         }
         let complete = priced == positions.filter({ $0.units > 0 }).count
         let quality = qualities.max { qualityRank($0) < qualityRank($1) }
-        let delta = complete && allQuotesFresh ? partial - previousTotal : nil
+        // 当日参考盈亏的券商口径：
+        //   昨仓 ＝ (现价 − 昨收) × 当前份额
+        //   今买 ＝ (昨收 − 买入价) × 份额 − 费用   ← 补回被「按昨收」多算的部分
+        //   今卖 ＝ (卖出价 − 昨收) × 份额 − 费用
+        // 只按 (现价−昨收) × 当前份额 会把当日买入的份额也当成昨天就有，
+        // 当天有买卖时必然和同花顺对不上。
+        var intradayAdjustment = Decimal.zero
+        var marketCalendar = Calendar(identifier: .gregorian)
+        marketCalendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        for fill in fills where marketCalendar.isDate(fill.date, inSameDayAs: now) {
+            guard let cached = quotes[fill.code] else { continue }
+            let previous = cached.quote.previousClose
+            if fill.side == "buy" {
+                intradayAdjustment += (previous - fill.price) * Decimal(fill.units) - fill.fee
+            } else {
+                intradayAdjustment += (fill.price - previous) * Decimal(fill.units) - fill.fee
+            }
+        }
+        let delta = complete && allQuotesFresh ? partial - previousTotal + intradayAdjustment : nil
         let deltaPercent = delta.flatMap { previousTotal > 0 ? $0 / previousTotal * 100 : nil }
         return NextAssetValuation(total: complete ? partial : nil, partialTotal: partial, dailyChange: delta, dailyChangePercent: deltaPercent, pricedPositions: priced,
                                   totalPositions: positions.filter({ $0.units > 0 }).count, earliestQuote: earliest, quality: quality)
@@ -559,6 +831,31 @@ struct NextBuyOpportunity: Codable, Equatable {
     }
 }
 
+/// A patient limit plan is a reminder/decision record, never a broker order.
+struct NextPatientLimitPlan: Codable, Identifiable, Equatable {
+    var id = UUID()
+    let code: String
+    let name: String
+    let limitPrice: Decimal
+    let units: Int
+    let createdAt: Date
+    let expiresAt: Date
+    var state = "等待价格提醒"
+    var triggeredAt: Date?
+    func shouldTrigger(with quote: NextQuote, at now: Date) -> Bool {
+        state == "等待价格提醒" && quote.code == code && quote.isFresh(at: now) && quote.price <= limitPrice && now < expiresAt
+    }
+    func validate() throws {
+        guard code.count == 6, code.allSatisfy(\.isNumber), !name.isEmpty,
+              !limitPrice.isNaN, limitPrice > 0, limitPrice <= 100000,
+              units > 0, units <= 100000000, expiresAt > createdAt,
+              ["等待价格提醒", "已暂停", "价格已触发", "已撤销", "已过期"].contains(state),
+              triggeredAt.map({ $0 >= createdAt && $0 <= expiresAt }) ?? true else {
+            throw NextError.invalid("耐心限价计划的证券、目标价、份额或有效期无效")
+        }
+    }
+}
+
 enum NextTwinStrategy: String, Codable, CaseIterable, Identifiable, Hashable {
     case A, B, C, D, E, F, G, H
     var id: String { rawValue }
@@ -583,17 +880,54 @@ enum NextPriceAlertDirection: String, Codable, CaseIterable, Identifiable, Equat
     var id: String { rawValue }
     var title: String { self == .atOrAbove ? "上涨至或高于" : "下跌至或低于" }
 }
+/// 提醒的判定维度。价格只是其中一种 —— 攒股息的标的更关心「股息率/溢价」，
+/// 短线更关心「今日涨跌幅」，所以规则允许按维度设置。
+enum NextAlertMetric: String, Codable, CaseIterable, Identifiable {
+    case price, changePercent, premiumPercent
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .price: return "价格"
+        case .changePercent: return "涨跌幅"
+        case .premiumPercent: return "溢折价"
+        }
+    }
+    var unit: String { self == .price ? "元" : "%" }
+}
+
 struct NextPriceAlertRule: Codable, Identifiable, Equatable {
     var id = UUID()
     let code: String
     let name: String
+    /// 阈值。价格类为元，涨跌幅/溢折价为百分数（可为负，例如折价 -2%）。
     let price: Decimal
     let direction: NextPriceAlertDirection
+    /// 旧版本规则没有这个字段，缺省按「价格」处理。
+    var metric: NextAlertMetric? = nil
     var enabled = true
     var isInsideTrigger = false
+    var resolvedMetric: NextAlertMetric { metric ?? .price }
+
+    /// 当前值是否满足规则。拿不到 IOPV 时溢折价规则不触发，而不是拿 0 当折价。
+    func value(for quote: NextQuote) -> Decimal? {
+        switch resolvedMetric {
+        case .price: return quote.price
+        case .changePercent: return quote.changePercent
+        case .premiumPercent:
+            guard let iopv = quote.iopv, iopv > 0 else { return nil }
+            return (quote.price / iopv - 1) * 100
+        }
+    }
+
     func validate() throws {
-        guard code.count == 6, code.allSatisfy(\.isNumber), !name.isEmpty, price > 0 else {
-            throw NextError.invalid("价格提醒的代码、名称或价格无效")
+        guard code.count == 6, code.allSatisfy(\.isNumber), !name.isEmpty, !price.isNaN else {
+            throw NextError.invalid("提醒的代码、名称或阈值无效")
+        }
+        switch resolvedMetric {
+        case .price:
+            guard price > 0, price <= 100000 else { throw NextError.invalid("价格提醒的阈值必须大于 0") }
+        case .changePercent, .premiumPercent:
+            guard abs(price) <= 100 else { throw NextError.invalid("百分比提醒的阈值应在 ±100 之间") }
         }
     }
 }
@@ -659,14 +993,31 @@ struct NextAuditedBook: Codable, Equatable {
 
 enum NextTheme: String, Codable, CaseIterable { case system, light, dark, comfort }
 
+enum NextMarketClock {
+    /// Lightweight foreground polling window. It intentionally does not claim
+    /// an exchange holiday calendar; stale/closed-session quotes never trigger
+    /// a plan and the user can always refresh manually.
+    static func isRegularSession(_ date: Date = Date()) -> Bool {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        let parts = calendar.dateComponents([.weekday, .hour, .minute], from: date)
+        guard let weekday = parts.weekday, (2...6).contains(weekday),
+              let hour = parts.hour, let minute = parts.minute else { return false }
+        let current = hour * 60 + minute
+        return (570...690).contains(current) || (780...900).contains(current)
+    }
+}
+
 /// Cached NAS research is portable with the encrypted local backup, but it is
 /// never a source of truth for the real ledger and never carries an API key.
 struct NextNASResearch: Codable, Equatable {
     struct Factor: Codable, Equatable { let code: String; let asOf: String; let source: String; let close: String; let ma20: String; let ma250: String; let state: String }
     struct AI: Codable, Equatable { let code: String; let asOf: String; let source: String; let provider: String; let model: String; let content: String; let realOrder: Bool }
+    struct ProviderStatus: Codable, Equatable { let state: String; let configured: Bool; let profile: String; let model: String?; let message: String }
     let factors: Factor?
     let ai: AI?
     let providerConfigured: Bool
+    var providerStatus: ProviderStatus? = nil
 }
 
 struct NextAppArchive: Codable, Equatable {
@@ -685,8 +1036,11 @@ struct NextAppArchive: Codable, Equatable {
     var audits: [NextAuditEvent] = []
     var decisionHistory: [NextDecision] = []
     var nasResearch: [String: NextNASResearch] = [:]
+    var dividendEvents: [String: [NextETFDividendEvent]] = [:]
+    var patientLimitPlans: [NextPatientLimitPlan] = []
+    var twinBacktests: [String: NextTwinBacktest] = [:]
     var theme: NextTheme = .system
-    private enum CodingKeys: String, CodingKey { case schemaVersion, book, experiment, twins, goal, watch, navigation, cachedQuotes, chartData, instrumentRules, orderBooks, notifications, audits, decisionHistory, nasResearch, theme }
+    private enum CodingKeys: String, CodingKey { case schemaVersion, book, experiment, twins, goal, watch, navigation, cachedQuotes, chartData, instrumentRules, orderBooks, notifications, audits, decisionHistory, nasResearch, dividendEvents, patientLimitPlans, twinBacktests, theme }
     init() {}
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -705,11 +1059,24 @@ struct NextAppArchive: Codable, Equatable {
         audits = try values.decodeIfPresent([NextAuditEvent].self, forKey: .audits) ?? []
         decisionHistory = try values.decodeIfPresent([NextDecision].self, forKey: .decisionHistory) ?? []
         nasResearch = try values.decodeIfPresent([String: NextNASResearch].self, forKey: .nasResearch) ?? [:]
+        dividendEvents = try values.decodeIfPresent([String: [NextETFDividendEvent]].self, forKey: .dividendEvents) ?? [:]
+        patientLimitPlans = try values.decodeIfPresent([NextPatientLimitPlan].self, forKey: .patientLimitPlans) ?? []
+        twinBacktests = try values.decodeIfPresent([String: NextTwinBacktest].self, forKey: .twinBacktests) ?? [:]
         theme = try values.decodeIfPresent(NextTheme.self, forKey: .theme) ?? .system
     }
     func validate() throws {
         guard schemaVersion == 1 else { throw NextError.invalid("本机数据版本不受支持") }
         try book.validate(); try goal.validate(); try twins.validate(); try experiment.validate()
+        guard Set(patientLimitPlans.map(\.id)).count == patientLimitPlans.count else { throw NextError.invalid("耐心限价计划存在重复编号") }
+        for plan in patientLimitPlans { try plan.validate() }
+        for (strategy, run) in twinBacktests {
+            guard strategy == run.strategy else { throw NextError.invalid("数字孪生回测缓存键不匹配") }
+            try run.validate()
+        }
+        for (code, events) in dividendEvents {
+            guard code.count == 6, code.allSatisfy(\.isNumber), events.allSatisfy({ $0.code == code }) else { throw NextError.invalid("分红历史代码与记录不一致") }
+            for event in events { try event.validate() }
+        }
         for (code, cached) in cachedQuotes {
             guard code == cached.quote.code, code.count == 6, code.allSatisfy(\.isNumber), cached.quote.price > 0,
                   cached.quote.previousClose > 0, !cached.quote.name.isEmpty, !cached.quote.source.isEmpty,
@@ -877,6 +1244,89 @@ struct NextTwinLedger: Codable, Equatable {
         guard var account = accounts[strategy.rawValue] else { throw NextError.invalid("模拟账户不存在") }
         account.isPaused = paused
         accounts[strategy.rawValue] = account
+    }
+}
+
+/// Cached historical strategy run. It is separate from the live twin account
+/// balance and has no write path to the real asset ledger.
+struct NextTwinBacktest: Codable, Equatable, Identifiable {
+    struct Point: Codable, Equatable, Identifiable {
+        var id: String { date }
+        let date: String
+        let equity: String
+        let cash: String
+        let nav: String
+        let externalFlow: String
+    }
+    struct Fill: Codable, Equatable, Identifiable {
+        var id: String { "\(date)-\(code)-\(side)-\(units)" }
+        let date: String
+        let code: String
+        let side: String
+        let units: Int
+        let price: String
+        let fee: String
+        let gross: String
+    }
+    let runId: String
+    let strategy: String
+    let engine: String
+    let realOrder: Bool
+    let queueAccuracy: String
+    let aiSignalAccuracy: String
+    let source: String
+    let startDate: String
+    let endDate: String
+    let sessions: Int
+    let codes: [String]
+    let initialWeights: [String: String]
+    let parameters: [String: Int]
+    let feePerFill: String
+    let initialCash: String
+    let externalContributions: String
+    let endingEquity: String
+    let totalReturn: String
+    let annualizedReturn: String
+    let annualizedVolatility: String
+    let sharpe: String
+    let calmar: String
+    let maxDrawdown: String
+    let feesPaid: String
+    let tradeCount: Int
+    let openPositions: [String: Int]
+    let pendingOrders: [String]
+    let curve: [Point]
+    let fills: [Fill]
+    var id: String { runId }
+
+    func validate() throws {
+        let ordered = curve.map(\.date)
+        let customWindowsValid = strategy != "H" || (parameters["fastWindow"].map { $0 >= 2 } == true
+            && parameters["slowWindow"].map { $0 <= 250 } == true
+            && (parameters["fastWindow"] ?? 0) < (parameters["slowWindow"] ?? 0))
+        guard !runId.isEmpty, NextTwinStrategy(rawValue: strategy) != nil, !realOrder,
+              customWindowsValid,
+              sessions >= 2, curve.count == sessions, codes.count > 0,
+              Set(codes).count == codes.count, Set(initialWeights.keys) == Set(codes),
+              zip(ordered, ordered.dropFirst()).allSatisfy({ pair in pair.0 < pair.1 }),
+              curve.allSatisfy({ Decimal(string: $0.equity).map({ $0 > 0 && !$0.isNaN }) == true && Decimal(string: $0.cash).map({ $0 >= 0 && !$0.isNaN }) == true && Decimal(string: $0.nav).map({ $0 >= 0 && !$0.isNaN }) == true }),
+              fills.allSatisfy({ $0.units > 0 && Decimal(string: $0.price).map({ $0 > 0 && !$0.isNaN }) == true && Decimal(string: $0.fee).map({ $0 == NextExperiment.fee }) == true }),
+              Decimal(string: feesPaid).map({ $0 >= 0 && !$0.isNaN }) == true else {
+            throw NextError.invalid("NAS 回测结果未通过本机验证")
+        }
+    }
+
+    func equityChartDataset() -> NextChartDataset? {
+        guard let code = codes.first, curve.count >= 2 else { return nil }
+        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withFullDate]
+        let samples = curve.compactMap { point -> NextChartSample? in
+            guard let timestamp = formatter.date(from: point.date), let close = Decimal(string: point.equity), close > 0 else { return nil }
+            return NextChartSample(timestamp: timestamp, open: nil, high: nil, low: nil, close: close, iopv: nil, volume: nil)
+        }
+        guard samples.count == curve.count else { return nil }
+        let dataset = NextChartDataset(code: code, interval: .day, samples: samples, costPerUnit: nil,
+            costObservedAt: nil, priceSource: "NAS 策略历史权益 · \(startDate) 至 \(endDate)", iopvSource: nil, observedAt: Date())
+        do { try dataset.validate(); return dataset } catch { return nil }
     }
 }
 
