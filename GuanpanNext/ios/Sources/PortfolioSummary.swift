@@ -112,7 +112,7 @@ enum NextPortfolioCalculator {
                 }
             }
             rows.append(NextPositionSummary(
-                code: position.code, name: position.name, units: position.units,
+                code: position.code, name: NextNameBook.display(position.name, code: position.code), units: position.units,
                 price: quote.price, previousClose: quote.previousClose,
                 marketValue: value, dailyChange: delta,
                 costPerUnit: perUnit, costSource: source,

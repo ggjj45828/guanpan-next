@@ -622,7 +622,7 @@ struct WorthBuyOverviewScreen: View {
                 samples: dataset.orderedSamples, dividendPerShare: annual, iopv: quote.iopv,
                 costPerUnit: position?.costPerUnit, weightPercent: weight,
                 positionLimitPercent: NextNum.double(model.goal.concentrationLimit)) else { pending.append(code); continue }
-            scored.append(WorthOverviewItem(code: code, name: position?.name ?? model.quotes[code]?.quote.name ?? code, assessment: assessment))
+            scored.append(WorthOverviewItem(code: code, name: model.name(for: code), assessment: assessment))
         }
         items = scored.sorted { $0.assessment.score > $1.assessment.score }
         missing = pending

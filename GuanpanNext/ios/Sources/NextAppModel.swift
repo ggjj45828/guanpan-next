@@ -171,6 +171,31 @@ struct LocalPreferences: Codable {
                   + patientLimitPlans.filter { $0.state == "等待价格提醒" }.map(\.code))).sorted()
     }
     var theme: GPTheme { preferences.theme }
+
+    /// 名称解析统一入口：账本里存的名称 > 报价里的 > 名称簿（跨启动）> 内置目录 > 代码本身。
+    /// 以前界面上到处是裸代码或"场内证券"，就是因为每个地方各自取一次、取不到就没人兜底。
+    func name(for code: String) -> String {
+        let stored = book.positions.first(where: { $0.code == code })?.name
+        if let stored, !stored.trimmingCharacters(in: .whitespaces).isEmpty, stored != code { return stored }
+        if let quoted = quotes[code]?.quote.name, !quoted.isEmpty, quoted != code { return quoted }
+        return NextNameBook.resolve(code)
+    }
+
+    /// 把账本/自选/提醒里出现过、但还不知道名字的代码补齐。
+    /// 只读一次行情并把名称记进名称簿，**不改账本字段**，所以不会产生审计噪音。
+    func backfillNamesIfNeeded() async {
+        let codes = Set(book.positions.map(\.code) + watch + book.fills.map(\.code)
+                        + preferences.notifications.priceRules.map(\.code) + book.dividendEvents.map(\.code))
+        let missing = codes.filter { code in
+            let stored = book.positions.first(where: { $0.code == code })?.name ?? ""
+            guard stored.isEmpty || stored == code else { return false }
+            let quoted = quotes[code]?.quote.name ?? ""
+            guard quoted.isEmpty || quoted == code else { return false }
+            return !NextNameBook.isResolved(code)
+        }
+        guard !missing.isEmpty else { return }
+        await refreshQuotes(codes: missing.sorted())
+    }
     var selectedTab: NextTab {
         get { preferences.navigation.selectedTab }
         set { preferences.navigation.selectedTab = newValue; preferences = preferences }
@@ -193,6 +218,8 @@ struct LocalPreferences: Codable {
         self.patientLimitPlans = repository.load([NextPatientLimitPlan].self, filename: "patient-limit-plans-v1.json", fallback: [])
         self.twinBacktests = repository.load([String: NextTwinBacktest].self, filename: "twin-backtests-v1.json", fallback: [:])
         self.errorMessage = repository.integrityWarning
+        // 启动时把「只有代码、没有名字」的标的补一次：账本里的旧数据、旧自选都能认出来。
+        Task { await backfillNamesIfNeeded() }
     }
     func commitRealLedger(_ updated: NextBook, action: String, reason: String) throws {
         try updated.validate()
@@ -204,6 +231,7 @@ struct LocalPreferences: Codable {
         guard !book.positions.contains(where: { $0.code == code }), units > 0, cost > 0 else { throw NextError.invalid("代码、份额或持仓成本无效，或该证券已经存在") }
         var updated = book
         updated.positions.append(NextPosition(code: code, name: name, units: units, bookCost: cost))
+        NextNameBook.remember(name, code: code)
         try commitRealLedger(updated, action: "录入场内持仓", reason: "用户确认保存")
         if !preferences.nasBaseURL.isEmpty { Task { await registerNASArchive(code) } }
     }
@@ -380,7 +408,7 @@ struct LocalPreferences: Codable {
         guard code.count == 6, code.allSatisfy(\.isNumber), !duplicated else {
             throw NextError.invalid("提醒代码无效，或相同条件的提醒已存在")
         }
-        let rule = NextPriceAlertRule(code: code, name: quotes[code]?.quote.name ?? InstrumentCatalog.name(for: code) ?? code,
+        let rule = NextPriceAlertRule(code: code, name: name(for: code),
                                       price: price, direction: direction, metric: metric)
         try rule.validate()
         preferences.notifications.priceRules.append(rule); preferences = preferences
@@ -716,6 +744,11 @@ struct LocalPreferences: Codable {
             }
             quotes = updated
             rules = updatedRules
+            // 名称随报价一起收进名称簿：这样流水、提醒、分红里只存了代码的位置也能显示名字。
+            NextNameBook.remember(pairs: fetched.compactMap { quote in
+                let name = quote.name.trimmingCharacters(in: .whitespaces)
+                return name.isEmpty ? nil : (code: quote.code, name: name)
+            })
             evaluatePriceAlerts(fetched)
             evaluatePatientLimitPlans(fetched)
             status = "行情已更新 · \(sourceNote) · \(fetched.count)/\(unique.count) · \(Date.now.formatted(date: .omitted, time: .shortened))"

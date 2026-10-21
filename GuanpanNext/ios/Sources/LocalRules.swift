@@ -779,3 +779,81 @@ enum NextMACD {
         return result
     }
 }
+
+// MARK: - 证券名称簿
+
+/// 代码 → 名称的本地记录。
+///
+/// 原来界面上大量位置只有 6 位代码（或者干脆显示"场内证券"），因为名称只散落在
+/// 持仓、报价缓存和一份 4 条的硬编码字典里，任何一处缺失就没有名字可显示。
+/// 这里做三件事：
+/// 1. 任何一次拿到真实名称（报价、录入持仓、搜索目录）都记下来，**跨启动保留**；
+/// 2. 查不到时回落到内置目录 `InstrumentCatalog`（200+ 常见标的）；
+/// 3. 全都查不到才回落到代码本身 —— 宁可在代码旁留白，也不编一个假名字。
+enum NextNameBook {
+    private static let storageKey = "guanpan.names.v1"
+    private static let lock = NSLock()
+    private static var table: [String: String] = {
+        (UserDefaults.standard.dictionary(forKey: storageKey) as? [String: String]) ?? [:]
+    }()
+
+    static func normalize(_ code: String) -> String {
+        code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    static func name(for code: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return table[normalize(code)]
+    }
+
+    /// 记一条。返回是否真的写入了新名称，方便调用方决定要不要刷新界面。
+    @discardableResult
+    static func remember(_ name: String?, code: String) -> Bool {
+        guard let name else { return false }
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = normalize(code)
+        guard !clean.isEmpty, key != clean.lowercased() else { return false }
+        lock.lock()
+        let changed = table[key] != clean
+        if changed { table[key] = clean }
+        let snapshot = changed ? table : [:]
+        lock.unlock()
+        if changed { UserDefaults.standard.set(snapshot, forKey: storageKey) }
+        return changed
+    }
+
+    /// 批量记：一次报价回来就把整批名称收进簿子，只落盘一次。
+    static func remember(pairs: [(code: String, name: String)]) {
+        var changed = false
+        lock.lock()
+        for pair in pairs {
+            let clean = pair.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = normalize(pair.code)
+            guard !clean.isEmpty, key != clean.lowercased(), table[key] != clean else { continue }
+            table[key] = clean
+            changed = true
+        }
+        let snapshot = changed ? table : [:]
+        lock.unlock()
+        if changed { UserDefaults.standard.set(snapshot, forKey: storageKey) }
+    }
+
+    /// 展示用：账本里存的名称优先（用户自己起的也算），其次名称簿，再次内置目录。
+    static func display(_ stored: String?, code: String) -> String {
+        if let stored = stored?.trimmingCharacters(in: .whitespacesAndNewlines), !stored.isEmpty, stored != code {
+            return stored
+        }
+        return resolve(code)
+    }
+
+    static func resolve(_ code: String) -> String {
+        if let name = name(for: code) { return name }
+        if let catalog = InstrumentCatalog.name(for: code) { return catalog }
+        return code
+    }
+
+    /// 已经"知道名字"的代码：既不是空、也不是把代码当名字。
+    static func isResolved(_ code: String) -> Bool {
+        resolve(code) != code
+    }
+}

@@ -403,7 +403,7 @@ private struct InstrumentDetailScreen: View {
     var body: some View {
         GPPageBackground {
             VStack(alignment: .leading, spacing: 0) {
-                HStack { VStack(alignment: .leading, spacing: 5) { Text("\(code) · \(quote.map { $0.source } ?? "数据源待接入")").font(.caption.monospaced()).foregroundStyle(p.muted); Text(quote.map { "¥\(NextMoney.text($0.price, digits: 4))" } ?? "暂无有效报价").gpFont(size: 34, relativeTo: .largeTitle, weight: .medium, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let quote, let change = quote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 2))%　·　\(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption.monospaced()).foregroundStyle(change >= 0 ? p.risk : p.jade) } else { Text(model.quotes[code]?.stamp.label(now: Date()) ?? "无数据 · 不计算涨跌").font(.caption).foregroundStyle(p.muted) } }; Spacer(); Button { Task { await model.refreshInstrument(code) } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(p.forest).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel("刷新行情"); Button { if model.watch.contains(code) { model.removeWatch(code) } else { try? model.addWatch(code) } } label: { Image(systemName: model.watch.contains(code) ? "star.fill" : "star").foregroundStyle(p.terracotta).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel(model.watch.contains(code) ? "取消关注" : "关注") }
+                HStack { VStack(alignment: .leading, spacing: 5) { Text("\(name) · \(code) · \(quote.map { $0.source } ?? "数据源待接入")").font(.caption.monospaced()).foregroundStyle(p.muted); Text(quote.map { "¥\(NextMoney.text($0.price, digits: 4))" } ?? "暂无有效报价").gpFont(size: 34, relativeTo: .largeTitle, weight: .medium, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let quote, let change = quote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 2))%　·　\(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption.monospaced()).foregroundStyle(change >= 0 ? p.risk : p.jade) } else { Text(model.quotes[code]?.stamp.label(now: Date()) ?? "无数据 · 不计算涨跌").font(.caption).foregroundStyle(p.muted) } }; Spacer(); Button { Task { await model.refreshInstrument(code) } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(p.forest).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel("刷新行情"); Button { if model.watch.contains(code) { model.removeWatch(code) } else { try? model.addWatch(code) } } label: { Image(systemName: model.watch.contains(code) ? "star.fill" : "star").foregroundStyle(p.terracotta).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel(model.watch.contains(code) ? "取消关注" : "关注") }
                     .padding(.top, 5).padding(.bottom, 14)
                 if let quote, let iopv = quote.iopv { Text("当前 IOPV ¥\(NextMoney.text(iopv, digits: 4)) · 溢折价 \(NextMoney.text((quote.price / iopv - 1) * 100, digits: 2))% · 同源时点 \(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption2.monospaced()).foregroundStyle(p.terracotta).padding(.bottom, 8) }
                 if let stamp = model.quotes[code]?.stamp { Text(stamp.label(now: Date())).font(.caption2).foregroundStyle(p.muted).padding(.bottom, 8) }
@@ -1287,6 +1287,8 @@ private struct AddPositionSheet: View {
                         await model.refreshQuotes(codes: [value])
                         guard code == value else { return }
                         if let found = model.quotes[value]?.quote.name, !found.isEmpty { name = found; lookupStatus = "名称来自行情源" }
+                        else if let known = InstrumentCatalog.name(for: value) { name = known; lookupStatus = "名称来自内置目录" }
+                        else if NextNameBook.isResolved(value) { name = NextNameBook.resolve(value); lookupStatus = "名称来自本机记录" }
                         else { name = ""; lookupStatus = "名称未查到，请检查代码或稍后重试" }
                     }
                 }
@@ -1312,8 +1314,9 @@ struct TradeEntrySheet: View {
     @State private var fee = ""
     @State private var confirm = false
     @State private var confirmImport = false
-    private var name: String { model.book.positions.first(where: { $0.code == request.code })?.name ?? model.quotes[request.code]?.quote.name ?? knownName(request.code) }
-    private var nameResolved: Bool { name != "场内证券" }
+    private var name: String { model.name(for: request.code) }
+    /// 名称没查出来时返回的是代码本身（不再用「场内证券」这种占位词），据此判断是否还在等名称。
+    private var nameResolved: Bool { name != request.code }
     private var verifiedETF: Bool { model.rules[request.code]?.assetClass == .etf || model.quotes[request.code]?.quote.providerInstrumentType == "ETF" }
     var body: some View {
         NavigationStack {
@@ -1696,7 +1699,7 @@ private struct LedgerHistoryScreen: View {
                 ForEach(model.book.fills.reversed()) { fill in
                     let buy = fill.side == "buy"
                     HStack(alignment: .center, spacing: 6) {
-                        GPDataRow(title: "\(fill.code) · \(buy ? "买入" : "卖出")",
+                        GPDataRow(title: "\(model.name(for: fill.code)) · \(fill.code) · \(buy ? "买入" : "卖出")",
                                   value: "\(fill.units) 份 × ¥\(NextMoney.text(fill.price, digits: 4))",
                                   note: "手续费 ¥\(NextMoney.text(fill.fee))" + (buy ? "" : " · 已实现 \(fill.realized >= 0 ? "+" : "")¥\(NextMoney.text(fill.realized))") + " · \(fill.date.formatted(date: .numeric, time: .shortened))",
                                   valueColor: buy ? p.risk : p.jade)
@@ -1753,6 +1756,7 @@ private struct DecisionHistoryScreen: View {
 // 三处 isEstimated 三元表达式挤在同一个表达式里，编译器类型检查直接超时
 // （error: unable to type-check this expression in reasonable time）。
 private struct DividendEventRow: View {
+    @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
     let event: NextETFDividendEvent
 
@@ -1764,7 +1768,10 @@ private struct DividendEventRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 NavigationLink(value: GPRoute.instrument(event.code)) {
-                    Text(event.code).font(.subheadline.weight(.semibold)).foregroundStyle(p.forest)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(model.name(for: event.code)).font(.subheadline.weight(.semibold)).foregroundStyle(p.forest)
+                        Text(event.code).font(.system(size: 9.5, design: .monospaced)).foregroundStyle(p.muted)
+                    }
                 }
                 Spacer()
                 Text("¥\(NextMoney.text(event.amountPerShare, digits: 4))/份")
@@ -1943,7 +1950,9 @@ private struct IntentRow: View {
 }
 
 private func compactField(_ title: String, text: Binding<String>) -> some View { VStack(alignment: .leading, spacing: 5) { Text(title).font(.caption2).foregroundStyle(.secondary); TextField(title, text: text).font(.subheadline).textFieldStyle(.roundedBorder).keyboardType(.decimalPad).submitLabel(.done) }.frame(maxWidth: .infinity) }
-private func knownName(_ code: String) -> String { ["159941":"纳指 ETF", "563020":"低波红利", "159545":"港股红利", "159352":"A500"][code] ?? "场内证券" }
+/// 名称解析：名称簿（跨启动记录的真实名称）→ 内置目录 → 代码本身。
+/// 原来这里只有 4 条硬编码，其余一律返回「场内证券」，界面上就只剩代码可看。
+private func knownName(_ code: String) -> String { NextNameBook.resolve(code) }
 private func shortTitle(_ strategy: NextTwinStrategy) -> String { switch strategy { case .A: "基准"; case .B: "原权重"; case .C: "目标配"; case .D: "再平衡"; case .E: "价值"; case .F: "风控"; case .G: "AI 多因子"; case .H: "自定义" } }
 private func strategyDescription(_ strategy: NextTwinStrategy) -> String { switch strategy { case .A: "完全不操作的对照基准；接受同一注资与分红，不主动买卖。"; case .B: "按初始组合比例进行定投；记录每笔假设与费用。"; case .C: "按用户设定的目标配置模拟定投。"; case .D: "按预设周期检查偏离并模拟再平衡。"; case .E: "基于已验证估值和红利数据进行智能价值调仓研究。"; case .F: "用趋势与风险约束管理模拟仓位。"; case .G: "AI 多因子自主模拟交易，在独立虚拟账户中持续研究与回放。"; case .H: "可配置条件与参数的用户自定义策略，与 A–G 账户分开比较。" } }
 

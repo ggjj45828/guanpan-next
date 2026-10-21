@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: '5.0'
-    MARKETING_VERSION: '3.4.2'
-    CURRENT_PROJECT_VERSION: '11'
+    MARKETING_VERSION: '3.4.3'
+    CURRENT_PROJECT_VERSION: '12'
 targets:
   GuanpanNext:
     type: application
@@ -19,8 +19,8 @@ targets:
         CFBundleDisplayName: 观盘 Pro
         # 显式写死版本号：GENERATE_INFOPLIST_FILE 关掉后，XcodeGen 会把 plist 里的
         # $(MARKETING_VERSION) 当字面量，落成默认的 1.0 —— 必须在 properties 里给实际值。
-        CFBundleShortVersionString: '3.4.2'
-        CFBundleVersion: '11'
+        CFBundleShortVersionString: '3.4.3'
+        CFBundleVersion: '12'
         UILaunchScreen: {}
         # ATS 的 NSAllowsLocalNetworking 是嵌套字典，无法用 INFOPLIST_KEY_* 注入
         # （Xcode 只支持扁平的 INFOPLIST_KEY_ 项），只能写进 plist 本体，

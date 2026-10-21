@@ -11,16 +11,26 @@
 
 ## 更新：覆盖文件 + 重启，不需要重建镜像
 
-`compose.yml` 已把宿主机 `./server` 只读挂载到容器 `/app`。镜像只负责 Python 运行时和 tzdata，
-代码不在镜像里，所以**改代码不再需要 `docker build`**。
+`compose.yml` 把宿主机 `./server` 只读挂到容器的 `/opt/guanpan-src`，容器启动时由
+`server/start.sh` 把它同步进 `/app`。镜像里仍然带一份代码作为**兜底基线**，所以：
+
+- 宿主机代码存在 → 用宿主机的（更新就是覆盖 + 重启）；
+- 宿主机代码缺失 → 退回镜像内置版本，**服务照常起来**。
+
+> 为什么不再直接挂 `/app`：`./server` 在 NAS 上解析不到时（目录名不对、更新包解到了子目录、
+> 面板把 compose 拷到别处执行），Docker 会建一个空目录挂上去，把镜像里的代码整个盖住，
+> 报错就是 `python: can't open file '/app/app.py': [Errno 2]`，服务直接起不来。现在不会了。
 
 1. 把更新包里的 `server/` 整个覆盖到 NAS 部署目录的 `server/`（同名文件直接覆盖，`tests/` 可一并覆盖）。
+   覆盖后请确认 `compose.yml` 同级确实存在 `server/app.py` —— 这是唯一会让更新失效的地方。
 2. 重启这个项目。命令行用 `docker compose restart guanpan-next`；极空间等面板点「重启」即可。
-   - 只有**第一次**从旧结构升级（compose 里还没有 `./server:/app:ro` 那行）时，需要先替换 `compose.yml`，
-     再执行一次 `docker compose up -d`（这一步只是按新配置**重建容器**，不会重新构建镜像），之后都只重启。
+   - 只有**第一次**从旧结构升级（compose 里还是 `./server:/app:ro`）时，需要先替换 `compose.yml`，
+     再执行一次 `docker compose up -d`（按新配置**重建容器**，不重新构建镜像），之后都只重启。
 3. 确认生效：`curl http://127.0.0.1:30001/health` 看 `codeVersion`。
    它必须等于更新包 `server/VERSION` 里的值；没变就是文件没覆盖对或容器没重启。
    Python 已经加载的模块不会自己重载，所以“只覆盖不重启”不会生效。
+   容器日志开头还会打印 `[start] 已同步宿主机代码 -> 版本 …` 或 `[start] 未检测到宿主机代码…`，
+   一看就知道走的是哪条路。
 
 更新不会动 `guanpan_next_data` 数据卷（账本、分时档案、备份版本都在里面），也不会动 `.env`。
 

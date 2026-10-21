@@ -13,10 +13,16 @@ services:
       GUANPAN_AI_BASE_URL: ${GUANPAN_AI_BASE_URL:-}
       GUANPAN_AI_MODEL: ${GUANPAN_AI_MODEL:-}
     volumes:
-      # 代码走宿主机挂载：更新时只要把新的 server/ 覆盖进部署目录，重启容器即生效，
-      # 不需要 docker build。镜像只负责 Python 运行时和 tzdata。
-      # 只读挂载，防止容器内进程改到源码（运行时数据一律写 /data）。
-      - ./server:/app:ro
+      # 宿主机代码挂到 /opt/guanpan-src（**不要挂到 /app**）：容器启动时 start.sh 会把这里
+      # 的代码同步进 /app。之所以不直接挂 /app：当挂载源解析不到时，Docker 会建一个空目录
+      # 盖住镜像里的代码，容器直接起不来（python: can't open file '/app/app.py'）。
+      # 现在挂载源缺失只会退化成"用镜像内置版本"，服务照常可用。
+      #
+      # 路径可用环境变量覆盖：某些 NAS 面板会把 compose 拷到它自己的目录执行，
+      # 这时 `./server` 会解析到别处、挂载为空。在 .env 里写
+      #   GUANPAN_CODE_DIR=/你的部署目录/server
+      # 用绝对路径最稳。默认仍是相对路径，命令行部署无需配置。
+      - ${GUANPAN_CODE_DIR:-./server}:/opt/guanpan-src:ro
       - guanpan_next_data:/data
     restart: unless-stopped
     healthcheck:
