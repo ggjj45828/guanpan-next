@@ -21,6 +21,18 @@ from simulations import apply_action, create_account
 WEB_ROOT = Path(__file__).with_name("web")
 
 
+def code_version():
+    """部署代码版本号，用来确认“覆盖文件 + 重启”是否真的生效。
+
+    更新后 /health 里的 codeVersion 必须变成新包里的值；没变就说明文件没覆盖到
+    容器实际挂载的目录，或者容器没重启（Python 已加载的模块不会自动重载）。
+    """
+    try:
+        return Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fetch_tencent_daily, dividend_fetcher=fetch_dividend_events):
     class Handler(BaseHTTPRequestHandler):
         server_version = "GuanpanNext/1"
@@ -55,6 +67,7 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                 return self.html("market.html")
             if path == "/health":
                 return self.reply(200, {"service": "guanpan-next", "schemaVersion": 1, "authentication": "none", "web": True,
+                                        "codeVersion": code_version(),
                                         "workers": database.worker_health(), "aiProvider": provider_status()})
             if path == "/v1/ai/verify":
                 # 真实连通性探针：只发一句 "Reply with OK only."，不携带任何持仓数据。

@@ -13,6 +13,10 @@ services:
       GUANPAN_AI_BASE_URL: ${GUANPAN_AI_BASE_URL:-}
       GUANPAN_AI_MODEL: ${GUANPAN_AI_MODEL:-}
     volumes:
+      # 代码走宿主机挂载：更新时只要把新的 server/ 覆盖进部署目录，重启容器即生效，
+      # 不需要 docker build。镜像只负责 Python 运行时和 tzdata。
+      # 只读挂载，防止容器内进程改到源码（运行时数据一律写 /data）。
+      - ./server:/app:ro
       - guanpan_next_data:/data
     restart: unless-stopped
     healthcheck:

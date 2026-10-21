@@ -9,6 +9,21 @@
 - `server/web/`：与 iPhone 使用同一新账本的网页入口。
 - 旧网页账本的一次性迁移暂存 API：只接收显式下载的快照并生成预览，不会自动写入新真实账本。
 
+## 更新：覆盖文件 + 重启，不需要重建镜像
+
+`compose.yml` 已把宿主机 `./server` 只读挂载到容器 `/app`。镜像只负责 Python 运行时和 tzdata，
+代码不在镜像里，所以**改代码不再需要 `docker build`**。
+
+1. 把更新包里的 `server/` 整个覆盖到 NAS 部署目录的 `server/`（同名文件直接覆盖，`tests/` 可一并覆盖）。
+2. 重启这个项目。命令行用 `docker compose restart guanpan-next`；极空间等面板点「重启」即可。
+   - 只有**第一次**从旧结构升级（compose 里还没有 `./server:/app:ro` 那行）时，需要先替换 `compose.yml`，
+     再执行一次 `docker compose up -d`（这一步只是按新配置**重建容器**，不会重新构建镜像），之后都只重启。
+3. 确认生效：`curl http://127.0.0.1:30001/health` 看 `codeVersion`。
+   它必须等于更新包 `server/VERSION` 里的值；没变就是文件没覆盖对或容器没重启。
+   Python 已经加载的模块不会自己重载，所以“只覆盖不重启”不会生效。
+
+更新不会动 `guanpan_next_data` 数据卷（账本、分时档案、备份版本都在里面），也不会动 `.env`。
+
 ## 部署前
 
 1. 将此包解压到 NAS 上新建的独立目录，建议目录名使用全小写 `guanpan-next`。Compose 已显式指定小写项目名 `guanpan-next`；若 NAS 部署器仍使用文件夹名作为项目名，请将解压目录重命名为 `guanpan-next`，不要用压缩包原名 `GuanpanPro-NAS-Deployment`。
