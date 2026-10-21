@@ -238,6 +238,11 @@ def infer_adjustment_dividends(code, adjusted, raw):
     return [{"code": code, "date": day, "amountPerShare": format(amount.normalize(), "f"), "isEstimated": True} for day, amount in merged]
 
 
+# 分红识别规则版本。改动推断/过滤规则时 +1，NAS 上旧缓存会自动失效重抓。
+# v2: 不分红的 ETF 不再用复权因子跳变硬推；单次每份分红不得超过前收 20%。
+DIVIDEND_RULES_VERSION = 2
+
+
 def fetch_dividend_events(code, daily_fetcher=fetch_tencent_daily, stock_fetcher=fetch_eastmoney_dividends,
                           fund_fetcher=fetch_eastmoney_fund_dividends):
     official = []; inferred = []; succeeded = False

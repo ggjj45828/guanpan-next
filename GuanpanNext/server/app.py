@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 from ai import provider_status, verify_provider, analyze_user_context, AIProviderError, profile_from_environment
 from domain import Conflict, InvalidData, NextDatabase, convert_legacy_web_book
-from market import fetch_indices, fetch_tencent_quotes, fetch_tencent_daily, fetch_dividend_events, fetch_kline, symbol_for
+from market import (fetch_indices, fetch_tencent_quotes, fetch_tencent_daily, fetch_dividend_events, fetch_kline,
+                    symbol_for, DIVIDEND_RULES_VERSION as dividend_rules_version)
 from workers import start_workers
 from backtest import run_backtest
 from simulations import apply_action, create_account
@@ -133,13 +134,17 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                     cached = database.get_dividend_events(code)
                     now = datetime.now(timezone.utc)
                     fresh = False
+                    stale_rules = bool(cached) and cached.get("rulesVersion") != dividend_rules_version
                     if cached:
                         try: fresh = (now - datetime.fromisoformat(cached["fetchedAt"])).total_seconds() < 24 * 3600
                         except ValueError: pass
+                        # 规则版本变了就必须重抓：否则旧缓存里那条"假分红"会继续返回，
+                        # 服务端改了算法、App 上还是老结果，看起来像没修好。
+                        if stale_rules: fresh = False
                     if not fresh:
                         try:
                             rows = dividend_fetcher(code)
-                            database.put_dividend_events(code, rows, now.isoformat())
+                            database.put_dividend_events(code, rows, now.isoformat(), dividend_rules_version, replace=stale_rules)
                             cached = database.get_dividend_events(code)
                         except Exception:
                             if cached is None: raise

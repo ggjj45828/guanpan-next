@@ -115,7 +115,7 @@ struct HoldingsBreakdownPanel: View {
                 PerformanceBlock(summary: performance, sampleCount: model.book.history.count,
                                  benchmarkName: benchmarkName, benchmarkReturn: benchmarkReturn)
             } else {
-                Text("还没有足够的资产快照，暂不计算区间收益（至少需要 2 个）。")
+                Text("已有 \(model.book.history.count) 条资产快照，至少需要 2 条才能算区间收益。收盘后每天自动补一条（盘中不记，避免噪音）；应用当天没打开就会缺那天，不做回填以免伪造历史。")
                     .font(.caption2).foregroundStyle(p.muted)
             }
 
@@ -146,6 +146,38 @@ struct HoldingsBreakdownPanel: View {
                 if issues.count > 5 {
                     Text("另有 \(issues.count - 5) 项，逐只打开详情处理").font(.system(size: 9.5)).foregroundStyle(p.muted)
                 }
+            }
+
+            // 今日贡献：把"今天亏了 3.8"拆到具体标的，不用自己去加。
+            if let daily = data.dailyChange, !data.positions.isEmpty {
+                let contributors = Array(data.positions.sorted { abs($0.dailyChange) > abs($1.dailyChange) }.prefix(4))
+                if !contributors.isEmpty {
+                    Divider().overlay(p.line.opacity(0.7)).padding(.vertical, 4)
+                    HStack(spacing: 5) {
+                        Text("今日贡献").font(.caption.weight(.medium)).foregroundStyle(p.ink)
+                        Spacer(minLength: 0)
+                        Text("合计 \(daily >= 0 ? "+" : "")¥\(NextMoney.text(daily))").font(.system(size: 9.5)).foregroundStyle(daily >= 0 ? p.risk : p.jade)
+                    }
+                    ForEach(contributors) { item in
+                        HStack(spacing: 6) {
+                            Text(item.name).font(.system(size: 10.5)).foregroundStyle(p.ink).lineLimit(1)
+                            Spacer(minLength: 6)
+                            Text("\(item.dailyChange >= 0 ? "+" : "")¥\(NextMoney.text(item.dailyChange))")
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(item.dailyChange >= 0 ? p.risk : p.jade)
+                        }.padding(.vertical, 1)
+                    }
+                }
+            }
+
+            // 待收分红：已实施派息会自动登记成"待到账"，这里给一个总览，免得忘了核销。
+            let pendingIncome = model.book.incomeEvents.filter { $0.status == .expected }
+            if !pendingIncome.isEmpty {
+                let totalPending = pendingIncome.reduce(Decimal.zero) { $0 + $1.netAmount }
+                Divider().overlay(p.line.opacity(0.7)).padding(.vertical, 4)
+                GPDataRow(title: "待收到账 · \(pendingIncome.count) 笔",
+                          value: "¥\(NextMoney.text(totalPending))",
+                          note: "由已实施派息自动登记；券商到账后在「资产流水」核销，不会自动加现金",
+                          valueColor: p.chartGold)
             }
 
             if data.positions.isEmpty {

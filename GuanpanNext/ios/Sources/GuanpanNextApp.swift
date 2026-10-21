@@ -1098,6 +1098,8 @@ private struct AssetsScreen: View {
     @State private var addPosition = false
     @State private var addIncome = false
     @State private var cashAmount = ""
+    /// 「按券商余额校准」输入框：填券商显示的可用，系统只补差额。
+    @State private var brokerCash = ""
     @State private var cashReason = "用户记录的场内现金变动"
     @State private var cashDirection: Decimal = 1
     /// 同一视图上挂多个 confirmationDialog，SwiftUI 只保证最后一个能弹。
@@ -1195,10 +1197,27 @@ private struct AssetsScreen: View {
                         GPDataRow(title: "\(event.code) · 除息日 \(event.date)", value: "每份 ¥\(NextMoney.text(event.amountPerShare, digits: 4))", note: event.isEstimated == true ? "复权价格推算 · 非确认现金派息" : "已记录派息事件 · 不是未来收益承诺")
                     }
                 }
-                EditorialSection(title: "现金变动") {
+                EditorialSection(title: "现金变动", trailing: "可用 ¥\(NextMoney.text(model.book.cash))") {
                     HStack { Button("转入") { cashDirection = 1 }; Button("转出") { cashDirection = -1 }.foregroundStyle(p.risk) }.buttonStyle(.bordered)
                     compactField("金额", text: $cashAmount); compactField("用途/备注", text: $cashReason)
                     GPActionButton(title: "审核并记录现金变动", secondary: true) { assetsConfirm = .cash }
+                    Divider().overlay(p.line.opacity(0.7)).padding(.vertical, 2)
+                    // 券商每天会有预扣、结息、佣金结算，逐个记太累；直接对余额校准一次。
+                    Text("按券商余额校准").font(.caption.weight(.medium)).foregroundStyle(p.ink)
+                    compactField("券商里显示的可用（元）", text: $brokerCash)
+                    GPActionButton(title: "校准到券商余额", secondary: true) {
+                        if let target = try? NextMoney.parse(brokerCash) {
+                            let delta = target - model.book.cash
+                            if delta == 0 { model.errorMessage = "与账本现金一致，无需校准" }
+                            else {
+                                do {
+                                    try model.adjustRealCash(delta, reason: "按券商余额校准到 ¥\(NextMoney.text(target))")
+                                    brokerCash = ""
+                                } catch { model.errorMessage = error.localizedDescription }
+                            }
+                        } else { model.errorMessage = "请输入券商显示的可用金额" }
+                    }
+                    Text("只补差额，不改写历史；差额会作为一条现金流水留痕。").font(.caption2).foregroundStyle(p.muted)
                     if let latest = model.book.cashMovements.last { GPDataRow(title: latest.reason, value: "\(latest.amount >= 0 ? "+" : "")¥\(NextMoney.text(latest.amount))", note: latest.date.formatted(date: .numeric, time: .shortened)) }
                 }
                 EditorialSection(title: "安全与数据") {
@@ -1334,6 +1353,17 @@ private struct AddPositionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.gp) private var p
     @State private var code = ""; @State private var name = ""; @State private var units = ""; @State private var cost = ""; @State private var confirm = false
+    /// 券商里「成本金额」往往比「成本价」精确：1.4715 会被券商显示成 1.472，
+    /// 按每份价录入会差几分钱。允许直接录合计成本，误差就归零。
+    @State private var costByTotal = false
+    private var totalCostValue: Decimal? {
+        guard let count = Int(units), count > 0, let parsed = try? NextMoney.parse(cost) else { return nil }
+        return costByTotal ? parsed : parsed * Decimal(count)
+    }
+    private var perUnitCostValue: Decimal? {
+        guard let count = Int(units), count > 0, let total = totalCostValue else { return nil }
+        return total / Decimal(count)
+    }
     @State private var lookupStatus = "输入 6 位代码后自动查询名称"
     var body: some View {
         NavigationStack {
@@ -1343,10 +1373,19 @@ private struct AddPositionSheet: View {
                     TextField("名称（自动填入）", text: $name)
                     Text(lookupStatus).font(.caption).foregroundStyle(.secondary)
                     TextField("份数（股 / 份）", text: $units).keyboardType(.numberPad)
-                    TextField("每份成本（元）", text: $cost).keyboardType(.decimalPad)
-                    if let u = Int(units), let c = try? NextMoney.parse(cost) {
-                        GPDataRow(title: "合计成本（自动计算）", value: "¥\(NextMoney.text(c * Decimal(u)))",
-                                  note: "\(u) 份 × ¥\(NextMoney.text(c, digits: 4)) · 券商里这个价叫「买入均价」")
+                    Picker("录入方式", selection: $costByTotal) {
+                        Text("按每份成本").tag(false)
+                        Text("按合计成本").tag(true)
+                    }.pickerStyle(.segmented)
+                    TextField(costByTotal ? "合计成本（元）" : "每份成本（元，建议 4 位小数）", text: $cost).keyboardType(.decimalPad)
+                    if let total = totalCostValue, let perUnit = perUnitCostValue, let count = Int(units) {
+                        GPDataRow(title: costByTotal ? "每份成本（自动计算）" : "合计成本（自动计算）",
+                                  value: costByTotal ? "¥\(NextMoney.text(perUnit, digits: 4))" : "¥\(NextMoney.text(total))",
+                                  note: "\(count) 份 × ¥\(NextMoney.text(perUnit, digits: 4)) = ¥\(NextMoney.text(total)) · 券商里这个价叫「买入均价」")
+                        if !costByTotal {
+                            Text("券商若显示 1.4715 这类 4 位小数，请按原始值录入，否则每份差 0.0005 会让持仓盈亏差几毛钱。")
+                                .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
                 Section {
@@ -1367,7 +1406,7 @@ private struct AddPositionSheet: View {
                     }
                 }
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("核对并保存") { confirm = true }.disabled(code.count != 6 || name.isEmpty || Int(units) == nil || cost.isEmpty) } }
-                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let c = try? NextMoney.parse(cost) else { return }; onSave(code, name, u, c * Decimal(u)); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份 × 每份 ¥\(cost) = 合计 ¥\(NextMoney.text((try? NextMoney.parse(cost)).map { $0 * Decimal(Int(units) ?? 0) } ?? 0))。保存后会产生可审计记录。") }
+                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let total = totalCostValue else { return }; onSave(code, name, u, total); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份，合计成本 ¥\(NextMoney.text(totalCostValue ?? 0))（每份 ¥\(NextMoney.text(perUnitCostValue ?? 0, digits: 4))）。保存后会产生可审计记录。") }
         }
     }
     let onSave: (String, String, Int, Decimal) -> Void
@@ -1414,7 +1453,16 @@ struct TradeEntrySheet: View {
                 }
                 Section("真实账本") {
                     Text("可用现金 ¥\(NextMoney.text(model.book.cash))")
-                    Text("持有 \(model.book.positions.first(where: { $0.code == request.code })?.units ?? 0) 份")
+                    let held = model.book.positions.first(where: { $0.code == request.code })?.units ?? 0
+                    let sellsAvailable = model.book.availableUnits(for: request.code, at: Date())
+                    let locked = model.book.lockedUnits(for: request.code, at: Date())
+                    Text("持有 \(held) 份 · 可卖 \(sellsAvailable) 份")
+                    if locked > 0 {
+                        Text("其中 \(locked) 份是今天买入的，T+1 才能卖").font(.caption).foregroundStyle(p.terracotta)
+                    }
+                    if request.side == "sell", let count = Int(units), count > sellsAvailable {
+                        Text("卖出 \(count) 份超过可卖 \(sellsAvailable) 份").font(.caption).foregroundStyle(p.risk)
+                    }
                     if let amount = tradeAmount {
                         if request.side == "buy" {
                             let after = model.book.cash - amount

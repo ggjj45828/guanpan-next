@@ -324,7 +324,9 @@ class NextDatabase:
                     id TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL,
                     PRIMARY KEY(id, revision));
                 CREATE TABLE IF NOT EXISTS daily_bars (code TEXT PRIMARY KEY, fetched_at TEXT NOT NULL, body TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS dividend_archive (code TEXT PRIMARY KEY, fetched_at TEXT NOT NULL, body TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS dividend_archive (
+                    code TEXT PRIMARY KEY, fetched_at TEXT NOT NULL, body TEXT NOT NULL,
+                    rules_version INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS minute_archive (
                     code TEXT NOT NULL, stamp TEXT NOT NULL, body TEXT NOT NULL, fetched_at TEXT NOT NULL,
                     PRIMARY KEY(code, stamp));
@@ -342,6 +344,12 @@ class NextDatabase:
                     id TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL,
                     PRIMARY KEY(id, revision));
             """)
+            # 老库升级：`dividend_archive` 早期没有 rules_version 列。
+            # 加不上（列已存在）就忽略 —— SQLite 没有 ADD COLUMN IF NOT EXISTS。
+            try:
+                db.execute("ALTER TABLE dividend_archive ADD COLUMN rules_version INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
     def connect(self):
         return sqlite3.connect(self.filename, timeout=15)
@@ -536,10 +544,12 @@ class NextDatabase:
         self.validate_id(code)
         if len(code) != 6 or not code.isdigit(): raise InvalidData("invalid exchange code")
         with self.connect() as db:
-            row = db.execute("SELECT fetched_at, body FROM dividend_archive WHERE code=?", (code,)).fetchone()
-        return {"code": code, "source": "Eastmoney fund F10 implemented distribution history + stock corporate actions + qfq/raw estimate", "fetchedAt": row[0], "events": json.loads(row[1])} if row else None
+            row = db.execute("SELECT fetched_at, body, rules_version FROM dividend_archive WHERE code=?", (code,)).fetchone()
+        return {"code": code,
+                "source": "Eastmoney fund F10 implemented distribution history + stock corporate actions + qfq/raw estimate",
+                "fetchedAt": row[0], "rulesVersion": row[2], "events": json.loads(row[1])} if row else None
 
-    def put_dividend_events(self, code, events, fetched_at):
+    def put_dividend_events(self, code, events, fetched_at, rules_version=0, replace=False):
         self.validate_id(code)
         if len(code) != 6 or not code.isdigit() or not isinstance(events, list) or not isinstance(fetched_at, str):
             raise InvalidData("invalid dividend archive")
@@ -564,7 +574,10 @@ class NextDatabase:
         with self.connect() as db:
             previous = db.execute("SELECT body FROM dividend_archive WHERE code=?", (code,)).fetchone()
             merged = {}
-            if previous:
+            # 默认与旧缓存合并（防某个源偶发只返回部分历史时把老记录冲掉）。
+            # 但换了识别规则时必须整体替换 —— 否则新规则算出来是"没有分红"，
+            # 这里会继续把旧的那条假分红合并回去，等于白改。
+            if previous and not replace:
                 try:
                     for old in json.loads(previous[0]):
                         if isinstance(old, dict) and old.get("code") == code and isinstance(old.get("date"), str): merged[old["date"]] = old
@@ -574,7 +587,8 @@ class NextDatabase:
                 if old and old.get("isEstimated") is False and event.get("isEstimated") is True: continue
                 merged[day] = event
             body = json.dumps([merged[key] for key in sorted(merged)], ensure_ascii=False)
-            db.execute("INSERT OR REPLACE INTO dividend_archive VALUES (?, ?, ?)", (code, fetched_at, body))
+            db.execute("INSERT OR REPLACE INTO dividend_archive (code, fetched_at, body, rules_version) VALUES (?, ?, ?, ?)",
+                       (code, fetched_at, body, int(rules_version)))
 
     def get_minute(self, code, day):
         self.validate_id(code)

@@ -709,6 +709,23 @@ struct NextCostBasis: Equatable {
 
 extension NextBook {
     /// 计算一只持仓的两种成本口径。
+    /// 今日买入、还没到 T+1 的份额 —— 当天不可卖。
+    /// 券商显示的「可用」就是这个口径（今天 700 持仓 / 400 可用 = 今天买了 300）。
+    func lockedUnits(for code: String, at now: Date) -> Int {
+        guard positions.contains(where: { $0.code == code }) else { return 0 }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        return fills
+            .filter { $0.code == code && $0.side == "buy" && calendar.isDate($0.date, inSameDayAs: now) }
+            .reduce(0) { $0 + $1.units }
+    }
+
+    /// 可卖份额 = 持仓 − 今日买入。补录的持仓没有买入流水，所以整体可用。
+    func availableUnits(for code: String, at now: Date) -> Int {
+        guard let position = positions.first(where: { $0.code == code }) else { return 0 }
+        return max(0, position.units - lockedUnits(for: code, at: now))
+    }
+
     func costBasis(for code: String) -> NextCostBasis? {
         guard let position = positions.first(where: { $0.code == code }) else { return nil }
         let related = fills.filter { $0.code == code }

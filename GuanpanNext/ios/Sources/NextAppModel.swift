@@ -384,6 +384,12 @@ struct LocalPreferences: Codable {
             }
         } else {
             guard let positionIndex, updated.positions[positionIndex].units >= units else { throw NextError.invalid("卖出份额超过真实账本持有份额") }
+            // T+1：今天买入的份额当天不能卖。券商显示「持仓 700 / 可用 400」就是这个意思。
+            let available = updated.availableUnits(for: code, at: Date())
+            guard units <= available else {
+                let locked = updated.lockedUnits(for: code, at: Date())
+                throw NextError.invalid("可卖份额不足：持有 \(updated.positions[positionIndex].units) 份，其中今天买入的 \(locked) 份要等下一个交易日才能卖，当前可卖 \(available) 份。")
+            }
             let oldUnits = updated.positions[positionIndex].units
             let cost = updated.positions[positionIndex].bookCost * Decimal(units) / Decimal(oldUnits)
             realized = gross - fee - cost
