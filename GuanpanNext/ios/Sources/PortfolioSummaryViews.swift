@@ -66,7 +66,7 @@ struct HoldingsBreakdownPanel: View {
         EditorialSection(title: "持仓盈亏", trailing: mode.title, accent: p.jade) {
             HStack(alignment: .top, spacing: 14) {
                 GPValue(label: "总资产", value: "¥\(NextMoney.text(data.totalValue))",
-                        footnote: data.isComplete ? "现金 + 持仓市值"
+                        footnote: data.isComplete ? "市值 + 可用现金，不含券商冻结/在途"
                             : (data.anomalies.isEmpty ? "部分持仓缺报价" : "\(data.anomalies.count) 只报价异常，已排除"))
                 GPValue(label: "今日盈亏", value: data.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—",
                         footnote: data.dailyChange == nil ? "需完整新鲜行情" : "昨仓按昨收、今买按买入价",
@@ -122,6 +122,30 @@ struct HoldingsBreakdownPanel: View {
             if !data.positions.isEmpty {
                 Divider().overlay(p.line.opacity(0.7)).padding(.vertical, 4)
                 riskSummary(data)
+            }
+
+            // 体检放在持仓明细之前：先告诉用户"哪些数字不可信"，再让他看数字。
+            let issues = NextBookHealth.issues(book: model.book, quotes: model.quotes, at: Date(),
+                                               concentrationLimit: NextNum.double(model.goal.concentrationLimit))
+            if !issues.isEmpty {
+                Divider().overlay(p.line.opacity(0.7)).padding(.vertical, 4)
+                HStack(spacing: 5) {
+                    Image(systemName: "stethoscope").font(.system(size: 10)).foregroundStyle(p.terracotta)
+                    Text("账本体检 · \(issues.count) 项").font(.caption.weight(.medium)).foregroundStyle(p.ink)
+                    Spacer(minLength: 0)
+                }
+                ForEach(issues.prefix(5)) { item in
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(item.code).font(.system(size: 9, design: .monospaced)).foregroundStyle(p.muted).frame(width: 44, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.title).font(.system(size: 10.5, weight: .medium)).foregroundStyle(p.ink)
+                            Text(item.detail).font(.system(size: 9.5)).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }.padding(.vertical, 2)
+                }
+                if issues.count > 5 {
+                    Text("另有 \(issues.count - 5) 项，逐只打开详情处理").font(.system(size: 9.5)).foregroundStyle(p.muted)
+                }
             }
 
             if data.positions.isEmpty {

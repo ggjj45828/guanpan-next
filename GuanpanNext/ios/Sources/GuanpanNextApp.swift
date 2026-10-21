@@ -822,9 +822,12 @@ private struct DecisionScreen: View {
             "definition": "总资产=现金+持仓市值；浮动盈亏=市值−成本(按 costMode)；当日盈亏=昨仓按昨收、今日买入按买入价、今日卖出按卖出价，含手续费",
             "anomalies": valuation.anomalies.map { ["code": $0.code, "name": $0.name, "reason": $0.reason] }
         ]
+        let bookIssues = NextBookHealth.issues(book: model.book, quotes: model.quotes, at: Date(),
+                                               concentrationLimit: NextNum.double(model.goal.concentrationLimit))
         return ["security": security, "dailyBars": Array(bars), "position": positionPayload ?? NSNull(),
             "allPositions": portfolioPositions, "cash": NSDecimalNumber(decimal: model.book.cash).stringValue, "recentFills": Array(fills),
             "valuation": valuationPayload,
+            "bookIssues": bookIssues.map { ["code": $0.code, "issue": $0.title, "detail": $0.detail] },
             "goal": ["years": model.goal.years, "monthlyBudget": NSDecimalNumber(decimal: model.goal.monthlyBudget).stringValue,
                      "concentrationLimit": NSDecimalNumber(decimal: model.goal.concentrationLimit).stringValue,
                      "targetWeights": model.goal.targetWeights.mapValues { NSDecimalNumber(decimal: $0).stringValue }], "dividends": Array(dividends)]
@@ -847,7 +850,12 @@ private struct DecisionScreen: View {
             return "本机记录相关持仓：\(item.units) 份，账面成本 ¥\(NextMoney.text(item.bookCost))，成本单价 ¥\(NextMoney.text(item.costPerUnit, digits: 4))，\(weightText)。"
         } ?? "本机未记录该 ETF 的持仓。"
         let accountText = "账户口径：总资产 ¥\(NextMoney.text(summary.totalValue))（现金 ¥\(NextMoney.text(summary.cash)) + 持仓市值 ¥\(NextMoney.text(summary.investedValue))）；浮动盈亏 \(summary.floatingProfit >= 0 ? "+" : "")¥\(NextMoney.text(summary.floatingProfit))；当日盈亏 \(summary.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "缺完整报价，不作估算")；持有 \(summary.positions.count) 只。"
-        let prompt = "请分析用户是否应继续观察或制定耐心限价计划。\n\(quoteText)\n\(positionText)\n\(accountText)\n投资期限：\(model.goal.years) 年；每月新增预算：¥\(NextMoney.text(model.goal.monthlyBudget))；单一集中度提醒线：\(NextMoney.text(model.goal.concentrationLimit))%。\nETF 固定手续费按用户设定每笔 0.10 元估算；不得把未验证的交易规则或盘口当成事实。请按结论、证据、风险、等待条件、后续跟踪回答；数据不足就明确指出。"
+        let healthIssues = NextBookHealth.issues(book: model.book, quotes: model.quotes, at: Date(),
+                                                 concentrationLimit: NextNum.double(model.goal.concentrationLimit))
+        let healthText = healthIssues.isEmpty
+            ? "数据现状：账本体检没有发现缺口。"
+            : "数据现状：账本有 \(healthIssues.count) 项待处理（" + healthIssues.prefix(3).map { "\($0.code) \($0.title)" }.joined(separator: "；") + "），涉及这些标的的数字请说明不确定性。"
+        let prompt = "请分析用户是否应继续观察或制定耐心限价计划。\n\(quoteText)\n\(positionText)\n\(accountText)\n\(healthText)\n投资期限：\(model.goal.years) 年；每月新增预算：¥\(NextMoney.text(model.goal.monthlyBudget))；单一集中度提醒线：\(NextMoney.text(model.goal.concentrationLimit))%。\nETF 固定手续费按用户设定每笔 0.10 元估算；不得把未验证的交易规则或盘口当成事实。请按结论、证据、风险、等待条件、后续跟踪回答；数据不足就明确指出。"
         let profile = UserDefaults.standard.string(forKey: "guanpan.deepseek.profile") ?? "flash"
         do {
             let response = try await DeepSeekMobile.analyze(prompt: prompt, key: key, profile: profile)
@@ -1476,9 +1484,8 @@ private struct SettingsScreen: View {
                 }
                 EditorialSection(title: "通知与提醒") { NavigationLink(value: GPRoute.alerts) { IntentRow(icon: "bell.badge", title: "提醒和通知中心", detail: "价格、风险、限价计划与 NAS 状态") } }
                 EditorialSection(title: "账本与数据") { NavigationLink(value: GPRoute.fills) { IntentRow(icon: "list.bullet.rectangle", title: "审计记录", detail: "真实资产修改、撤销和版本") }; NavigationLink(value: GPRoute.backups) { IntentRow(icon: "externaldrive", title: "备份与恢复", detail: "数据隔离、校验、确认恢复") } }
-                EditorialSection(title: "连接状态") {
-                    GPDataRow(title: "行情服务", value: model.status)
-                    GPDataRow(title: "NAS 服务", value: model.syncStatus)
+                EditorialSection(title: "连接状态", trailing: model.hasPendingUpload ? "有改动待上传" : "已同步") {
+                    // 顺序按"用户最关心什么"排：账本有没有传上去 → 能不能自动传 → 服务在不在。
                     GPDataRow(title: "账本上传", value: model.syncStateText,
                               note: "按账本内容指纹判断；只有真的改了才会传，修订号冲突时停止不覆盖")
                     Toggle("自动上传本机账本", isOn: Binding(
@@ -1489,7 +1496,9 @@ private struct SettingsScreen: View {
                         }))
                         .font(.caption)
                         .accessibilityIdentifier("settings.nas.autoUpload")
-                    GPDataRow(title: "同步通道", value: "个人资产自动+手动 · 行情独立 · 研究独立")
+                    GPDataRow(title: "NAS 服务", value: model.syncStatus)
+                    GPDataRow(title: "行情服务", value: model.status)
+                    GPDataRow(title: "同步通道", value: "账本(自动+手动) · 行情 · 研究，三条互相独立")
                 }
                 EditorialSection(title: "AI 投资研究") {
                     Picker("DeepSeek 模型", selection: $deepSeekProfile) {

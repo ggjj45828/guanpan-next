@@ -241,3 +241,62 @@ enum NextPerformanceCalculator {
                                       hasEnoughSamples: ordered.count >= minimumSamples && !emptyBase)
     }
 }
+
+// MARK: - 账本体检
+
+/// 一条待处理的数据问题。都能直接指到具体代码，并说明"怎么办"。
+struct NextBookIssue: Identifiable, Equatable {
+    let code: String
+    let title: String
+    let detail: String
+    var id: String { code + "|" + title }
+}
+
+/// 账本体检：只检查**会让数字失真**的已知问题，不做主观评价。
+///
+/// 为什么需要它：总资产/当日盈亏对不上时，用户第一反应是"软件算错了"，
+/// 但九成原因是数据缺口（没报价、名字没有、成本为 0、报价串号、超集中度）。
+/// 把这些问题显式列出来，比让人自己猜要诚实得多。
+enum NextBookHealth {
+    static func issues(book: NextBook, quotes: [String: NextCachedQuote], at now: Date,
+                       concentrationLimit: Double) -> [NextBookIssue] {
+        var issues: [NextBookIssue] = []
+        let positions = book.positions.filter { $0.units > 0 }
+        var total = book.cash
+        for position in positions {
+            if let quote = quotes[position.code]?.quote, quote.price > 0 {
+                total += quote.price * Decimal(position.units)
+            }
+        }
+        for position in positions {
+            if !NextNameBook.isResolved(position.code) {
+                issues.append(NextBookIssue(code: position.code, title: "名称缺失",
+                                            detail: "只有代码，看起来像一只陌生标的；在详情页刷新一次行情就会记住名称"))
+            }
+            if position.costPerUnit <= 0 {
+                issues.append(NextBookIssue(code: position.code, title: "成本为零",
+                                            detail: "成本为 0 会让盈亏比例失真；在资产流水里修正每份成本"))
+            }
+            guard let cached = quotes[position.code] else {
+                issues.append(NextBookIssue(code: position.code, title: "没有报价",
+                                            detail: "这一只不计入市值与当日盈亏；联网刷新后再看"))
+                continue
+            }
+            if !cached.usableForDisplay(at: now) {
+                issues.append(NextBookIssue(code: position.code, title: "报价已过期",
+                                            detail: "缓存报价不会被当成实时价格；刷新行情或检查 NAS 连接"))
+            }
+            if let reason = NextPortfolioCalculator.anomalyReason(quote: cached.quote, storedCostPerUnit: position.costPerUnit) {
+                issues.append(NextBookIssue(code: position.code, title: "报价异常", detail: reason))
+            }
+            if total > 0, concentrationLimit > 0 {
+                let weight = NextNum.double(cached.quote.price * Decimal(position.units) / total) * 100
+                if weight > concentrationLimit {
+                    issues.append(NextBookIssue(code: position.code, title: "超出集中度线",
+                                                detail: String(format: "占 %.1f%%，你设的提醒线是 %.0f%%", weight, concentrationLimit)))
+                }
+            }
+        }
+        return issues
+    }
+}
