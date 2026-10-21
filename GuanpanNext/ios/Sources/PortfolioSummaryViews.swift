@@ -25,6 +25,29 @@ struct HoldingsBreakdownPanel: View {
         return NextBenchmark.returnPercent(samples: dataset.orderedSamples,
                                            from: performance.startDate, to: performance.endDate)
     }
+    /// 组合风险：比"涨了还是跌了"更该先看的东西 —— 钱压在哪、有多集中、有多少是现金。
+    @ViewBuilder
+    private func riskSummary(_ data: NextPortfolioSummary) -> some View {
+        let sorted = data.positions.sorted { $0.weightPercent > $1.weightPercent }
+        let top = sorted.first
+        let top3 = sorted.prefix(3).reduce(0.0) { $0 + $1.weightPercent }
+        let cashRatio = data.totalValue > 0 ? NextNum.double(data.cash / data.totalValue) * 100 : 0
+        let winners = data.positions.filter { $0.floatingProfit > 0 }.count
+        let limit = NextNum.double(model.goal.concentrationLimit)
+        HStack(alignment: .top, spacing: 12) {
+            GPValue(label: "最大单一", value: top.map { String(format: "%.1f%%", $0.weightPercent) } ?? "—",
+                    footnote: top?.name ?? "无持仓",
+                    emphasis: (top?.weightPercent ?? 0) > limit ? p.terracotta : nil)
+            GPValue(label: "前三大", value: String(format: "%.1f%%", top3),
+                    footnote: "集中度线 \(NextNum.percent(limit, digits: 0))",
+                    emphasis: top3 > limit * 2.5 ? p.terracotta : nil)
+            GPValue(label: "现金占比", value: String(format: "%.1f%%", cashRatio),
+                    footnote: "可用 ¥\(NextMoney.text(data.cash))")
+            GPValue(label: "盈利家数", value: "\(winners)/\(data.positions.count)",
+                    footnote: "按浮动盈亏计", emphasis: winners > 0 ? p.risk : p.jade)
+        }
+    }
+
     private func rebalanceRows(from data: NextPortfolioSummary) -> [RebalanceRow] {
         guard data.totalValue > 0 else { return [] }
         return model.book.positions.compactMap { position in
@@ -94,6 +117,11 @@ struct HoldingsBreakdownPanel: View {
             } else {
                 Text("还没有足够的资产快照，暂不计算区间收益（至少需要 2 个）。")
                     .font(.caption2).foregroundStyle(p.muted)
+            }
+
+            if !data.positions.isEmpty {
+                Divider().overlay(p.line.opacity(0.7)).padding(.vertical, 4)
+                riskSummary(data)
             }
 
             if data.positions.isEmpty {
