@@ -101,6 +101,13 @@ details.exlist .body{padding:6px 10px}
       <div id="holdSummary" class="sm mut">读取中…</div>
       <div id="benchRow" class="row" style="margin-top:4px"></div>
       <div id="holdList"></div>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">
+        <span class="sm mut">现金调整</span>
+        <input id="cashInput" type="number" step="0.01" placeholder="金额(元)" style="width:110px">
+        <button class="act mini" onclick="adjustCash('set')">设为</button>
+        <button class="act mini" onclick="adjustCash('in')">入金 +</button>
+        <button class="act mini ghost" onclick="adjustCash('out')">出金 −</button>
+      </div>
       <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
         <button class="act mini" onclick="addPosition()">加持仓</button>
         <button class="act mini" onclick="saveBook()">保存到 NAS</button>
@@ -114,7 +121,7 @@ details.exlist .body{padding:6px 10px}
     <div class="card">
       <h2>行情图表 <span class="tag t">分时 / 日K</span></h2>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-        <input id="chartCode" maxlength="14" placeholder="代码/指数" style="width:110px" value="159941">
+        <select id="chartCode" style="width:170px"></select>
         <button class="act mini" onclick="openChart()">打开</button>
         <div class="chips" id="chartKind" style="margin:0">
           <span class="chip on" data-k="day" onclick="setKind('day')">日K</span>
@@ -145,12 +152,13 @@ details.exlist .body{padding:6px 10px}
   <section id="ai">
     <div class="card">
       <h2>研究与 AI 分析 <span class="tag">DeepSeek</span></h2>
-      <div style="display:flex;gap:6px;margin-bottom:6px">
-        <input id="aiCode" maxlength="6" placeholder="代码" style="width:90px" value="159941">
+      <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">
+        <select id="aiCode" style="width:160px"></select>
         <button class="act mini" onclick="loadResearch()">看缓存</button>
         <button class="act mini" onclick="runAI()">跑 AI 分析</button>
         <button class="act mini" onclick="verifyAI()">验证 AI</button>
       </div>
+      <div class="sm mut">选持仓里的标的即可，无需手输代码；分析上下文由 NAS 服务端用账本+行情+日K+分红自动拼装。</div>
       <div id="aiBody" class="sm mut">输入代码查询。</div>
     </div>
   </section>
@@ -192,8 +200,8 @@ details.exlist .body{padding:6px 10px}
 "use strict";
 const $ = id => document.getElementById(id);
 const fmt = (n,d=2)=> (n==null||isNaN(n))?"–":Number(n).toLocaleString("zh-CN",{minimumFractionDigits:d,maximumFractionDigits:d});
-const pct = n => (n>0?"+":"")+fmt(n,2)+"%";
-const sign = n => (n>0?"+":"")+fmt(n,2);
+const pct = n => (n>0?"+":"")+fmt(n,3)+"%";
+const sign = n => (n>0?"+":"")+fmt(n,3);
 let BOOK=null, REVISION=0, QUOTES={}, WATCH=[], ALERTS=[], DIVCACHE={};
 let CHART={bars:null,rows:null,div:null,code:null,name:null,prevClose:null,intradayAllowed:true,view:null};
 
@@ -233,12 +241,13 @@ async function loadIndices(){
 
 // ---------- 自选 ----------
 function getWatch(){ if(!WATCH.length) WATCH=JSON.parse(localStorage.getItem("gp_watch")||"[]"); return WATCH; }
-function setWatch(){ localStorage.setItem("gp_watch", JSON.stringify(WATCH)); renderWatchChips(); }
+function setWatch(){ localStorage.setItem("gp_watch", JSON.stringify(WATCH)); renderWatchChips(); renderChartCodeOptions(); }
 function renderWatchChips(){
   const c=$("watchChips"); c.innerHTML="";
   getWatch().forEach(code=>{
     const s=document.createElement("span"); s.className="chip"; s.textContent=code+" ✕";
-    s.onclick=()=>{ WATCH=WATCH.filter(x=>x!==code); setWatch(); loadQuotes(getWatch()); loadWorth(); };
+    s.title="点击删除自选 "+code;
+    s.onclick=()=>delWatch(code);
     c.appendChild(s);
   });
   if(!WATCH.length) c.innerHTML='<span class="sm mut">还没有自选，添加代码试试</span>';
@@ -260,20 +269,20 @@ function renderWatchGrid(){
   if(!codes.length){ $("watchGrid").innerHTML='<span class="sm mut">还没有自选，上面加代码</span>'; return; }
   $("watchGrid").innerHTML = codes.map(code=>{
     const q=QUOTES[code];
-    if(!q) return `<div class="qcard"><span class="name">${code}</span> <span class="sm mut">无行情</span></div>`;
+    if(!q) return `<div class="qcard"><span class="name">${code}</span> <span class="sm mut">无行情</span> <button class="act mini ghost" onclick="delWatch('${code}')">删</button></div>`;
     const price=Number(q.price), prev=Number(q.previousClose), ch=prev? (price/prev-1)*100:0;
     const up=ch>=0, cls=up?"up":"down";
     const iopv = q.iopv? `<div class="sm mut">IOPV ${fmt(Number(q.iopv),4)}</div>`:"";
     const w=worthOf(code);
     const badge = w? `<span class="badge" style="background:${w.color}">${w.label}</span>`:"";
     return `<div class="qcard" onclick="gotoChart('${code}')">
-      <div class="top"><span class="name">${q.name||code}</span>${badge}</div>
-      <div class="top"><span class="code">${code}</span><span class="num ${cls}">${fmt(price, price<10?4:2)}</span></div>
+      <div class="top"><span class="name">${q.name||code}</span>${badge}<button class="act mini ghost" onclick="event.stopPropagation();delWatch('${code}')">删</button></div>
+      <div class="top"><span class="code">${code}</span><span class="num ${cls}">${fmt(price,3)}</span></div>
       <div class="top"><span class="sm mut">${w?w.note:""}</span><span class="num ${cls}">${pct(ch)}</span></div>
       ${iopv}</div>`;
   }).join("");
 }
-function gotoChart(code){ $("chartCode").value=code; openChart(); document.querySelector('#nav button[data-tab="chart"]').click(); }
+function gotoChart(code){ ensureChartOption(code,(QUOTES[code]&&QUOTES[code].name)||code); $("chartCode").value=code; openChart(); document.querySelector('#nav button[data-tab="chart"]').click(); }
 
 // ---------- 值不值得买（列表直接可见，无需点进标的） ----------
 function trailingSum(code){
@@ -320,7 +329,7 @@ async function loadBook(){
     REVISION=v.revision||0;
     BOOK = v.bookJSON? JSON.parse(v.bookJSON) : null;
     BOOK = normalizeBook();
-    renderHold(); renderEditor();
+    renderHold(); renderEditor(); renderAICode(); renderChartCodeOptions();
     loadWorth();
   }catch(e){ toast("账本读取失败："+e.message); }
 }
@@ -335,6 +344,58 @@ function normalizeBook(){
   return BOOK;
 }
 function bookCash(){ return Number(BOOK.cash||0); }
+function renderAICode(){
+  const sel=$("aiCode"); if(!sel) return;
+  const positions=(BOOK&&BOOK.positions)||[];
+  if(!positions.length){ sel.innerHTML='<option value="">暂持仓位</option>'; return; }
+  sel.innerHTML = positions.map(p=>`<option value="${p.code}">${p.code} ${p.name||""}</option>`).join("");
+}
+/* 行情图表代码改成下拉：直接列出持仓 + 自选 + 常用指数，不再手填。
+   指数走东财 secid（/v1/market/kline?symbol=），6 位代码走 /v1/market/daily/。 */
+const CHART_INDICES=[["1.000001","上证指数"],["0.399001","深证成指"],["0.399006","创业板指"],["1.000300","沪深300"],["100.NDX","纳斯达克100"],["100.N225","日经225"],["100.HSI","恒生指数"],["100.SPX","标普500"],["100.DJIA","道琼斯"],["100.KS11","韩国KOSPI"]];
+function renderChartCodeOptions(){
+  const sel=$("chartCode"); if(!sel) return;
+  const cur=sel.value||"159941";
+  const groups=[["持仓",(BOOK&&BOOK.positions)||[]],["自选",getWatch().map(c=>({code:c,name:(QUOTES[c]&&QUOTES[c].name)||c}))]];
+  let html=""; const seen=new Set();
+  groups.forEach(([label,arr])=>{
+    const opts=arr.filter(p=>p.code&&!seen.has(p.code)).map(p=>{ seen.add(p.code); return `<option value="${p.code}">${p.code} ${p.name||""}</option>`; }).join("");
+    if(opts) html+=`<optgroup label="${label}">${opts}</optgroup>`;
+  });
+  html+=`<optgroup label="指数">`+CHART_INDICES.map(([v,n])=>`<option value="${v}">${n}</option>`).join("")+`</optgroup>`;
+  sel.innerHTML=html;
+  if(!Array.from(sel.options).some(o=>o.value===cur)){ const o=document.createElement("option"); o.value=cur; o.textContent=cur; sel.insertBefore(o, sel.firstChild); }
+  sel.value=cur;
+}
+function ensureChartOption(value,label){
+  const sel=$("chartCode"); if(!sel||!value) return;
+  if(!Array.from(sel.options).some(o=>o.value===value)){ const o=document.createElement("option"); o.value=value; o.textContent=label||value; sel.appendChild(o); }
+}
+function delWatch(code){ WATCH=WATCH.filter(x=>x!==code); setWatch(); loadQuotes(getWatch()); loadWorth(); }
+async function adjustCash(mode){
+  const raw=($("cashInput").value||"").trim(); const v=Number(raw);
+  if(raw===""||!isFinite(v)){ toast("请输入金额"); return; }
+  const amount=Math.round(v*100)/100;
+  let delta=0, next=bookCash(), reason="";
+  if(mode==="set"){
+    if(amount<0){ toast("现金不能设为负数"); return; }
+    delta=Math.round((amount-bookCash())*100)/100; next=amount; reason="网页校准现金到 ¥"+fmt(amount,2);
+  }else if(mode==="in"){
+    if(amount<=0){ toast("入金金额要大于 0"); return; }
+    delta=amount; next=Math.round((bookCash()+amount)*100)/100; reason="网页入金 ¥"+fmt(amount,2);
+  }else{
+    if(amount<=0){ toast("出金金额要大于 0"); return; }
+    if(amount>bookCash()){ toast("出金不能超过当前现金 "+fmt(bookCash(),2)); return; }
+    delta=-amount; next=Math.round((bookCash()-amount)*100)/100; reason="网页出金 ¥"+fmt(amount,2);
+  }
+  if(Math.abs(delta)<0.005){ toast("现金没有变化"); return; }
+  if(!confirm("确认"+(delta>0?"增加":"减少")+"现金 ¥"+fmt(Math.abs(delta),2)+"？会留一条现金流水。")) return;
+  BOOK.cash=next;
+  BOOK.cashMovements.push({ id:uuid(), date:Date.now()/1000-978307200, amount:delta, reason:reason });
+  $("cashInput").value="";
+  await saveBook();
+  renderHold();
+}
 function renderHold(){
   const summary=$("holdSummary");
   if(!BOOK||!BOOK.positions.length){ summary.textContent="暂无持仓。"; $("holdList").innerHTML=""; $("benchRow").innerHTML=""; return; }
@@ -355,12 +416,12 @@ function renderHold(){
     const badge=w?`<span class="badge" style="background:${w.color}">${w.label}</span>`:"";
     return `<div class="row">
       <span><span class="name">${q?q.name:p.name}</span> <span class="code">${p.code}</span> ${badge}</span>
-      <span class="right"><span class="num">${price==null?'<span class="mut">无行情</span>':fmt(price, price<10?4:2)}</span><br><span class="sm mut">${units} 份</span></span>
-      <span class="right"><span class="num">${price==null?'<span class="mut">—</span>':fmt(mv)}</span><br><span class="num ${cls}">${pnl==null?'<span class="mut">—</span>':sign(pnl)+'<br>'+pct(pnlPct)}</span></span>
+      <span class="right"><span class="num">${price==null?'<span class="mut">无行情</span>':fmt(price,3)}</span><br><span class="sm mut">${units} 份</span></span>
+      <span class="right"><span class="num">${price==null?'<span class="mut">—</span>':fmt(mv,3)}</span><br><span class="num ${cls}">${pnl==null?'<span class="mut">—</span>':sign(pnl)+'<br>'+pct(pnlPct)}</span></span>
       <button class="act mini ghost" onclick="delPosition('${p.code}')">删</button>
     </div>`;
   });
-  summary.innerHTML = `持仓市值 <b>${fmt(totalMv)}</b> · 持仓成本 <b>${fmt(totalCost)}</b> · 浮动盈亏 <b class="${totalMv-totalCost>=0?'up':'down'}">${sign(totalMv-totalCost)} (${pct(totalCost? (totalMv-totalCost)/totalCost*100:0)})</b> · 现金 ${fmt(bookCash())} · 总资产 ${fmt(totalMv+bookCash())}`
+  summary.innerHTML = `持仓市值 <b>${fmt(totalMv,3)}</b> · 持仓成本 <b>${fmt(totalCost,3)}</b> · 浮动盈亏 <b class="${totalMv-totalCost>=0?'up':'down'}">${sign(totalMv-totalCost)} (${pct(totalCost? (totalMv-totalCost)/totalCost*100:0)})</b> · 现金 ${fmt(bookCash(),3)} · 总资产 ${fmt(totalMv+bookCash(),3)}`
     + (missing? ` · <b class="down">${missing} 只缺报价</b>`:'');
   $("holdList").innerHTML = `<div class="row" style="font-weight:700;border-bottom:1px solid var(--line)">
     <span>名称 / 代码</span><span class="right">现价 / 数量</span><span class="right">市值 / 盈亏</span><span></span></div>`+rows.join("");
@@ -383,8 +444,8 @@ async function loadBenchmark(){
     $("benchRow").innerHTML=`<span class="sm mut">基准 沪深300 近30日 <b class="${cls}">${pct(r)}</b>${extra}（组合历史不足2点时不计超额）</span>`;
   }catch(e){ $("benchRow").innerHTML='<span class="sm mut">基准读取失败</span>'; }
 }
-function addPosition(){ const code=prompt("代码(6位)"); if(!code||!isSix(code.trim()))return; const name=prompt("名称")||code.trim(); const units=Number(prompt("数量(份)")||"0"); const cost=Number(prompt("账面总成本(元)")||"0"); BOOK.positions.push({code:code.trim(),name,units,bookCost:cost}); renderHold(); renderEditor(); }
-function delPosition(code){ BOOK.positions=BOOK.positions.filter(p=>p.code!==code); renderHold(); renderEditor(); }
+function addPosition(){ const code=prompt("代码(6位)"); if(!code||!isSix(code.trim()))return; const name=prompt("名称")||code.trim(); const units=Number(prompt("数量(份)")||"0"); const cost=Number(prompt("账面总成本(元)")||"0"); BOOK.positions.push({code:code.trim(),name,units,bookCost:cost}); renderHold(); renderEditor(); renderAICode(); }
+function delPosition(code){ BOOK.positions=BOOK.positions.filter(p=>p.code!==code); renderHold(); renderEditor(); renderAICode(); }
 async function saveBook(){
   try{
     BOOK=normalizeBook();
@@ -572,7 +633,7 @@ function drawIntraday(){
   setLegend('<span><i style="background:#111111"></i>价格</span> <span><i style="background:#ff7a00"></i>均价</span> <span><i style="background:#9aa3b2"></i>昨收</span>'+(iopv.length?' <span><i style="background:#7c3aed"></i>IOPV</span>':'')+' <span><i style="background:#e63022"></i>MACD柱(红涨绿跌)</span> <span class="mut">左轴价格·右轴涨跌幅</span>');
 }
 
-function openIndex(symbol,name){ CHART.code=symbol; CHART.name=name; $("chartCode").value=symbol; document.querySelector('#nav button[data-tab="chart"]').click(); setKind("day"); loadChart(); }
+function openIndex(symbol,name){ CHART.code=symbol; CHART.name=name; ensureChartOption(symbol,name); $("chartCode").value=symbol; document.querySelector('#nav button[data-tab="chart"]').click(); setKind("day"); loadChart(); }
 
 // ---------- 缩放/平移（仅日K；分时固定） ----------
 (function(){
@@ -660,14 +721,10 @@ async function loadResearch(){
   }catch(e){ body.className="sm mut"; body.textContent="读取失败："+e.message; }
 }
 async function runAI(){
-  const code=$("aiCode").value.trim(); if(!isSix(code)){toast("请输入6位代码");return;}
-  const body=$("aiBody"); body.className="sm mut"; body.textContent="调用 DeepSeek 中…（需 NAS 已配置 Key）";
-  const q=QUOTES[code]||{};
-  const ctx={code,name:q.name||code,price:q.price,previousClose:q.previousClose,iopv:q.iopv,
-    dividendEvents:(CHART.div||[]).map(e=>({date:e.date,amountPerShare:e.amountPerShare})),
-    position:BOOK&&BOOK.positions.find(p=>p.code===code)?{units:BOOK.positions.find(p=>p.code===code).units}:null};
+  const code=$("aiCode").value.trim(); if(!isSix(code)){toast("请选择持仓里的标的");return;}
+  const body=$("aiBody"); body.className="sm mut"; body.textContent="调用 DeepSeek 中…（需 NAS 已配置 Key，上下文由服务端拼装）";
   try{
-    const v=await api("/v1/ai/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userConfirmed:true,context:ctx})});
+    const v=await api("/v1/ai/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userConfirmed:true,code})});
     body.className="";
     body.innerHTML=`<div class="status ok">分析完成（${v.provider||'deepseek'}）</div><div style="margin-top:8px;white-space:pre-wrap;font-size:12px;background:#f4f5f1;padding:10px;border-radius:8px">${escapeHtml(v.text||JSON.stringify(v,null,2))}</div>`;
   }catch(e){ body.className="sm mut"; body.textContent="分析失败："+e.message; }
@@ -707,7 +764,7 @@ async function saveBookFromEditor(){
   try{
     const r=await api("/v1/real/books/main",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mode:"manual-confirmed",expectedRevision:REVISION,bookJSON:$("bookEditor").value})});
     REVISION=r.revision; const s=$("dataStatus"); s.className="status ok"; s.textContent="已保存，修订 "+r.revision;
-    BOOK=JSON.parse($("bookEditor").value); renderHold();
+    BOOK=JSON.parse($("bookEditor").value); renderHold(); renderAICode();
   }catch(e){ const s=$("dataStatus"); s.className="status err"; s.textContent="保存失败："+(e.message.includes("409")?"修订冲突，请重读":"")+e.message; }
 }
 function downloadBook(){ if(!BOOK) return; const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([JSON.stringify(BOOK,null,2)],{type:"application/json"})); a.download="guanpan-next-book-r"+REVISION+".json"; a.click(); URL.revokeObjectURL(a.href); }

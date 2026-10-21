@@ -24,6 +24,8 @@ MAX_DAYS = 400
 LEVELS = 3
 STEP_MIN = Decimal("0.0025")
 STEP_MAX = Decimal("0.01")
+# 现金预留比例：网格只拿 (1 - 该比例) 的现金去挂买单，剩下永久不部署，作备用弹药。
+CASH_RESERVE_RATIO = Decimal("0.20")
 
 
 def _d(value, default="0"):
@@ -36,7 +38,8 @@ def _d(value, default="0"):
 
 def empty_state():
     return {"version": 1, "createdAt": None, "day": None, "cash": Decimal("0"),
-            "startEquity": Decimal("0"), "equity": Decimal("0"), "plans": {}, "fills": [], "daily": []}
+            "reservedCash": Decimal("0"), "startEquity": Decimal("0"), "equity": Decimal("0"),
+            "plans": {}, "fills": [], "daily": []}
 
 
 def _median(values):
@@ -88,7 +91,9 @@ def build(book, quotes, bars_by_code, now=None, fee=DEFAULT_FEE):
     now = now or datetime.now(timezone.utc)
     state = empty_state()
     state["createdAt"] = now.isoformat()
-    cash = _d(book.get("cash"))
+    cash_total = _d(book.get("cash"))
+    reserved = (cash_total * CASH_RESERVE_RATIO).quantize(Decimal("0.01"))
+    cash = cash_total - reserved
     plans, equity, skipped = {}, cash, []
     for position in book.get("positions") or []:
         code = position.get("code")
@@ -115,9 +120,12 @@ def build(book, quotes, bars_by_code, now=None, fee=DEFAULT_FEE):
         plans[code] = plan
         equity += capital
     state["cash"] = cash
+    state["reservedCash"] = reserved
     state["plans"] = plans
     state["equity"] = equity
-    state["startEquity"] = equity
+    # 起点权益 = 账本总资产（持仓市值 + 全部现金），与文件头注释一致；
+    # 含预留现金，确保未交易时当日盈亏为 0。
+    state["startEquity"] = equity_of(state, quotes) + reserved
     state["skipped"] = skipped
     state["day"] = now.astimezone().date().isoformat()
     return state
@@ -198,7 +206,7 @@ def mark_day(state, quotes, day=None, now=None):
         quote = quotes.get(code) or {}
         price = _d(quote.get("price")) or _d(plan.get("lastPrice"))
         holdings[code] = {"units": int(plan.get("units") or 0), "price": str(price)}
-    daily.append({"day": day, "equity": str(equity), "cash": str(cash), "holdings": holdings})
+    daily.append({"day": day, "equity": str(equity), "cash": str(cash + _d(state.get("reservedCash"))), "holdings": holdings})
     daily.sort(key=lambda row: row.get("day") or "")
     state["daily"] = daily[-MAX_DAYS:]
     state["day"] = day
@@ -208,14 +216,17 @@ def mark_day(state, quotes, day=None, now=None):
 def summary(state, quotes):
     plans = state.get("plans") or {}
     start = _d(state.get("startEquity"))
-    equity = equity_of(state, quotes)
+    reserved = _d(state.get("reservedCash"))
+    equity = equity_of(state, quotes) + reserved  # 含预留现金的总资产
+    cash_total = _d(state.get("cash")) + reserved
     fills = state.get("fills") or []
     today = (state.get("daily") or [{}])[-1].get("day")
     today_fills = [f for f in fills if (f.get("at") or "")[:10] == (today or "")]
     return {
         "startEquity": str(start),
         "equity": str(equity),
-        "cash": str(_d(state.get("cash"))),
+        "cash": str(cash_total),
+        "reservedCash": str(reserved),
         "pnl": str(equity - start),
         "pnlPercent": str((equity - start) / start * 100) if start > 0 else "0",
         "fees": str(sum((_d(p.get("fees")) for p in plans.values()), Decimal("0"))),
@@ -238,8 +249,9 @@ def summary(state, quotes):
 def sync_with_book(state, book, quotes, bars_by_code, fee=DEFAULT_FEE):
     """让网格账户跟上真实账本的持仓变化（新增标的、加仓、清仓）。
 
-    新增/加仓按「注资」处理：同时抬高 startEquity，这样算出来的收益率不会因为
-    你后来投钱进来而虚高；清仓按「提现」处理，把对应市值从 startEquity 扣掉。
+    startEquity 始终 = 账本总资产（持仓市值 + 全部现金），由持仓与现金直接重算，
+    不再用「注资/提现」增量调整 —— 那样无法区分「用现有现金买入」与「真的存入新钱」，
+    会让收益率虚高或虚低。现金按 CASH_RESERVE_RATIO 拆成可部署与预留两部分。
     """
     plans = state.get("plans") or {}
     positions = {}
@@ -249,7 +261,6 @@ def sync_with_book(state, book, quotes, bars_by_code, fee=DEFAULT_FEE):
         if code and units > 0:
             positions[code] = units
 
-    start = _d(state.get("startEquity"))
     added, removed = [], []
 
     for code, units in positions.items():
@@ -267,7 +278,6 @@ def sync_with_book(state, book, quotes, bars_by_code, fee=DEFAULT_FEE):
             built.update({"units": units, "baseUnits": units, "lastPrice": price,
                           "buys": 0, "sells": 0, "fees": Decimal("0")})
             plans[code] = built
-            start += capital
             added.append(code)
             continue
         base = int(plan.get("baseUnits") or 0)
@@ -275,20 +285,22 @@ def sync_with_book(state, book, quotes, bars_by_code, fee=DEFAULT_FEE):
             delta = units - base
             plan["units"] = int(plan.get("units") or 0) + delta
             plan["baseUnits"] = units
-            start += price * Decimal(delta)
             added.append(code)
 
     for code in list(plans.keys()):
         if code in positions:
             continue
-        quote = quotes.get(code) or {}
-        price = _d(quote.get("price")) or _d(plans[code].get("lastPrice"))
-        start -= price * Decimal(int(plans[code].get("units") or 0))
         plans.pop(code, None)
         removed.append(code)
 
+    # 现金：账本全部现金，按预留比例拆成可部署 + 预留。
+    cash_total = _d(book.get("cash"))
+    reserved = (cash_total * CASH_RESERVE_RATIO).quantize(Decimal("0.01"))
+    state["cash"] = cash_total - reserved
+    state["reservedCash"] = reserved
     state["plans"] = plans
-    state["startEquity"] = start if start > 0 else _d(0)
+    # 总资产 = 持仓市值（含可部署现金） + 预留现金
+    state["startEquity"] = equity_of(state, quotes) + reserved
     if added or removed:
         state["lastSync"] = {"added": added, "removed": removed}
     return state

@@ -386,7 +386,7 @@ struct InstrumentRow: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 4) { Text(name).gpFont(size: 14, relativeTo: .body, weight: .semibold).foregroundStyle(p.ink); Text("\(code)\(units.map { " · \($0) 份" } ?? "")").gpFont(size: 10, relativeTo: .caption, design: .monospaced).foregroundStyle(p.muted) }
             Spacer(minLength: 2)
-            VStack(alignment: .trailing, spacing: 4) { Text(validQuote.map { "¥\(NextMoney.text($0.price, digits: 4))" } ?? "—").gpFont(size: 13, relativeTo: .subheadline, weight: .semibold, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let validQuote, let change = validQuote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 2))%").gpFont(size: 10, relativeTo: .caption, design: .monospaced).foregroundStyle(p.changeTone(NextNum.double(change))) }; Text(quote?.stamp.label(now: Date()) ?? "暂无行情").gpFont(size: 8, relativeTo: .caption2).foregroundStyle(quote?.stamp.quality == .stale ? p.terracotta : p.muted).lineLimit(1) }
+            VStack(alignment: .trailing, spacing: 4) { Text(validQuote.map { "¥\(NextMoney.text($0.price, digits: 3))" } ?? "—").gpFont(size: 13, relativeTo: .subheadline, weight: .semibold, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let validQuote, let change = validQuote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 3))%").gpFont(size: 10, relativeTo: .caption, design: .monospaced).foregroundStyle(p.changeTone(NextNum.double(change))) }; Text(quote?.stamp.label(now: Date()) ?? "暂无行情").gpFont(size: 8, relativeTo: .caption2).foregroundStyle(quote?.stamp.quality == .stale ? p.terracotta : p.muted).lineLimit(1) }
             Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(p.muted).padding(.leading, 2)
         }.padding(.vertical, 10).contentShape(Rectangle())
     }
@@ -416,9 +416,9 @@ private struct InstrumentDetailScreen: View {
     var body: some View {
         GPPageBackground {
             VStack(alignment: .leading, spacing: 0) {
-                HStack { VStack(alignment: .leading, spacing: 5) { Text("\(name) · \(code) · \(quote.map { $0.source } ?? "数据源待接入")").font(.caption.monospaced()).foregroundStyle(p.muted); Text(quote.map { "¥\(NextMoney.text($0.price, digits: 4))" } ?? "暂无有效报价").gpFont(size: 34, relativeTo: .largeTitle, weight: .medium, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let quote, let change = quote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 2))%　·　\(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption.monospaced()).foregroundStyle(p.changeTone(NextNum.double(change))) } else { Text(model.quotes[code]?.stamp.label(now: Date()) ?? "无数据 · 不计算涨跌").font(.caption).foregroundStyle(p.muted) } }; Spacer(); Button { Task { await model.refreshInstrument(code) } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(p.forest).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel("刷新行情"); Button { if model.watch.contains(code) { model.removeWatch(code) } else { try? model.addWatch(code) } } label: { Image(systemName: model.watch.contains(code) ? "star.fill" : "star").foregroundStyle(p.terracotta).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel(model.watch.contains(code) ? "取消关注" : "关注") }
+                HStack { VStack(alignment: .leading, spacing: 5) { Text("\(name) · \(code) · \(quote.map { $0.source } ?? "数据源待接入")").font(.caption.monospaced()).foregroundStyle(p.muted); Text(quote.map { "¥\(NextMoney.text($0.price, digits: 3))" } ?? "暂无有效报价").gpFont(size: 34, relativeTo: .largeTitle, weight: .medium, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let quote, let change = quote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 3))%　·　\(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption.monospaced()).foregroundStyle(p.changeTone(NextNum.double(change))) } else { Text(model.quotes[code]?.stamp.label(now: Date()) ?? "无数据 · 不计算涨跌").font(.caption).foregroundStyle(p.muted) } }; Spacer(); Button { Task { await model.refreshInstrument(code) } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(p.forest).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel("刷新行情"); Button { if model.watch.contains(code) { model.removeWatch(code) } else { try? model.addWatch(code) } } label: { Image(systemName: model.watch.contains(code) ? "star.fill" : "star").foregroundStyle(p.terracotta).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel(model.watch.contains(code) ? "取消关注" : "关注") }
                     .padding(.top, 5).padding(.bottom, 14)
-                if let quote, let iopv = quote.iopv { Text("当前 IOPV ¥\(NextMoney.text(iopv, digits: 4)) · 溢折价 \(NextMoney.text((quote.price / iopv - 1) * 100, digits: 2))% · 同源时点 \(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption2.monospaced()).foregroundStyle(p.terracotta).padding(.bottom, 8) }
+                if let quote, let iopv = quote.iopv { Text("当前 IOPV ¥\(NextMoney.text(iopv, digits: 3)) · 溢折价 \(NextMoney.text((quote.price / iopv - 1) * 100, digits: 3))% · 同源时点 \(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption2.monospaced()).foregroundStyle(p.terracotta).padding(.bottom, 8) }
                 if let stamp = model.quotes[code]?.stamp { Text(stamp.label(now: Date())).font(.caption2).foregroundStyle(p.muted).padding(.bottom, 8) }
                 DataPanel(title: "行情图表", accent: p.chartBlue, caption: model.chartData[code].map { "\($0.priceSource) · \($0.observedAt.formatted(date: .omitted, time: .shortened))" } ?? "暂无本机历史") {
                     UnifiedChartView(dataset: interval == .intraday ? model.chartData[code] : model.chartData["\(code):day"], interval: $interval, costPerUnit: cost, selectedTime: $selectedTime, securityCode: code)
@@ -436,10 +436,10 @@ private struct InstrumentDetailScreen: View {
                 EditorialSection(title: "账户与规则", accent: p.chartGold) {
                     if let basis = model.book.costBasis(for: code) {
                         GPDataRow(title: "持有数量", value: "\(basis.units) 份")
-                        GPDataRow(title: "买入均价（加权平均）", value: "¥\(NextMoney.text(basis.averageCost, digits: 4))",
+                        GPDataRow(title: "买入均价（加权平均）", value: "¥\(NextMoney.text(basis.averageCost, digits: 3))",
                                   note: "只由买入决定、含买入手续费；卖出不改变这个数")
                         if let diluted = basis.dilutedCost {
-                            GPDataRow(title: "摊薄成本（券商口径）", value: "¥\(NextMoney.text(diluted, digits: 4))" + (basis.isNegativeDiluted ? " · 负成本" : ""),
+                            GPDataRow(title: "摊薄成本（券商口径）", value: "¥\(NextMoney.text(diluted, digits: 3))" + (basis.isNegativeDiluted ? " · 负成本" : ""),
                                       note: basis.dividendCredit > 0
                                         ? "买入总额 − 卖出所得 − 已到账分红 ¥\(NextMoney.text(basis.dividendCredit))，再摊到当前份额；分红到账后成本价会下降，与券商「成本价」同口径"
                                         : "买入总额减去卖出所得后摊到当前份额；与同花顺的「成本价」同一算法",
@@ -467,9 +467,9 @@ private struct InstrumentDetailScreen: View {
                                 : "没有官方记录就不推算分红，股息率按 0 处理，也不加分")
                     let heldUnits = position?.units ?? 0
                     GPDataRow(title: "近365日已记录每份派息",
-                              value: recentDividendPerShare > 0 ? "¥\(NextMoney.text(recentDividendPerShare, digits: 4))" : "—",
+                              value: recentDividendPerShare > 0 ? "¥\(NextMoney.text(recentDividendPerShare, digits: 3))" : "—",
                               note: recentDividendPerShare > 0
-                                ? (quote.map { $0.price > 0 ? "按当前价历史收益率 \(NextMoney.text(recentDividendPerShare / $0.price * 100, digits: 2))% · 不代表未来承诺" : "不计算收益率" } ?? "行情价格不可用")
+                                ? (quote.map { $0.price > 0 ? "按当前价历史收益率 \(NextMoney.text(recentDividendPerShare / $0.price * 100, digits: 3))% · 不代表未来承诺" : "不计算收益率" } ?? "行情价格不可用")
                                 : "近 12 个月没有已核实的派息")
                     if heldUnits > 0 { GPDataRow(title: "按当前账面份额折算", value: "¥\(NextMoney.text(recentDividendPerShare * Decimal(heldUnits)))", note: "不是历史实际到账金额；请以券商流水为准") }
                     if let dividendProjection {
@@ -478,12 +478,12 @@ private struct InstrumentDetailScreen: View {
                         case .historicalAverage: "按近三年有派息年份平均；金额不保证"
                         case .inferredEstimate: "按复权价格变化推算；不是已核实现金分红"
                         }
-                        GPDataRow(title: "未来12个月历史节奏试算", value: "¥\(NextMoney.text(dividendProjection.amount, digits: 4))/份", note: source)
+                        GPDataRow(title: "未来12个月历史节奏试算", value: "¥\(NextMoney.text(dividendProjection.amount, digits: 3))/份", note: source)
                     }
                     ForEach(dividendEvents.sorted { $0.date > $1.date }.prefix(4)) { event in
                         let dates = [event.recordDate.map { "登记 \($0)" }, event.payDate.map { "发放 \($0)" }].compactMap { $0 }.joined(separator: " · ")
                         let confirmedNote = dates.isEmpty ? "已实施派息事件" : "已实施派息 · \(dates)"
-                        GPDataRow(title: "除息日 \(event.date)", value: "每份 ¥\(NextMoney.text(event.amountPerShare, digits: 4))", note: event.isEstimated == true ? "复权价格变化估算 · 尚未核实现金派息" : confirmedNote)
+                        GPDataRow(title: "除息日 \(event.date)", value: "每份 ¥\(NextMoney.text(event.amountPerShare, digits: 3))", note: event.isEstimated == true ? "复权价格变化估算 · 尚未核实现金派息" : confirmedNote)
                     }
                     if dividendEvents.isEmpty { GPStatus(title: "暂无可核实的派息历史", detail: "NAS 连接后会查询历史事件；网络失败时不会清除本机缓存，也不会把估算数据记成到账。", symbol: "calendar.badge.clock") }
                     Button { addIncome = true } label: { Label("记录分红 / 实际到账", systemImage: "yensign.circle").font(.caption.weight(.semibold)) }.tint(p.forest)
@@ -516,7 +516,7 @@ private struct OrderBookView: View {
         }.accessibilityElement(children: .combine).accessibilityLabel("\(snapshot.code) 五档买卖盘口，\(isFresh ? "数据新鲜" : "数据已过期")")
     }
     private func orderRow(_ title: String, level: NextBookLevel, color: Color) -> some View {
-        HStack { Text(title).foregroundStyle(p.muted); Spacer(); Text(NextMoney.text(level.price, digits: 4)).foregroundStyle(color); Spacer(); Text("\(level.units)").foregroundStyle(p.ink) }
+        HStack { Text(title).foregroundStyle(p.muted); Spacer(); Text(NextMoney.text(level.price, digits: 3)).foregroundStyle(color); Spacer(); Text("\(level.units)").foregroundStyle(p.ink) }
             .font(.system(size: 11, design: .monospaced)).padding(.vertical, 4)
     }
 }
@@ -702,7 +702,7 @@ private struct DecisionScreen: View {
                         ForEach(plans) { plan in
                             VStack(alignment: .leading, spacing: 7) {
                                 HStack(alignment: .firstTextBaseline) {
-                                    Text("¥\(NextMoney.text(plan.limitPrice, digits: 4)) · \(plan.units) 份").font(.subheadline.weight(.semibold)).foregroundStyle(p.ink)
+                                    Text("\(plan.name) · ¥\(NextMoney.text(plan.limitPrice, digits: 3)) · \(plan.units) 份").font(.subheadline.weight(.semibold)).foregroundStyle(p.ink)
                                     Spacer()
                                     Text(plan.state).font(.caption2.weight(.medium)).foregroundStyle(plan.state == "价格已触发" ? p.forest : p.muted)
                                 }
@@ -865,13 +865,13 @@ private struct DecisionScreen: View {
         let position = model.book.positions.first(where: { $0.code == code })
         let quoteText: String
         if let quote {
-            quoteText = "名称：\(quote.quote.name)；代码：\(code)；价格：¥\(NextMoney.text(quote.quote.price, digits: 4))；昨收：¥\(NextMoney.text(quote.quote.previousClose, digits: 4))；来源：\(quote.quote.source)；行情时间：\(quote.quote.time.formatted(date: .numeric, time: .shortened))；数据标签：\(quote.stamp.label(now: Date()))。"
+            quoteText = "名称：\(quote.quote.name)；代码：\(code)；价格：¥\(NextMoney.text(quote.quote.price, digits: 3))；昨收：¥\(NextMoney.text(quote.quote.previousClose, digits: 3))；来源：\(quote.quote.source)；行情时间：\(quote.quote.time.formatted(date: .numeric, time: .shortened))；数据标签：\(quote.stamp.label(now: Date()))。"
         } else { quoteText = "名称：\(knownName(code))；代码：\(code)；本机没有缓存报价，不得推测当前价格。" }
         let summary = NextPortfolioCalculator.summary(book: model.book, quotes: model.quotes, at: Date(), mode: .diluted)
         let positionText = position.map { item -> String in
             let weight = summary.positions.first { $0.code == item.code }?.weightPercent
             let weightText = weight.map { String(format: "占总资产 %.1f%%", $0) } ?? "暂无报价，算不出权重"
-            return "本机记录相关持仓：\(item.units) 份，账面成本 ¥\(NextMoney.text(item.bookCost))，成本单价 ¥\(NextMoney.text(item.costPerUnit, digits: 4))，\(weightText)。"
+            return "本机记录相关持仓：\(item.units) 份，账面成本 ¥\(NextMoney.text(item.bookCost))，成本单价 ¥\(NextMoney.text(item.costPerUnit, digits: 3))，\(weightText)。"
         } ?? "本机未记录该 ETF 的持仓。"
         let accountText = "账户口径：总资产 ¥\(NextMoney.text(summary.totalValue))（现金 ¥\(NextMoney.text(summary.cash)) + 持仓市值 ¥\(NextMoney.text(summary.investedValue))）；浮动盈亏 \(summary.floatingProfit >= 0 ? "+" : "")¥\(NextMoney.text(summary.floatingProfit))；当日盈亏 \(summary.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "缺完整报价，不作估算")；持有 \(summary.positions.count) 只。"
         let healthIssues = NextBookHealth.issues(book: model.book, quotes: model.quotes, at: Date(),
@@ -983,14 +983,14 @@ private struct AIInputsCard: View {
     var body: some View {
         EditorialSection(title: "本次分析的输入", trailing: "可核对", accent: p.forest) {
             if let cached = model.quotes[code] {
-                GPDataRow(title: "行情快照", value: "¥\(NextMoney.text(cached.quote.price, digits: 4))",
+                GPDataRow(title: "行情快照", value: "¥\(NextMoney.text(cached.quote.price, digits: 3))",
                           note: "\(cached.quote.source) · \(cached.quote.time.formatted(date: .numeric, time: .shortened)) · \(cached.stamp.label(now: Date()))")
             } else {
                 GPDataRow(title: "行情快照", value: "无缓存报价", note: "分析会标为缺口，不推测价格")
             }
             if let position = model.book.positions.first(where: { $0.code == code }) {
                 GPDataRow(title: "本机持仓", value: "\(position.units) 份 · 成本 ¥\(NextMoney.text(position.bookCost))",
-                          note: "每份 ¥\(NextMoney.text(position.costPerUnit, digits: 4))")
+                          note: "每份 ¥\(NextMoney.text(position.costPerUnit, digits: 3))")
             } else {
                 GPDataRow(title: "本机持仓", value: "未记录", note: "仅给出一般性观察")
             }
@@ -1188,7 +1188,7 @@ private struct AssetsScreen: View {
                     }
                     let allEvents = NextDividendAnalytics.merged(model.book.dividendEvents + model.dividendEvents.values.flatMap { $0 })
                     ForEach(allEvents.sorted { $0.date > $1.date }.prefix(8)) { event in
-                        GPDataRow(title: "\(event.code) · 除息日 \(event.date)", value: "每份 ¥\(NextMoney.text(event.amountPerShare, digits: 4))", note: event.isEstimated == true ? "复权价格推算 · 非确认现金派息" : "已记录派息事件 · 不是未来收益承诺")
+                        GPDataRow(title: "\(event.code) · 除息日 \(event.date)", value: "每份 ¥\(NextMoney.text(event.amountPerShare, digits: 3))", note: event.isEstimated == true ? "复权价格推算 · 非确认现金派息" : "已记录派息事件 · 不是未来收益承诺")
                     }
                 }
                 EditorialSection(title: "现金变动", trailing: "可用 ¥\(NextMoney.text(model.book.cash))") {
@@ -1377,8 +1377,8 @@ private struct AddPositionSheet: View {
                     TextField(costByTotal ? "合计成本（元）" : "每份成本（元，建议 4 位小数）", text: $cost).keyboardType(.decimalPad)
                     if let total = totalCostValue, let perUnit = perUnitCostValue, let count = Int(units) {
                         GPDataRow(title: costByTotal ? "每份成本（自动计算）" : "合计成本（自动计算）",
-                                  value: costByTotal ? "¥\(NextMoney.text(perUnit, digits: 4))" : "¥\(NextMoney.text(total))",
-                                  note: "\(count) 份 × ¥\(NextMoney.text(perUnit, digits: 4)) = ¥\(NextMoney.text(total)) · 券商里这个价叫「买入均价」")
+                                  value: costByTotal ? "¥\(NextMoney.text(perUnit, digits: 3))" : "¥\(NextMoney.text(total))",
+                                  note: "\(count) 份 × ¥\(NextMoney.text(perUnit, digits: 3)) = ¥\(NextMoney.text(total)) · 券商里这个价叫「买入均价」")
                         if !costByTotal {
                             Text("券商若显示 1.4715 这类 4 位小数，请按原始值录入，否则每份差 0.0005 会让持仓盈亏差几毛钱。")
                                 .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
@@ -1405,7 +1405,7 @@ private struct AddPositionSheet: View {
                     }
                 }
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("核对并保存") { confirm = true }.disabled(code.count != 6 || name.isEmpty || Int(units) == nil || cost.isEmpty) } }
-                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let total = totalCostValue else { return }; onSave(code, name, u, total, acquiredAt); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份，合计成本 ¥\(NextMoney.text(totalCostValue ?? 0))（每份 ¥\(NextMoney.text(perUnitCostValue ?? 0, digits: 4))），建仓日 \(Self.dateText(acquiredAt))。保存后会产生可审计记录。") }
+                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let total = totalCostValue else { return }; onSave(code, name, u, total, acquiredAt); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份，合计成本 ¥\(NextMoney.text(totalCostValue ?? 0))（每份 ¥\(NextMoney.text(perUnitCostValue ?? 0, digits: 3))），建仓日 \(Self.dateText(acquiredAt))。保存后会产生可审计记录。") }
         }
     }
     static func dateText(_ date: Date) -> String {
@@ -1736,7 +1736,7 @@ private struct SearchSheet: View {
             hits.append(GPSearchHit(id: "security-\(code)", category: "证券", title: name, detail: "\(code)\(position.map { " · 持有 \($0.units) 份" } ?? (model.watch.contains(code) ? " · 自选" : ""))", symbol: "chart.xyaxis.line", route: .instrument(code), securityCode: code))
         }
         for fill in model.book.fills.reversed() where !query.isEmpty && matches(fill.code, fill.side, NextMoney.text(fill.price), fill.date.formatted(date: .numeric, time: .shortened)) {
-            hits.append(GPSearchHit(id: "fill-\(fill.id)", category: "交易流水", title: "\(fill.code) · \(fill.side) \(fill.units) 份", detail: "成交价 ¥\(NextMoney.text(fill.price, digits: 4)) · 手续费 ¥\(NextMoney.text(fill.fee)) · \(fill.date.formatted(date: .numeric, time: .shortened))", symbol: "arrow.left.arrow.right", route: .fills))
+            hits.append(GPSearchHit(id: "fill-\(fill.id)", category: "交易流水", title: "\(fill.code) · \(fill.side) \(fill.units) 份", detail: "成交价 ¥\(NextMoney.text(fill.price, digits: 3)) · 手续费 ¥\(NextMoney.text(fill.fee)) · \(fill.date.formatted(date: .numeric, time: .shortened))", symbol: "arrow.left.arrow.right", route: .fills))
         }
         for income in model.book.incomeEvents.reversed() where !query.isEmpty && matches(income.name, income.kind.title, income.status.title, NextMoney.text(income.netAmount)) {
             hits.append(GPSearchHit(id: "income-\(income.id)", category: "交易流水", title: "\(income.kind.title) · \(income.name)", detail: "\(income.status.title) · 净额 ¥\(NextMoney.text(income.netAmount))", symbol: "yensign.circle", route: .fills))
@@ -1825,7 +1825,7 @@ private struct AlertCenterScreen: View {
                 Picker("条件", selection: $direction) { ForEach(NextPriceAlertDirection.allCases) { Text($0.title).tag($0) } }.pickerStyle(.segmented)
                 Button("添加\(metric.title)提醒") { do { try model.addPriceAlert(code: priceCode.trimmingCharacters(in: .whitespacesAndNewlines), price: try NextMoney.parse(price), direction: direction, metric: metric); price = "" } catch { model.errorMessage = error.localizedDescription } }.font(.caption.weight(.semibold)).tint(p.forest)
                 if model.preferences.notifications.priceRules.isEmpty { Text("仅以新鲜行情触发；缓存行情不会触发价格提醒。添加后可在任意刷新行情时检查。") .font(.caption).foregroundStyle(p.muted) }
-                ForEach(model.preferences.notifications.priceRules) { rule in HStack { VStack(alignment: .leading, spacing: 3) { Text("\(rule.name) · \(rule.code)").font(.subheadline.weight(.semibold)); Text("\(rule.resolvedMetric.title) \(rule.direction.title) " + (rule.resolvedMetric == .price ? "¥\(NextMoney.text(rule.price, digits: 4))" : "\(NextNum.signed(NextNum.double(rule.price)))%") + " · \(rule.enabled ? "已启用" : "已暂停")").font(.caption).foregroundStyle(p.muted) }; Spacer(); Button(rule.enabled ? "暂停" : "启用") { guard let index = model.preferences.notifications.priceRules.firstIndex(where: { $0.id == rule.id }) else { return }; model.preferences.notifications.priceRules[index].enabled.toggle(); model.preferences = model.preferences }.font(.caption); Button("删除", role: .destructive) { model.removePriceAlert(rule.id) }.font(.caption) } }
+                ForEach(model.preferences.notifications.priceRules) { rule in HStack { VStack(alignment: .leading, spacing: 3) { Text("\(rule.name) · \(rule.code)").font(.subheadline.weight(.semibold)); Text("\(rule.resolvedMetric.title) \(rule.direction.title) " + (rule.resolvedMetric == .price ? "¥\(NextMoney.text(rule.price, digits: 3))" : "\(NextNum.signed(NextNum.double(rule.price)))%") + " · \(rule.enabled ? "已启用" : "已暂停")").font(.caption).foregroundStyle(p.muted) }; Spacer(); Button(rule.enabled ? "暂停" : "启用") { guard let index = model.preferences.notifications.priceRules.firstIndex(where: { $0.id == rule.id }) else { return }; model.preferences.notifications.priceRules[index].enabled.toggle(); model.preferences = model.preferences }.font(.caption); Button("删除", role: .destructive) { model.removePriceAlert(rule.id) }.font(.caption) } }
             }
             EditorialSection(title: "静默时段") {
                 Toggle("在此期间只记录、不弹出", isOn: quietEnabled).tint(p.forest)
@@ -1869,7 +1869,7 @@ private struct LedgerHistoryScreen: View {
                     let buy = fill.side == "buy"
                     HStack(alignment: .center, spacing: 6) {
                         GPDataRow(title: "\(model.name(for: fill.code)) · \(fill.code) · \(buy ? "买入" : "卖出")",
-                                  value: "\(fill.units) 份 × ¥\(NextMoney.text(fill.price, digits: 4))",
+                                  value: "\(fill.units) 份 × ¥\(NextMoney.text(fill.price, digits: 3))",
                                   note: "手续费 ¥\(NextMoney.text(fill.fee))" + (buy ? "" : " · 已实现 \(fill.realized >= 0 ? "+" : "")¥\(NextMoney.text(fill.realized))") + " · \(fill.date.formatted(date: .numeric, time: .shortened))",
                                   valueColor: buy ? p.gpUp : p.gpDown)
                         Button { pendingFillDelete = fill.id } label: {
@@ -1943,7 +1943,7 @@ private struct DividendEventRow: View {
                     }
                 }
                 Spacer()
-                Text("¥\(NextMoney.text(event.amountPerShare, digits: 4))/份")
+                Text("¥\(NextMoney.text(event.amountPerShare, digits: 3))/份")
                     .font(.subheadline.weight(.semibold).monospacedDigit())
                     .foregroundStyle(p.ink)
             }

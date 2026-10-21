@@ -58,8 +58,12 @@ def validate_book_json(text):
         if not isinstance(positions, list):
             raise InvalidData("positions must be a list")
         seen = set()
+        position_required = {"code", "name", "units", "bookCost"}
+        # iOS 3.4.1+ 在持仓里带 acquiredAt（建仓日，用于分红归属）；网页端忽略该字段。
+        # 不放行它，整个账本上传会被 400 拒绝，网页账本永远拿不到 iOS 的真实成本。
+        position_allowed = position_required | {"acquiredAt"}
         for p in positions:
-            if not isinstance(p, dict) or set(p) != {"code", "name", "units", "bookCost"}:
+            if not isinstance(p, dict) or not position_required <= set(p) or set(p) - position_allowed:
                 raise InvalidData("invalid position fields")
             code(p["code"])
             if p["code"] in seen or not isinstance(p["name"], str):

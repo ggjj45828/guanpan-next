@@ -122,6 +122,87 @@ def generate_research(factors, api_key=None, profile=None, opener=urlopen):
             "realOrder": False}
 
 
+def build_analysis_context(book, code, quotes, daily_bars, dividend_events):
+    """把账本 + 行情 + 日K + 分红拼成 analyze_user_context 需要的精确 schema。
+
+    网页端只传 code，服务端负责组装，客户端不再各自拼 schema（拼错就 400
+    "analysis context schema is invalid"）。dailyBars 只取该标的最近 120 根，
+    保证整包远小于 30 KB 上限。
+    """
+
+    def dec(value, default="0"):
+        try:
+            result = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            result = Decimal(default)
+        return result if result.is_finite() else Decimal(default)
+
+    def text(value):
+        return str(dec(value))
+
+    positions = [p for p in (book.get("positions") or []) if isinstance(p, dict)]
+    mine = next((p for p in positions if p.get("code") == code), None)
+    quote = quotes.get(code) or {}
+
+    security = {"code": code}
+    if quote.get("name"): security["name"] = str(quote["name"])
+    for key in ("price", "previousClose", "iopv"):
+        if dec(quote.get(key)) > 0:
+            security[key] = text(quote.get(key))
+
+    daily_bars = [b for b in (daily_bars or []) if isinstance(b, dict) and b.get("date")][-120:]
+    daily = [{"date": str(b["date"]), "open": text(b.get("open")), "high": text(b.get("high")),
+              "low": text(b.get("low")), "close": text(b.get("close")), "volume": text(b.get("volume"))}
+             for b in daily_bars]
+
+    dividends = [{"date": str(d["date"]), "amountPerShare": text(d.get("amountPerShare"))}
+                 for d in (dividend_events or [])
+                 if isinstance(d, dict) and d.get("date")][-30:]
+
+    all_positions, total_value = [], Decimal("0")
+    for row in positions:
+        units = int(row.get("units") or 0)
+        if units <= 0:
+            continue
+        row_quote = quotes.get(row.get("code")) or {}
+        price = dec(row_quote.get("price"))
+        book_cost = dec(row.get("bookCost"))
+        total_value += price * units
+        all_positions.append({"code": str(row["code"]), "name": str(row.get("name") or row["code"]),
+                              "units": units, "bookCost": text(book_cost),
+                              "costPerUnit": text(book_cost / units),
+                              "lastPrice": text(price), "currentWeight": "0", "targetWeight": "0"})
+    for row in all_positions:
+        if total_value > 0:
+            row["currentWeight"] = text(Decimal(row["bookCost"]) / total_value * 100)
+
+    if mine is not None:
+        units = int(mine.get("units") or 0)
+        book_cost = dec(mine.get("bookCost"))
+        position = {"units": units, "bookCost": text(book_cost),
+                    "costPerUnit": text(book_cost / units) if units > 0 else "0",
+                    "currentWeight": next((r["currentWeight"] for r in all_positions if r["code"] == code), "0")}
+    else:
+        position = None
+
+    goal = book.get("goal") if isinstance(book.get("goal"), dict) else {}
+    fills = []
+    for fill in (book.get("fills") or [])[-30:]:
+        if isinstance(fill, dict) and fill.get("code") == code:
+            fills.append({"date": fill.get("date"), "side": str(fill.get("side") or "buy"),
+                          "units": int(fill.get("units") or 0), "price": text(fill.get("price")),
+                          "fee": text(fill.get("fee") or 0)})
+
+    return {"security": security, "dailyBars": daily, "position": position,
+            "allPositions": all_positions, "cash": text(book.get("cash") or 0),
+            "recentFills": fills,
+            "goal": {"years": int(goal.get("years") or 0),
+                     "monthlyBudget": text(goal.get("monthlyBudget") or 0),
+                     "concentrationLimit": text(goal.get("concentrationLimit") or 0),
+                     "targetWeights": goal.get("targetWeights") or {}},
+            "dividends": dividends}
+
+
 def analyze_user_context(context, api_key=None, profile=None, opener=urlopen):
     """On-demand, user-authorized ETF analysis; accepts only explicit research facts.
 

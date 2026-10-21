@@ -346,7 +346,7 @@ enum NextWorthBuyEngine {
         let dividendPoints = NextDividendRules.points(forYieldPercent: dividendYield)
         if let dividendYield, dividendPoints > 0 {
             let base = NextDividendRules.isOnExchangeETF(code) && (iopv ?? 0) > 0 ? "按 IOPV 净值" : "按现价"
-            lines.append(NextScoreLine(title: "股息率", detail: "\(NextNum.percent(dividendYield))（\(base)，近 12 个月每份 ¥\(NextMoney.text(perShare, digits: 4))）", points: dividendPoints))
+            lines.append(NextScoreLine(title: "股息率", detail: "\(NextNum.percent(dividendYield))（\(base)，近 12 个月每份 ¥\(NextMoney.text(perShare, digits: 3))）", points: dividendPoints))
         } else if perShare > 0, let dividendYield {
             lines.append(NextScoreLine(title: "股息率", detail: "\(NextNum.percent(dividendYield))，低于 2%，本项不加分", points: 0))
         } else {
@@ -391,7 +391,7 @@ enum NextWorthBuyEngine {
             premium = value
             if abs(value) >= 2 {
                 lines.append(NextScoreLine(title: value > 0 ? "场内溢价" : "场内折价",
-                                           detail: "\(NextNum.signed(value))%（IOPV ¥\(NextMoney.text(iopv, digits: 4))）",
+                                           detail: "\(NextNum.signed(value))%（IOPV ¥\(NextMoney.text(iopv, digits: 3))）",
                                            points: value > 0 ? -5 : -2))
             }
         }
@@ -466,7 +466,7 @@ enum NextWorthBuyEngine {
         var dividendEstimated = true
         if let dividendYield {
             dividendValue = NextNum.clamp(dividendYield / 6 * 100, 0, 100)
-            dividendDetail = "股息率 \(NextNum.percent(dividendYield))，近 12 个月每份 ¥\(NextMoney.text(perShare, digits: 4))；6% 记满分"
+            dividendDetail = "股息率 \(NextNum.percent(dividendYield))，近 12 个月每份 ¥\(NextMoney.text(perShare, digits: 3))；6% 记满分"
             dividendEstimated = false
         }
         dimensions.append(NextScoreDimension(

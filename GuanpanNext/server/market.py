@@ -113,6 +113,10 @@ def parse_daily_bars(body, code, adjustment="qfq"):
     if start < 0 or end < start: raise ValueError("invalid daily response")
     node = json.loads(body[start:end + 1]).get("data", {}).get(symbol, {})
     rows = node.get("qfqday" if adjustment == "qfq" else "day")
+    # 部分标的（如 159866）腾讯只返回原始日K `day` 而无前复权 `qfqday`，
+    # 此时回退到原始序列，否则会误报 "daily bars missing"。
+    if adjustment == "qfq" and not isinstance(rows, list):
+        rows = node.get("day")
     if not isinstance(rows, list): raise ValueError("daily bars missing")
     result = {}
     for row in rows:
@@ -143,6 +147,105 @@ def fetch_tencent_daily(code, adjustment="qfq"):
         if response.status != 200: raise OSError("daily source unavailable")
         raw = response.read(2_000_000).decode("utf-8", errors="strict")
     return parse_daily_bars(raw, code, adjustment)
+
+
+def em_secid(code):
+    """东财 secid：沪市(5/6/9)→1.xxxxxx，深市/北交所(0/1/2/3/4/8)→0.xxxxxx。"""
+    if not isinstance(code, str) or len(code) != 6 or not code.isascii() or not code.isdigit():
+        raise ValueError("invalid mainland exchange code")
+    market = "1" if code[0] in "569" else "0"
+    return f"{market}.{code}"
+
+
+def fetch_eastmoney_quotes(codes):
+    """东财实时报价兜底源。腾讯找不到的标的（或腾讯限流）走这里。"""
+    secids = []
+    for code in codes:
+        try: secids.append(em_secid(code))
+        except ValueError: continue
+    if not secids: return []
+    query = urlencode({"fields": "f12,f13,f14,f2,f3,f4,f6,f60",
+                      "secids": ",".join(secids), "fltt": "2", "np": "1"})
+    request = Request("https://push2.eastmoney.com/api/qt/ulist.np/get?" + query,
+                      headers={"Referer": "https://quote.eastmoney.com/",
+                               "User-Agent": "Mozilla/5.0 (compatible; GuanpanNext/3)"})
+    with urlopen(request, timeout=8) as response:
+        if response.status != 200: raise OSError("eastmoney quote source unavailable")
+        data = json.loads(response.read(2_000_000).decode("utf-8", "replace"))
+    diff = (data.get("data") or {}).get("diff") or []
+    found = {}
+    for row in diff:
+        code = str(row.get("f12") or "")
+        price, prev, pct = row.get("f2"), row.get("f60"), row.get("f3")
+        if not code or price in (None, 0) or prev in (None, 0): continue
+        try:
+            price = str(Decimal(str(price))); prev = str(Decimal(str(prev)))
+        except (InvalidOperation, ValueError): continue
+        found[code] = {
+            "code": code, "name": row.get("f14") or code,
+            "price": price, "previousClose": prev,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "source": "Eastmoney quote", "providerInstrumentType": None, "iopv": None,
+            "changePercent": (float(pct) if isinstance(pct, (int, float)) else None),
+        }
+    return [found[c] for c in codes if c in found]
+
+
+def fetch_eastmoney_daily(code, adjustment="qfq"):
+    """东财历史日 K 兜底源（前复权 qfq / 原始 raw）。"""
+    if adjustment not in ("qfq", "raw"):
+        raise ValueError("unsupported adjustment")
+    secid = em_secid(code)
+    query = urlencode({"secid": secid, "fields1": "f1,f2,f3,f4,f5,f6",
+                      "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                      "klt": "101", "fqt": ("1" if adjustment == "qfq" else "0"),
+                      "end": "20500101", "lmt": "640"})
+    request = Request("https://push2his.eastmoney.com/api/qt/stock/kline/get?" + query,
+                      headers={"Referer": "https://quote.eastmoney.com/",
+                               "User-Agent": "Mozilla/5.0 (compatible; GuanpanNext/3)"})
+    with urlopen(request, timeout=12) as response:
+        if response.status != 200: raise OSError("eastmoney daily source unavailable")
+        data = json.loads(response.read(2_000_000).decode("utf-8", "replace"))
+    klines = (data.get("data") or {}).get("klines") or []
+    result = {}
+    for line in klines:
+        parts = line.split(",")
+        if len(parts) < 7: continue
+        try:
+            day = parts[0][:10]
+            o, c, h, l, v = (Decimal(p) for p in parts[1:6])
+        except (InvalidOperation, ValueError): continue
+        if not (c > 0 and o > 0 and h > 0 and l > 0) or l > min(o, c) or h < max(o, c) or v < 0: continue
+        if day > datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat(): continue
+        result[day] = {"date": day, "open": str(o), "close": str(c),
+                       "high": str(h), "low": str(l), "volume": str(v)}
+    if not result: raise ValueError("no validated daily bars")
+    return [result[d] for d in sorted(result)]
+
+
+def fetch_quotes(codes):
+    """统一报价入口：腾讯优先，腾讯缺失/失败的代码自动用东财兜底。"""
+    try:
+        tencent = fetch_tencent_quotes(codes)
+    except Exception:
+        tencent = []
+    by_code = {q["code"]: q for q in tencent}
+    missing = [c for c in codes if c not in by_code]
+    if missing:
+        try:
+            for q in fetch_eastmoney_quotes(missing):
+                by_code.setdefault(q["code"], q)
+        except Exception:
+            pass
+    return [by_code[c] for c in codes if c in by_code]
+
+
+def fetch_daily(code, adjustment="qfq"):
+    """统一日 K 入口：腾讯优先，失败回退东财。"""
+    try:
+        return fetch_tencent_daily(code, adjustment)
+    except Exception:
+        return fetch_eastmoney_daily(code, adjustment)
 
 
 def parse_eastmoney_dividends(body, code):
@@ -272,7 +375,7 @@ def infer_adjustment_dividends(code, adjusted, raw):
 DIVIDEND_RULES_VERSION = 2
 
 
-def fetch_dividend_events(code, daily_fetcher=fetch_tencent_daily, stock_fetcher=fetch_eastmoney_dividends,
+def fetch_dividend_events(code, daily_fetcher=fetch_daily, stock_fetcher=fetch_eastmoney_dividends,
                           fund_fetcher=fetch_eastmoney_fund_dividends):
     official = []; inferred = []; succeeded = False
     # Eastmoney's RPT_SHAREBONUS_DET is an A-share corporate-action feed. It is
@@ -309,40 +412,63 @@ def fetch_dividend_events(code, daily_fetcher=fetch_tencent_daily, stock_fetcher
     for item in official: values[(item["code"], item["date"])] = item
     return sorted(values.values(), key=lambda item: item["date"])
 
-# --- 全球指数（网页版看板用） -------------------------------------------------
-# 口径与 App 一致，2026-10-20 三源交叉验证过：
-#   b_NDX 是 2025-09-26 的陈旧值，东财 100.NDX 实际是纳斯达克综合 —— 两者都不能用；
-#   纳指 100 走 gb_$ndx（与腾讯 usNDX 一致）。
-# 第三个元素是该指数在新浪 K 线接口里的代码，网页版点指数看历史曲线用。
-INDEX_SYMBOLS = [
+# --- 指数行情（东财为主，新浪兜底） -------------------------------------------------
+# 旧版只用新浪 hq.sinajs.cn，部分环境/接口被限导致「指数没数据线、曲线为空」。
+# 现在以东财 push2 实时报价 + push2his 日 K 为首选数据源，覆盖 A 股与全球主要指数；
+# 东财不可用时退回到新浪。每条指数用东财 secid 标识，kline 也走东财 secid，
+# 保证「指数报价」与「指数曲线」同源、都有数据。
+INDEX_SOURCES = [
+    ("上证指数", "1.000001"),
+    ("深证成指", "0.399001"),
+    ("创业板指", "0.399006"),
+    ("沪深300", "1.000300"),
+    ("纳斯达克", "100.NDX"),
+    ("日经225", "100.N225"),
+    ("韩国KOSPI", "100.KS11"),
+    ("恒生指数", "100.HSI"),
+    ("标普500", "100.SPX"),
+    ("道琼斯", "100.DJIA"),
+]
+NAME_TO_SECID = {name: secid for name, secid in INDEX_SOURCES}
+# 兜底：新浪符号（接口形态见 _sina_parse_index_fields）。
+SINA_INDEX_SYMBOLS = [
     ("s_sh000001", "上证指数", "sh000001"),
-    ("gb_$ndx", "纳斯达克100", "gb_$ndx"),
     ("b_NKY", "日经225", "b_NKY"),
     ("b_KOSPI", "韩国KOSPI", "b_KOSPI"),
-    ("rt_hkHSTECH", "恒生科技", "rt_hkHSTECH"),
+    ("rt_hkHSI", "恒生指数", "rt_hkHSI"),
 ]
 
 
-def parse_indices(body):
-    """解析新浪多行响应。只取数字字段，名称用本地固定表（响应是 GB18030）。"""
+def _fetch_eastmoney_indices():
+    secids = [s for _, s in INDEX_SOURCES]
+    query = urlencode({"fields": "f12,f13,f14,f2,f3,f4,f6,f60",
+                      "secids": ",".join(secids), "fltt": "2", "np": "1"})
+    request = Request("https://push2.eastmoney.com/api/qt/ulist.np/get?" + query,
+                      headers={"Referer": "https://quote.eastmoney.com/",
+                               "User-Agent": "Mozilla/5.0 (compatible; GuanpanNext/3)"})
+    with urlopen(request, timeout=8) as response:
+        if response.status != 200:
+            raise OSError("eastmoney index source unavailable")
+        data = json.loads(response.read(2_000_000).decode("utf-8", "replace"))
+    diff = (data.get("data") or {}).get("diff") or []
     found = {}
-    for line in body.splitlines():
-        start = line.find('hq_str_')
-        eq = line.find('="')
-        if start < 0 or eq < 0:
-            continue
-        symbol = line[start + 7:eq]
-        end = line.rfind('";')
-        if end <= eq:
-            continue
-        fields = line[eq + 2:end].split(',')
-        quote = _parse_index_fields(symbol, fields)
-        if quote:
-            found[symbol] = quote
-    return [dict(found[symbol], kline=kline) for symbol, _, kline in INDEX_SYMBOLS if symbol in found]
+    for row in diff:
+        name = row.get("f14") or ""
+        secid = NAME_TO_SECID.get(name)
+        if not secid: continue
+        price, prev, pct = row.get("f2"), row.get("f60"), row.get("f3")
+        if price in (None, 0) or prev in (None, 0): continue
+        found[secid] = {
+            "symbol": secid, "name": name,
+            "price": float(price), "changePercent": float(pct or 0),
+            "previousClose": float(prev),
+            "observedAt": datetime.now(timezone.utc).isoformat(),
+            "kline": secid,
+        }
+    return [found[s] for _, s in INDEX_SOURCES if s in found]
 
 
-def _parse_index_fields(symbol, fields):
+def _sina_parse_index_fields(symbol, fields):
     def num(index):
         try:
             return float(fields[index])
@@ -363,23 +489,41 @@ def _parse_index_fields(symbol, fields):
         price, pct = num(1), num(3)
     if not price or price <= 0:
         return None
-    name = {item[0]: item[1] for item in INDEX_SYMBOLS}.get(symbol, symbol)
+    name = {item[0]: item[1] for item in SINA_INDEX_SYMBOLS}.get(symbol, symbol)
     return {"symbol": symbol, "name": name, "price": price,
             "changePercent": pct if pct is not None else 0.0,
-            "previousClose": close, "observedAt": stamp}
+            "previousClose": close, "observedAt": stamp, "kline": symbol}
 
 
-def fetch_indices():
-    query = ",".join(symbol for symbol, _, _ in INDEX_SYMBOLS)
+def _fetch_sina_indices():
+    query = ",".join(symbol for symbol, _, _ in SINA_INDEX_SYMBOLS)
     request = Request("https://hq.sinajs.cn/list=" + query,
                       headers={"Referer": "https://finance.sina.com.cn/",
                                "User-Agent": "Mozilla/5.0 (compatible; GuanpanNext/1)"})
     with urlopen(request, timeout=8) as response:
         body = response.read().decode("utf-8", "replace")
-    quotes = parse_indices(body)
-    if not quotes:
-        raise ValueError("index source returned no parsable data")
-    return quotes
+    found = {}
+    for line in body.splitlines():
+        start = line.find('hq_str_'); eq = line.find('="')
+        if start < 0 or eq < 0: continue
+        symbol = line[start + 7:eq]; end = line.rfind('";')
+        if end <= eq: continue
+        fields = line[eq + 2:end].split(',')
+        quote = _sina_parse_index_fields(symbol, fields)
+        if quote: found[symbol] = quote
+    result = [found[s] for s, _, _ in SINA_INDEX_SYMBOLS if s in found]
+    if not result: raise ValueError("sina index source returned no parsable data")
+    return result
+
+
+def fetch_indices():
+    """指数报价：东财优先，东财不可用退回新浪。"""
+    try:
+        quotes = _fetch_eastmoney_indices()
+        if quotes: return quotes
+    except Exception:
+        pass
+    return _fetch_sina_indices()
 
 
 def _valid_kline_symbol(symbol):
@@ -389,9 +533,46 @@ def _valid_kline_symbol(symbol):
 
 
 def fetch_kline(symbol, datalen=320):
-    """新浪日 K 历史（网页版点指数看曲线用）。与 A 股日 K 走不同接口，按原始符号转发。"""
+    """指数日 K 历史曲线。东财 secid（含点号）走东财历史 K 线；其余符号走新浪兜底。"""
     if not _valid_kline_symbol(symbol):
         raise ValueError("invalid kline symbol")
+    if "." in symbol and symbol[0].isdigit():
+        return _fetch_eastmoney_kline(symbol, datalen)
+    return _fetch_sina_kline(symbol, datalen)
+
+
+def _fetch_eastmoney_kline(secid, datalen=320):
+    """东财历史日 K：klines 每行 "日期,开,收,高,低,量,额,涨%"（fqt=1 前复权）。"""
+    query = urlencode({"secid": secid, "fields1": "f1,f2,f3,f4,f5,f6",
+                      "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                      "klt": "101", "fqt": "1", "end": "20500101", "lmt": str(datalen)})
+    request = Request("https://push2his.eastmoney.com/api/qt/stock/kline/get?" + query,
+                      headers={"Referer": "https://quote.eastmoney.com/",
+                               "User-Agent": "Mozilla/5.0 (compatible; GuanpanNext/3)"})
+    with urlopen(request, timeout=10) as response:
+        if response.status != 200:
+            raise OSError("eastmoney kline source unavailable")
+        data = json.loads(response.read(4_000_000).decode("utf-8", "replace"))
+    klines = (data.get("data") or {}).get("klines") or []
+    bars = []
+    for line in klines:
+        parts = line.split(",")
+        if len(parts) < 7: continue
+        try:
+            day = parts[0][:10]
+            o, c, h, l, v = (Decimal(p) for p in parts[1:6])
+        except (InvalidOperation, ValueError):
+            continue
+        if not (c > 0 and o > 0 and h > 0 and l > 0) or l > min(o, c) or h < max(o, c) or v < 0: continue
+        bars.append({"date": day, "open": str(o), "high": str(h), "low": str(l),
+                     "close": str(c), "volume": str(v)})
+    if len(bars) < 2:
+        raise ValueError("kline source returned no usable bars")
+    return sorted(bars, key=lambda b: b["date"])
+
+
+def _fetch_sina_kline(symbol, datalen=320):
+    """新浪日 K 历史（旧接口，作为东财不可达时的兜底）。"""
     url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
            "CN_MarketDataService.getKLineData?" + urlencode(
                {"symbol": symbol, "scale": 240, "ma": "no", "datalen": datalen}))

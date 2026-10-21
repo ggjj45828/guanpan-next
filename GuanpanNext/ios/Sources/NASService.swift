@@ -473,7 +473,9 @@ enum NextNASService {
         }
         let url = try validateURL(baseURL).appendingPathComponent("v1").appendingPathComponent("ai").appendingPathComponent("analyze")
         var request = URLRequest(url: url, timeoutInterval: 55); request.httpMethod = "POST"
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["userConfirmed": true, "context": context], options: [.fragmentsAllowed])
+        // 与网页一致：只发 6 位代码，由 NAS 用账本 + 行情 + 日K + 分红拼出 context。
+        // 客户端各自拼 schema，一旦与服务端口径不一致就会被判 "analysis context schema is invalid"。
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["userConfirmed": true, "code": code], options: [.fragmentsAllowed])
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw NextError.invalid("NAS AI 没有返回 HTTP 状态") }

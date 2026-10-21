@@ -761,14 +761,19 @@ extension NextBook {
     }
 
     func valuation(using quotes: [String: NextCachedQuote], at now: Date) -> NextAssetValuation {
+        let heldCodes = Set(positions.filter({ $0.units > 0 }).map { $0.code })
         var partial = cash
         var priced = 0
         var earliest: Date?
         var qualities = [NextDataQuality]()
         var previousTotal = cash
-        var allQuotesFresh = true
+        var anomalous = false
         for position in positions where position.units > 0 {
-            guard let cached = quotes[position.code], cached.usableForDisplay(at: now) else { allQuotesFresh = false; continue }
+            guard let cached = quotes[position.code], cached.usableForDisplay(at: now) else { continue }
+            if NextPortfolioCalculator.anomalyReason(quote: cached.quote, storedCostPerUnit: position.costPerUnit) != nil {
+                anomalous = true
+                continue
+            }
             partial += cached.quote.price * Decimal(position.units)
             previousTotal += cached.quote.previousClose * Decimal(position.units)
             priced += 1
@@ -776,9 +781,8 @@ extension NextBook {
             let age = now.timeIntervalSince(cached.quote.time)
             let quality: NextDataQuality = age <= 120 ? cached.stamp.quality : age <= 86_400 ? .cached : .stale
             qualities.append(quality)
-            if !cached.quote.isFresh(at: now) { allQuotesFresh = false }
         }
-        let complete = priced == positions.filter({ $0.units > 0 }).count
+        let complete = priced == heldCodes.count && !anomalous
         let quality = qualities.max { qualityRank($0) < qualityRank($1) }
         // 当日参考盈亏的券商口径：
         //   昨仓 ＝ (现价 − 昨收) × 当前份额
@@ -786,10 +790,11 @@ extension NextBook {
         //   今卖 ＝ (卖出价 − 昨收) × 份额 − 费用
         // 只按 (现价−昨收) × 当前份额 会把当日买入的份额也当成昨天就有，
         // 当天有买卖时必然和同花顺对不上。
+        // 仅对“当前仍持有”的标的计入当日成交调整，与持仓列表（PortfolioSummary）逐标的汇总严格一致。
         var intradayAdjustment = Decimal.zero
         var marketCalendar = Calendar(identifier: .gregorian)
         marketCalendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
-        for fill in fills where marketCalendar.isDate(fill.date, inSameDayAs: now) {
+        for fill in fills where marketCalendar.isDate(fill.date, inSameDayAs: now) && heldCodes.contains(fill.code) {
             guard let cached = quotes[fill.code] else { continue }
             let previous = cached.quote.previousClose
             if fill.side == "buy" {
@@ -798,10 +803,10 @@ extension NextBook {
                 intradayAdjustment += (fill.price - previous) * Decimal(fill.units) - fill.fee
             }
         }
-        let delta = complete && allQuotesFresh ? partial - previousTotal + intradayAdjustment : nil
+        let delta = complete ? partial - previousTotal + intradayAdjustment : nil
         let deltaPercent = delta.flatMap { previousTotal > 0 ? $0 / previousTotal * 100 : nil }
         return NextAssetValuation(total: complete ? partial : nil, partialTotal: partial, dailyChange: delta, dailyChangePercent: deltaPercent, pricedPositions: priced,
-                                  totalPositions: positions.filter({ $0.units > 0 }).count, earliestQuote: earliest, quality: quality)
+                                  totalPositions: heldCodes.count, earliestQuote: earliest, quality: quality)
     }
 }
 private func qualityRank(_ quality: NextDataQuality) -> Int {

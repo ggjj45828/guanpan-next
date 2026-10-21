@@ -12,9 +12,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
-from ai import provider_status, verify_provider, analyze_user_context, AIProviderError, profile_from_environment
+from ai import provider_status, verify_provider, analyze_user_context, build_analysis_context, AIProviderError, profile_from_environment
 from domain import Conflict, InvalidData, NextDatabase, convert_legacy_web_book
 from market import (fetch_indices, fetch_tencent_quotes, fetch_tencent_daily, fetch_dividend_events, fetch_kline,
+                    fetch_quotes, fetch_daily,
                     symbol_for, DIVIDEND_RULES_VERSION as dividend_rules_version)
 from workers import start_workers
 import grid
@@ -36,7 +37,7 @@ def code_version():
         return "unknown"
 
 
-def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fetch_tencent_daily, dividend_fetcher=fetch_dividend_events):
+def make_handler(database, market_fetcher=fetch_quotes, daily_fetcher=fetch_daily, dividend_fetcher=fetch_dividend_events):
     def grid_bars(codes):
         """网格参数只需要近 20 个交易日的振幅，用 NAS 已归档的日 K，够了。"""
         bars = {}
@@ -294,8 +295,37 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                 if path == "/v1/ai/analyze":
                     if value.get("userConfirmed") is not True:
                         return self.reply(400, {"error": "此分析必须由 iOS 页面明确确认后发起"})
+                    context = value.get("context")
+                    if not isinstance(context, dict):
+                        # 网页路径：只传 code，服务端用账本 + 行情 + 日K + 分红拼完整 context，
+                        # 客户端不再各自拼 schema（拼错就是 400 "schema is invalid"）。
+                        code = value.get("code")
+                        if not isinstance(code, str) or len(code) != 6 or not code.isdigit():
+                            return self.reply(400, {"error": "需要完整 context，或提供 6 位代码 code"})
+                        try:
+                            stored = database.get_real("main")
+                            book = json.loads(stored["bookJSON"]) if stored.get("bookJSON") else {}
+                            codes = sorted({str(p.get("code")) for p in (book.get("positions") or []) if p.get("code")} | {code})
+                            try:
+                                rows = market_fetcher(codes)
+                            except Exception:
+                                rows = []
+                            quotes = {row.get("code"): row for row in rows if isinstance(row, dict)}
+                            try:
+                                bars = daily_fetcher(code)
+                            except Exception:
+                                bars = []
+                            try:
+                                dividends = dividend_fetcher(code)
+                            except Exception:
+                                dividends = []
+                            context = build_analysis_context(book, code, quotes, bars, dividends)
+                        except InvalidData as error:
+                            return self.reply(400, {"error": str(error)})
+                        except Exception:
+                            return self.reply(503, {"error": "组装分析上下文失败：账本或行情不可用"})
                     try:
-                        result = analyze_user_context(value.get("context"), profile=profile_from_environment())
+                        result = analyze_user_context(context, profile=profile_from_environment())
                         result["createdAt"] = datetime.now(timezone.utc).isoformat()
                         return self.reply(200, result)
                     except AIProviderError as error:
