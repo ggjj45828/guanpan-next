@@ -298,6 +298,17 @@ enum NextNASService {
             || (octets[0] == 192 && octets[1] == 168)
             || (octets[0] == 169 && octets[1] == 254)
     }
+    /// 服务端拒绝时会返回 `{"error": "..."}`，以前这里直接丢掉，界面只剩「HTTP 400」，
+    /// 用户根本没法判断是字段不对、修订冲突还是鉴权问题。现在原样带出来。
+    static func serverMessage(_ data: Data, status: Int) -> String {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let text = (object["error"] as? String) ?? (object["message"] as? String), !text.isEmpty {
+            return "\(text)（HTTP \(status)）"
+        }
+        let raw = String(decoding: data.prefix(200), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? "HTTP \(status)" : "\(raw)（HTTP \(status)）"
+    }
+
     static func checkHealth(baseURL: String, session: URLSession = .shared) async throws -> NextNASHealth {
         let url = try validateURL(baseURL).appendingPathComponent("health")
         let (data, response) = try await session.data(for: URLRequest(url: url, timeoutInterval: 8))
@@ -311,7 +322,9 @@ enum NextNASService {
     }
     static func readStatus(baseURL: String, session: URLSession = .shared) async throws -> NextNASStatus {
         let (data, response) = try await session.data(for: URLRequest(url: try endpoint(baseURL), timeoutInterval: 10))
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw NextError.invalid("NAS 账本读取失败") }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NextError.invalid("NAS 账本读取失败：\(serverMessage(data, status: (response as? HTTPURLResponse)?.statusCode ?? -1))")
+        }
         let value = try JSONDecoder().decode(RemoteBook.self, from: data)
         let book = try value.bookJSON.map { try JSONDecoder().decode(NextBook.self, from: Data($0.utf8)).validated() }
         return NextNASStatus(revision: value.revision, hasBook: value.bookJSON != nil, book: book)
@@ -323,8 +336,8 @@ enum NextNASService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw NextError.invalid("NAS 没有返回 HTTP 状态") }
-        if http.statusCode == 409 { throw NextError.invalid("NAS 账本版本已变化；没有覆盖数据，请重新下载核对。") }
-        guard http.statusCode == 200 else { throw NextError.invalid("NAS 保存失败（HTTP \(http.statusCode)），本机账本未修改") }
+        if http.statusCode == 409 { throw NextError.invalid("NAS 账本版本已变化；没有覆盖数据，请重新下载核对或用「强制覆盖」。\(serverMessage(data, status: 409))") }
+        guard http.statusCode == 200 else { throw NextError.invalid("NAS 保存失败：\(serverMessage(data, status: http.statusCode))；本机账本未修改") }
         return try JSONDecoder().decode(RevisionResponse.self, from: data).revision
     }
     /// 让 NAS 用自己配置的 key 发一条最小探针（不携带持仓/行情），验证 AI 是否真的可用。
