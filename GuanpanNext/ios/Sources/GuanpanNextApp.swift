@@ -39,7 +39,8 @@ private extension GPRoute {
         case .fills: .fills
         case .history: .history
         case .backups: .backups
-        case .portfolio(_), .replay(_): nil
+        // 数字孪生（A–H）已从 UI 全删，路由仅保留给旧备份解码；恢复时直接忽略。
+        case .portfolio(_), .replay(_), .twin(_): nil
         }
     }
 }

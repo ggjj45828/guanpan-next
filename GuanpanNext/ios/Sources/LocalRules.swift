@@ -7,6 +7,9 @@ import Foundation
 /// 不是涨跌预测，也不构成买卖建议。
 enum NextNum {
     static func double(_ value: Decimal) -> Double { NSDecimalNumber(decimal: value).doubleValue }
+    /// 直接收 Double：全球指数（`GlobalIndexQuote.changePercent`）和本机算出的各类
+    /// 百分比/盈亏本来就是 Double，以前只有 Decimal 一个入口，调用处被迫层层转换。
+    static func double(_ value: Double) -> Double { value }
     static func decimal(_ value: Double) -> Decimal {
         guard value.isFinite else { return 0 }
         return Decimal(string: String(format: "%.6f", value), locale: Locale(identifier: "en_US_POSIX")) ?? 0
