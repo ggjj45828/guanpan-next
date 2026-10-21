@@ -442,7 +442,9 @@ private struct InstrumentDetailScreen: View {
                                   note: "只由买入决定、含买入手续费；卖出不改变这个数")
                         if let diluted = basis.dilutedCost {
                             GPDataRow(title: "摊薄成本（券商口径）", value: "¥\(NextMoney.text(diluted, digits: 4))" + (basis.isNegativeDiluted ? " · 负成本" : ""),
-                                      note: "买入总额减去卖出所得后摊到当前份额；与同花顺的「成本价」同一算法",
+                                      note: basis.dividendCredit > 0
+                                        ? "买入总额 − 卖出所得 − 已到账分红 ¥\(NextMoney.text(basis.dividendCredit))，再摊到当前份额；分红到账后成本价会下降，与券商「成本价」同口径"
+                                        : "买入总额减去卖出所得后摊到当前份额；与同花顺的「成本价」同一算法",
                                       valueColor: basis.isNegativeDiluted ? p.terracotta : nil)
                         } else {
                             GPDataRow(title: "摊薄成本（券商口径）", value: "无法计算",
@@ -1880,7 +1882,7 @@ private struct LedgerHistoryScreen: View {
                     }
                 }
                 if model.book.fills.isEmpty { Text("暂无成交流水。删除流水会同步回滚该笔对持仓与现金的影响。").font(.caption2).foregroundStyle(p.muted) }
-                ForEach(model.book.incomeEvents.reversed()) { income in GPDataRow(title: "\(income.kind.title) · \(income.name) · \(income.status.title)", value: "+¥\(NextMoney.text(income.netAmount))", note: "\(income.status == .received ? income.receivedAt?.formatted(date: .numeric, time: .shortened) ?? "已到账" : "预计到账 \(income.payDate.formatted(date: .numeric, time: .omitted))") · 税前 ¥\(NextMoney.text(income.grossAmount)) · 税费 ¥\(NextMoney.text(income.tax))") }
+                ForEach(model.book.incomeEvents.reversed()) { income in GPDataRow(title: "\(income.kind.title) · \(income.name) · \(income.status.title)", value: "+¥\(NextMoney.text(income.netAmount))", note: (income.status == .received && income.kind == .etfDistribution ? "已冲减该标的摊薄成本 · " : "") + "\(income.status == .received ? income.receivedAt?.formatted(date: .numeric, time: .shortened) ?? "已到账" : "预计到账 \(income.payDate.formatted(date: .numeric, time: .omitted))") · 税前 ¥\(NextMoney.text(income.grossAmount)) · 税费 ¥\(NextMoney.text(income.tax))") }
             }
         }.navigationTitle("资产流水与审计").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
         .confirmationDialog("删除这条成交流水？", isPresented: Binding(get: { pendingFillDelete != nil }, set: { if !$0 { pendingFillDelete = nil } }), titleVisibility: .visible) {

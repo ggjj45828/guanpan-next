@@ -704,6 +704,9 @@ struct NextCostBasis: Equatable {
     let averageCost: Decimal
     let dilutedCost: Decimal?
     let hasFullHistory: Bool
+    /// 已到账的现金分红合计。券商的「成本价」会把分红从成本里扣掉，
+    /// 所以分红到账后成本价会下降 —— 这里把它显式记下来，界面才能解释这个变化。
+    var dividendCredit: Decimal = 0
     var isNegativeDiluted: Bool { (dilutedCost ?? 0) < 0 }
 }
 
@@ -738,14 +741,20 @@ extension NextBook {
         let boughtUnits = buys.reduce(0) { $0 + $1.units }
         let soldUnits = sells.reduce(0) { $0 + $1.units }
         let hasFullHistory = !buys.isEmpty && (boughtUnits - soldUnits) == position.units
+        // 已到账的现金分红冲减成本：这是券商「成本价」随分红下降的原因。
+        // 只算「已到账 + ETF 分红」，待到账的预估不提前扣。
+        let dividendCredit = incomeEvents
+            .filter { $0.status == .received && $0.kind == .etfDistribution && $0.code == code }
+            .reduce(Decimal.zero) { $0 + $1.netAmount }
         var diluted: Decimal?
         if hasFullHistory, position.units > 0 {
             let buyCost = buys.reduce(Decimal.zero) { $0 + $1.price * Decimal($1.units) + $1.fee }
             let sellNet = sells.reduce(Decimal.zero) { $0 + $1.price * Decimal($1.units) - $1.fee }
-            diluted = (buyCost - sellNet) / Decimal(position.units)
+            diluted = (buyCost - sellNet - dividendCredit) / Decimal(position.units)
         }
         return NextCostBasis(code: code, units: position.units, bookCost: position.bookCost,
-                             averageCost: average, dilutedCost: diluted, hasFullHistory: hasFullHistory)
+                             averageCost: average, dilutedCost: diluted, hasFullHistory: hasFullHistory,
+                             dividendCredit: dividendCredit)
     }
 
     func valuation(using quotes: [String: NextCachedQuote], at now: Date) -> NextAssetValuation {
