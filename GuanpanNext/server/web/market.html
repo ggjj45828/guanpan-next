@@ -338,23 +338,30 @@ function bookCash(){ return Number(BOOK.cash||0); }
 function renderHold(){
   const summary=$("holdSummary");
   if(!BOOK||!BOOK.positions.length){ summary.textContent="暂无持仓。"; $("holdList").innerHTML=""; $("benchRow").innerHTML=""; return; }
-  let totalMv=0, totalCost=0;
+  let totalMv=0, totalCost=0, missing=0;
   const rows = BOOK.positions.map(p=>{
-    const q=QUOTES[p.code]; const price=q?Number(q.price):0;
+    const q=QUOTES[p.code];
+    /* 取不到报价必须是 null，不能按 0 算：0 会把整页渲染成「市值 0 · 盈亏 -100%」，
+       看上去像血本无归，实际只是行情接口没返回（收盘后被 60 秒新鲜度门槛拒过、
+       网络抖动、限流都会这样）。 */
+    const price=(q&&Number(q.price)>0)?Number(q.price):null;
     const units=Number(p.units)||0; const cost=Number(p.bookCost)||0;
-    const mv=price*units; const pnl=mv-cost; const pnlPct=cost? pnl/cost*100:0;
+    const mv=price==null?0:price*units;
+    const pnl=price==null?null:mv-cost; const pnlPct=(pnl!=null&&cost)? pnl/cost*100:null;
+    if(price==null) missing++;
     totalMv+=mv; totalCost+=cost;
-    const up=pnl>=0, cls=up?"up":"down";
+    const up=(pnl||0)>=0, cls=up?"up":"down";
     const w=worthOf(p.code);
     const badge=w?`<span class="badge" style="background:${w.color}">${w.label}</span>`:"";
     return `<div class="row">
       <span><span class="name">${q?q.name:p.name}</span> <span class="code">${p.code}</span> ${badge}</span>
-      <span class="right"><span class="num">${fmt(price, price<10?4:2)}</span><br><span class="sm mut">${units} 份</span></span>
-      <span class="right"><span class="num">${fmt(mv)}</span><br><span class="num ${cls}">${sign(pnl)}<br>${pct(pnlPct)}</span></span>
+      <span class="right"><span class="num">${price==null?'<span class="mut">无行情</span>':fmt(price, price<10?4:2)}</span><br><span class="sm mut">${units} 份</span></span>
+      <span class="right"><span class="num">${price==null?'<span class="mut">—</span>':fmt(mv)}</span><br><span class="num ${cls}">${pnl==null?'<span class="mut">—</span>':sign(pnl)+'<br>'+pct(pnlPct)}</span></span>
       <button class="act mini ghost" onclick="delPosition('${p.code}')">删</button>
     </div>`;
   });
-  summary.innerHTML = `持仓市值 <b>${fmt(totalMv)}</b> · 持仓成本 <b>${fmt(totalCost)}</b> · 浮动盈亏 <b class="${totalMv-totalCost>=0?'up':'down'}">${sign(totalMv-totalCost)} (${pct(totalCost? (totalMv-totalCost)/totalCost*100:0)})</b> · 现金 ${fmt(bookCash())} · 总资产 ${fmt(totalMv+bookCash())}`;
+  summary.innerHTML = `持仓市值 <b>${fmt(totalMv)}</b> · 持仓成本 <b>${fmt(totalCost)}</b> · 浮动盈亏 <b class="${totalMv-totalCost>=0?'up':'down'}">${sign(totalMv-totalCost)} (${pct(totalCost? (totalMv-totalCost)/totalCost*100:0)})</b> · 现金 ${fmt(bookCash())} · 总资产 ${fmt(totalMv+bookCash())}`
+    + (missing? ` · <b class="down">${missing} 只缺报价</b>`:'');
   $("holdList").innerHTML = `<div class="row" style="font-weight:700;border-bottom:1px solid var(--line)">
     <span>名称 / 代码</span><span class="right">现价 / 数量</span><span class="right">市值 / 盈亏</span><span></span></div>`+rows.join("");
   loadBenchmark();

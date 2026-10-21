@@ -18,6 +18,35 @@ def symbol_for(code):
     return prefix + code
 
 
+def _in_trading_hours(now):
+    """当前北京时间是否在连续交易时段内（含开盘前 09:15 集合竞价）。"""
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return 9 * 60 + 15 <= minutes <= 15 * 60 + 5
+
+
+def _quote_is_fresh(stamp, received_at):
+    """行情快照是否够新。
+
+    盘中按 60 秒卡实时性；**收盘后不能也按 60 秒卡** —— 腾讯在 15:00 之后照样返回
+    当日收盘快照（深市 ETF 还有盘后固定价交易，时间戳会到 16:10+），
+    上一版一律要求 60 秒内，导致每天 15:00 之后 quotes 接口把全部记录丢掉、
+    返回 502，网页端拿不到报价就把现价按 0 渲染，整页变成「盈亏 -100%」。
+    """
+    cn = ZoneInfo("Asia/Shanghai")
+    now = received_at.astimezone(cn)
+    quoted = stamp.astimezone(cn)
+    if quoted.date() == now.date():
+        # 同一天：盘中进行时要求 60 秒内的实时快照，盘后/盘前接受当日快照。
+        if not _in_trading_hours(now):
+            return True
+        return (now - quoted).total_seconds() <= 60
+    # 不同日期：盘前和周末拿到的是上一个交易日的收盘快照，允许；
+    # 但最多 3 天，防止把接口返回的陈旧数据当成有效行情。
+    return 0 < (now.date() - quoted.date()).days <= 3
+
+
 def parse_quotes(body, codes, received_at=None):
     received_at = received_at or datetime.now(timezone.utc)
     if received_at.tzinfo is None:
@@ -47,7 +76,7 @@ def parse_quotes(body, codes, received_at=None):
             continue
         if iopv is not None and (not iopv.is_finite() or iopv <= 0):
             iopv = None
-        if (stamp.astimezone(timezone.utc) - received_at).total_seconds() > 60:
+        if not _quote_is_fresh(stamp, received_at):
             continue
         found[code] = {
             "code": code, "name": fields[1], "price": str(price), "previousClose": str(previous),

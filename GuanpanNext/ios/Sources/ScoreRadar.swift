@@ -28,7 +28,7 @@ struct ScoreRadarChart: View {
 
                 ForEach(dimensions.indices, id: \.self) { index in
                     let dim = dimensions[index]
-                    let radians = (-90.0 + 360.0 * Double(index) / Double(dimensions.count)) * Double.pi / 180
+                    let a = angle(index)
                     VStack(spacing: 0) {
                         Text(dim.title)
                             .font(.system(size: 10, weight: .semibold))
@@ -38,31 +38,43 @@ struct ScoreRadarChart: View {
                             .foregroundStyle(dim.isEstimated ? p.muted : p.terracotta)
                     }
                     .fixedSize()
-                    .position(x: side / 2 + cos(radians) * (radius + labelOffset),
-                              y: side / 2 + sin(radians) * (radius + labelOffset))
+                    .position(x: side / 2 + cos(a) * (radius + labelOffset),
+                              y: side / 2 + sin(a) * (radius + labelOffset))
                 }
             }
         }
         .frame(width: side, height: side)
     }
 
-    /// 第 index 个轴在 fraction（0–1）处的坐标。index 0 在正上方，顺时针递增。
+    /// 第 index 个轴的角度（弧度）。index 0 在正上方，顺时针递增。
+    ///
+    /// 全程用 CGFloat：`cos`/`sin` 的 Double 重载会返回 Double，和 CGFloat 的
+    /// `side`/`radius` 混在一起算，编译器要为这几种重载组合做指数级推断，
+    /// 直接抛 "unable to type-check this expression in reasonable time"，
+    /// 还会连锁报出一堆别的文件的假错误。
+    private func angle(_ index: Int) -> CGFloat {
+        let step = 360.0 / Double(dimensions.count)
+        return CGFloat(-90.0 + step * Double(index)) * .pi / 180.0
+    }
+
+    /// 第 index 个轴在 fraction（0–1）处的坐标。
     private func vertex(_ index: Int, _ fraction: Double) -> CGPoint {
-        let radians = (-90.0 + 360.0 * Double(index) / Double(dimensions.count)) * Double.pi / 180
-        return CGPoint(x: side / 2 + cos(radians) * radius * fraction,
-                       y: side / 2 + sin(radians) * radius * fraction)
+        let a = angle(index)
+        return CGPoint(x: side / 2 + cos(a) * radius * CGFloat(fraction),
+                       y: side / 2 + sin(a) * radius * CGFloat(fraction))
     }
 
     private func draw(context: inout GraphicsContext) {
         let count = dimensions.count
         for ring in [0.25, 0.5, 0.75, 1.0] {
+            let ringWidth: CGFloat = ring == 1.0 ? 1.0 : 0.5
             var ringPath = Path()
             for index in 0..<count {
                 let point = vertex(index, ring)
                 if index == 0 { ringPath.move(to: point) } else { ringPath.addLine(to: point) }
             }
             ringPath.closeSubpath()
-            context.stroke(ringPath, with: .color(p.line), lineWidth: ring == 1 ? 1 : 0.5)
+            context.stroke(ringPath, with: .color(p.line), lineWidth: ringWidth)
         }
         for index in 0..<count {
             var axis = Path()
@@ -112,7 +124,7 @@ struct ScoreRadarBreakdown: View {
                         ZStack(alignment: .leading) {
                             Capsule().fill(p.line.opacity(0.6)).frame(height: 4)
                             Capsule().fill(dim.isEstimated ? p.muted.opacity(0.5) : p.terracotta)
-                                .frame(width: max(4, geo.size.width * min(1, dim.value / 100)), height: 4)
+                                .frame(width: max(4, geo.size.width * CGFloat(min(1, dim.value / 100))), height: 4)
                         }
                     }
                     .frame(height: 4)
