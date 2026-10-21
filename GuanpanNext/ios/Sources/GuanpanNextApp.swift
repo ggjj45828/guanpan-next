@@ -456,9 +456,21 @@ private struct InstrumentDetailScreen: View {
                 }
                 EditorialSection(title: "分红与收息参考", trailing: "历史数据", accent: p.chartGold) {
                     NavigationLink(value: GPRoute.dividends(code)) { IntentRow(icon: "calendar", title: "查看完整派息历史", detail: "登记日、除息日、发放日与数据来源") }.buttonStyle(.plain)
+                    // 先讲清楚"这只到底分不分红"。很多宽基/行业 ETF 成立以来从不分红，
+                    // 以前这里会静默显示 0，看起来像"没数据"，还容易被价格差推算污染。
+                    let hasConfirmed = NextDividendAnalytics.hasConfirmedHistory(code: code, events: dividendEvents)
+                    let knownNone = NextDividendAnalytics.knownNonDividendCodes.contains(code)
+                    GPDataRow(title: "分红属性",
+                              value: hasConfirmed ? "有派息记录" : (knownNone ? "已知不分红" : "暂无可核实派息"),
+                              note: hasConfirmed
+                                ? "以官方派息记录为准；推算值只做参考，不参与股息率评分"
+                                : "没有官方记录就不推算分红，股息率按 0 处理，也不加分")
                     let heldUnits = position?.units ?? 0
-                    GPDataRow(title: "近365日已记录每份派息", value: "¥\(NextMoney.text(recentDividendPerShare, digits: 4))",
-                              note: quote.map { $0.price > 0 ? "按当前价历史收益率 \(NextMoney.text(recentDividendPerShare / $0.price * 100, digits: 2))% · 不代表未来承诺" : "不计算收益率" } ?? "行情价格不可用")
+                    GPDataRow(title: "近365日已记录每份派息",
+                              value: recentDividendPerShare > 0 ? "¥\(NextMoney.text(recentDividendPerShare, digits: 4))" : "—",
+                              note: recentDividendPerShare > 0
+                                ? (quote.map { $0.price > 0 ? "按当前价历史收益率 \(NextMoney.text(recentDividendPerShare / $0.price * 100, digits: 2))% · 不代表未来承诺" : "不计算收益率" } ?? "行情价格不可用")
+                                : "近 12 个月没有已核实的派息")
                     if heldUnits > 0 { GPDataRow(title: "按当前账面份额折算", value: "¥\(NextMoney.text(recentDividendPerShare * Decimal(heldUnits)))", note: "不是历史实际到账金额；请以券商流水为准") }
                     if let dividendProjection {
                         let source = switch dividendProjection.source {

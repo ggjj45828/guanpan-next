@@ -222,8 +222,14 @@ def infer_adjustment_dividends(code, adjusted, raw):
     for before, after in zip(factors, factors[1:]):
         move = after[1] / before[1] - 1
         amount = (before[1] - after[1]) * after[2]
-        if move < Decimal("-0.0025") and amount >= Decimal("0.003"):
-            candidates.append((after[0], amount))
+        # 两条硬约束，缺一条就会把「份额折算 / 数据源复权口径切换」当成分红：
+        # 1. 复权因子跳变不能超过 -20%（真实分红很少超过 5%）；
+        # 2. 单次每份分红不能超过前收盘价的 20%。
+        if not (Decimal("-0.20") < move < Decimal("-0.0025")):
+            continue
+        if amount < Decimal("0.003") or amount > before[2] * Decimal("0.20"):
+            continue
+        candidates.append((after[0], amount))
     merged = []
     for day, amount in candidates:
         if merged and (date.fromisoformat(day) - date.fromisoformat(merged[-1][0])).days <= 8:
@@ -240,17 +246,30 @@ def fetch_dividend_events(code, daily_fetcher=fetch_tencent_daily, stock_fetcher
     # unrelated share-bonus record as ETF cash income.
     is_etf_code = len(code) == 6 and code.isdigit() and code.startswith(("15", "16", "18", "50", "51", "52", "56", "58", "59"))
     if is_etf_code:
+        fund_answered = False
         try:
-            official = fund_fetcher(code); succeeded = True
+            official = fund_fetcher(code); fund_answered = True; succeeded = True
         except Exception: pass
+        # 三种情况要分开处理：
+        # - 官方接口返回了记录   → 用价差补齐历史（历史更完整）；
+        # - 官方接口成功但为空   → **不推断**。不分红的 ETF（半导体设备 560780 这类）
+        #   在 qfq/raw 上同样会因为数据源复权口径或份额折算产生跳变，硬推会得出
+        #   「每份分 2.6 元」，乘上价格就是 300% 股息率，直接把评分带偏；
+        # - 官方接口报错（不知道有没有）→ 仍用价差推断兜底，总比完全没数据好。
+        if official or not fund_answered:
+            try:
+                adjusted = daily_fetcher(code, "qfq"); raw = daily_fetcher(code, "raw")
+                inferred = infer_adjustment_dividends(code, adjusted, raw); succeeded = True
+            except Exception: pass
     else:
         try:
             official = stock_fetcher(code); succeeded = True
         except Exception: pass
-    try:
-        adjusted = daily_fetcher(code, "qfq"); raw = daily_fetcher(code, "raw")
-        inferred = infer_adjustment_dividends(code, adjusted, raw); succeeded = True
-    except Exception: pass
+        # 个股保留价差推断（用来补缺失的除权记录），但同样受上面的硬约束保护。
+        try:
+            adjusted = daily_fetcher(code, "qfq"); raw = daily_fetcher(code, "raw")
+            inferred = infer_adjustment_dividends(code, adjusted, raw); succeeded = True
+        except Exception: pass
     if not succeeded: raise OSError("all dividend data sources unavailable")
     values = {(item["code"], item["date"]): item for item in inferred}
     for item in official: values[(item["code"], item["date"])] = item

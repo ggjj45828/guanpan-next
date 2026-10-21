@@ -64,14 +64,32 @@ enum NextDividendAnalytics {
         NextETFDividendEvent(code: "159545", date: "2025-11-12", amountPerShare: Decimal(string: "0.010")!),
         NextETFDividendEvent(code: "159545", date: "2026-02-11", amountPerShare: Decimal(string: "0.015")!)
     ]
+    /// 已知**不分红**的 ETF：推算事件一律丢掉。官方记录仍然照收 ——
+    /// 万一哪天真的派息，不该被这份名单挡住。
+    /// 560780 半导体设备是用户确认不分红的；159941 纳指ETF 成立以来没有现金分红。
+    static let knownNonDividendCodes: Set<String> = ["159941", "560780"]
+
+    /// 推算事件的金额上限（每份）。ETF 单次现金分红超过 0.5 元/份极罕见，
+    /// 超过基本可以断定是把「份额折算 / 复权口径切换」当成了分红。
+    private static let estimatedAmountCap = Decimal(string: "0.5")!
+
     static func merged(_ supplied: [NextETFDividendEvent]) -> [NextETFDividendEvent] {
         var byKey: [String: NextETFDividendEvent] = [:]
         for item in verifiedHistory + supplied {
+            if item.isEstimated == true {
+                if knownNonDividendCodes.contains(item.code) { continue }
+                if item.amountPerShare > estimatedAmountCap || item.amountPerShare <= 0 { continue }
+            }
             let key = item.id
             if let previous = byKey[key], previous.isEstimated != true && item.isEstimated == true { continue }
             byKey[key] = item
         }
         return byKey.values.sorted { $0.date == $1.date ? $0.code < $1.code : $0.date < $1.date }
+    }
+
+    /// 这只 ETF 是否有任何可信（官方）分红记录。界面用它来决定说"不分红"还是"暂未取到"。
+    static func hasConfirmedHistory(code: String, events: [NextETFDividendEvent]) -> Bool {
+        merged(events).contains { $0.code == code && $0.isEstimated != true }
     }
     static func recentVerifiedPerShare(code: String, events: [NextETFDividendEvent], today: String) -> Decimal {
         let calendar = Calendar(identifier: .gregorian)

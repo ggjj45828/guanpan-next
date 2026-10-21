@@ -898,6 +898,7 @@ struct LocalPreferences: Codable {
             quotes = updated
             rules = updatedRules
             // 名称随报价一起收进名称簿：这样流水、提醒、分红里只存了代码的位置也能显示名字。
+            recordDailySnapshotIfNeeded()
             NextNameBook.remember(pairs: fetched.compactMap { quote in
                 let name = quote.name.trimmingCharacters(in: .whitespaces)
                 return name.isEmpty ? nil : (code: quote.code, name: name)
@@ -911,6 +912,30 @@ struct LocalPreferences: Codable {
             postLocalAlert(level: "行情", fingerprint: "market-refresh-unavailable", title: "行情刷新失败", detail: "\(error.localizedDescription)。当前显示本机缓存，不据此生成新的价格计划。", stamp: NextDataStamp(source: "行情刷新", observedAt: Date(), quality: .stale, detail: "请求失败"))
         }
     }
+    /// 每个「收盘后」留一条资产快照。
+    ///
+    /// 之前 `book.history` 没有任何写入路径 —— 界面上有「区间收益 / 年化 / 基准对比」，
+    /// 但永远显示"快照不足"，因为从来没人写。这里按天补齐：同一天只留一条，
+    /// 取收盘后的总资产，出入金单独记在 externalFlow 里供区间收益剔除。
+    func recordDailySnapshotIfNeeded() {
+        guard !book.positions.isEmpty else { return }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        let now = Date()
+        // 盘中不记：总资产每 10 秒都在变，记下来只是噪音；收盘后再落一条。
+        if NextMarketClock.isRegularSession(now) { return }
+        if let last = book.history.last, calendar.isDate(last.date, inSameDayAs: now) { return }
+        let summary = NextPortfolioCalculator.summary(book: book, quotes: quotes, at: now, mode: .diluted)
+        guard summary.isComplete, summary.totalValue > 0 else { return }
+        let flow = book.cashMovements
+            .filter { calendar.isDate($0.date, inSameDayAs: now) }
+            .reduce(Decimal.zero) { $0 + $1.amount }
+        var updated = book
+        updated.history.append(NextAssetPoint(date: calendar.startOfDay(for: now), total: summary.totalValue, externalFlow: flow))
+        if updated.history.count > 750 { updated.history.removeFirst(updated.history.count - 750) }
+        try? commitRealLedger(updated, action: "记录当日资产快照", reason: "收盘后总资产，用于区间收益")
+    }
+
     /// 只刷新分时（不碰日 K 与 NAS 档案注册），用于盘中每隔一分钟补一次曲线。
     /// 失败就静默保留现有曲线 —— 自动刷新不该弹窗打断人。
     func refreshIntraday(_ code: String) async {
