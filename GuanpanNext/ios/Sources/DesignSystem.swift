@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // Guanpan Pro's native system: editorial warmth for guidance and assets,
 // disciplined data rhythm for market, order book, chart, and quant surfaces.
@@ -9,15 +10,87 @@ enum GPTheme: String, CaseIterable, Identifiable, Codable {
     var colorScheme: ColorScheme? { switch self { case .system, .comfort: nil; case .light: .light; case .dark: .dark } }
 }
 
+/// 字号档位选项。必须是结构体：命名元组不能用作 ForEach 的 id keyPath。
+struct GPScaleOption: Identifiable, Equatable {
+    var id: Double { value }
+    let title: String
+    let value: Double
+}
+
+/// 字体族：系统 / 圆体 / 衬线 / 等宽。只影响通过 `gpFont` 渲染的正文，
+/// 系统控件（导航栏、Tab）跟随系统字体，避免混排出两种排版风格。
+enum GPFontFamily: String, CaseIterable, Identifiable, Codable {
+    case system, rounded, serif, monospaced
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .system: "系统"; case .rounded: "圆体"; case .serif: "衬线"; case .monospaced: "等宽" }
+    }
+    var design: Font.Design {
+        switch self { case .system: .default; case .rounded: .rounded; case .serif: .serif; case .monospaced: .monospaced }
+    }
+}
+
+/// 用户可调外观。颜色用 `0xRRGGBB` 存，nil 表示跟随当前主题。
+/// 字号不直接改 point，而是映射到 Dynamic Type 档位 —— 这样所有系统字体
+/// （导航栏、列表、表单）会一起放大，而不是只有自定义文本变大、系统控件不变。
+struct GPAppearance: Codable, Equatable {
+    var fontScale: Double = 1.0
+    var fontFamily: GPFontFamily = .system
+    var inkHex: UInt32?
+    var paperHex: UInt32?
+    var canvasHex: UInt32?
+
+    var dynamicTypeSize: DynamicTypeSize {
+        switch fontScale {
+        case ..<0.92: return .small
+        case ..<1.0: return .medium
+        case ..<1.12: return .large
+        case ..<1.28: return .xLarge
+        case ..<1.45: return .xxLarge
+        default: return .xxxLarge
+        }
+    }
+    var fontScaleTitle: String {
+        switch fontScale {
+        case ..<0.92: return "小"
+        case ..<1.0: return "稍小"
+        case ..<1.12: return "标准"
+        case ..<1.28: return "大"
+        case ..<1.45: return "特大"
+        default: return "最大"
+        }
+    }
+    var hasCustomColors: Bool { inkHex != nil || paperHex != nil || canvasHex != nil }
+
+    /// 设置页字号档位。值不是 point，而是 Dynamic Type 档位的代表值。
+    /// 用结构体而不是元组：Swift 不支持对命名元组做 keyPath，ForEach(id://.value) 会编译失败。
+    static let scaleOptions: [GPScaleOption] = [
+        GPScaleOption(title: "小", value: 0.88),
+        GPScaleOption(title: "稍小", value: 0.96),
+        GPScaleOption(title: "标准", value: 1.0),
+        GPScaleOption(title: "大", value: 1.20),
+        GPScaleOption(title: "特大", value: 1.36),
+        GPScaleOption(title: "最大", value: 1.50)
+    ]
+}
+
+private struct GPAppearanceKey: EnvironmentKey {
+    static let defaultValue = GPAppearance()
+}
+extension EnvironmentValues {
+    var gpAppearance: GPAppearance { get { self[GPAppearanceKey.self] } set { self[GPAppearanceKey.self] = newValue } }
+}
+
 struct GPPalette {
     let scheme: ColorScheme
     let comfort: Bool
+    var appearance = GPAppearance()
     // The pale blue-lilac paper tint borrows the calm color layering the user
     // liked in the reference, while typography and editorial grouping remain A.
-    var canvas: Color { comfort ? Color(hex: 0xF1F0E5) : scheme == .dark ? Color(hex: 0x131824) : Color(hex: 0xF1F2F9) }
-    var paper: Color { comfort ? Color(hex: 0xFAF9F1) : scheme == .dark ? Color(hex: 0x1B2130) : Color(hex: 0xFCFCFF) }
+    var canvas: Color { appearance.canvasHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0xF1F0E5) : scheme == .dark ? Color(hex: 0x131824) : Color(hex: 0xF1F2F9)) }
+    var paper: Color { appearance.paperHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0xFAF9F1) : scheme == .dark ? Color(hex: 0x1B2130) : Color(hex: 0xFCFCFF)) }
     var raised: Color { comfort ? Color(hex: 0xE8E7DA) : scheme == .dark ? Color(hex: 0x252C3C) : Color(hex: 0xE9EBF4) }
-    var ink: Color { comfort ? Color(hex: 0x263329) : scheme == .dark ? Color(hex: 0xEEF0F8) : Color(hex: 0x252A3B) }
+    var ink: Color { appearance.inkHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0x263329) : scheme == .dark ? Color(hex: 0xEEF0F8) : Color(hex: 0x252A3B)) }
     var muted: Color { comfort ? Color(hex: 0x707568) : scheme == .dark ? Color(hex: 0xA6AEC0) : Color(hex: 0x73798C) }
     var line: Color { comfort ? Color(hex: 0xD8D7CA) : scheme == .dark ? Color(hex: 0x353D50) : Color(hex: 0xDFE2EC) }
     var forest: Color { comfort ? Color(hex: 0x42634E) : scheme == .dark ? Color(hex: 0x9CC8BD) : Color(hex: 0x315D58) }
@@ -44,9 +117,18 @@ extension Color {
     init(hex: UInt32) {
         self.init(.sRGB, red: Double((hex >> 16) & 0xff) / 255, green: Double((hex >> 8) & 0xff) / 255, blue: Double(hex & 0xff) / 255, opacity: 1)
     }
+    /// 存回 `GPAppearance` 用的 0xRRGGBB。取不到分量时返回 nil，界面保持"跟随主题"。
+    var gpHex: UInt32? {
+        let ui = UIColor(self)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        guard ui.getRed(&r, green: &g, blue: &b, alpha: &a) else { return nil }
+        func clamp(_ v: CGFloat) -> UInt32 { UInt32(max(0, min(255, (v * 255).rounded()))) }
+        return (clamp(r) << 16) | (clamp(g) << 8) | clamp(b)
+    }
 }
 
 private struct GPScaledFontModifier: ViewModifier {
+    @Environment(\.gpAppearance) private var appearance
     @ScaledMetric private var scaledSize: CGFloat
     let weight: Font.Weight
     let design: Font.Design
@@ -54,7 +136,11 @@ private struct GPScaledFontModifier: ViewModifier {
         _scaledSize = ScaledMetric(wrappedValue: size, relativeTo: relativeTo)
         self.weight = weight; self.design = design
     }
-    func body(content: Content) -> some View { content.font(.system(size: scaledSize, weight: weight, design: design)) }
+    func body(content: Content) -> some View {
+        // 用户选了字体族就整体替换，否则保留调用处原本的排版意图。
+        let resolved = appearance.fontFamily == .system ? design : appearance.fontFamily.design
+        return content.font(.system(size: scaledSize, weight: weight, design: resolved))
+    }
 }
 extension View {
     func gpFont(size: CGFloat, relativeTo: Font.TextStyle = .body, weight: Font.Weight = .regular, design: Font.Design = .default) -> some View {

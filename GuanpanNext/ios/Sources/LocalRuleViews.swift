@@ -462,14 +462,20 @@ struct PositionEditSheet: View {
     @Environment(\.dismiss) private var dismiss
     let position: NextPosition
     @State private var units = ""
-    @State private var totalCost = ""
+    /// 每份成本（券商叫「买入均价」）。录入/修正都按单价填，合计成本由程序算，
+    /// 这样不会被「总成本 ÷ 份数」的口径绕晕。
+    @State private var perShareCost = ""
     @State private var error: String?
     @State private var confirm = false
 
     private var parsedUnits: Int? { Int(units) }
-    private var parsedCost: Decimal? { try? NextMoney.parse(totalCost) }
+    private var parsedPerShare: Decimal? { try? NextMoney.parse(perShareCost) }
+    private var totalCostValue: Decimal? {
+        guard let parsedUnits, let parsedPerShare else { return nil }
+        return parsedPerShare * Decimal(parsedUnits)
+    }
     private var canSave: Bool {
-        guard let parsedUnits, parsedUnits > 0, let parsedCost, parsedCost > 0 else { return false }
+        guard let parsedUnits, parsedUnits > 0, let parsedPerShare, parsedPerShare > 0 else { return false }
         return true
     }
 
@@ -477,12 +483,12 @@ struct PositionEditSheet: View {
         NavigationStack {
             Form {
                 Section("\(position.name) · \(position.code)") {
-                    TextField("持有份额", text: $units).keyboardType(.numberPad)
-                    TextField("持仓总成本（元）", text: $totalCost).keyboardType(.decimalPad)
-                    Text("当前 \(position.units) 份 · 总成本 ¥\(NextMoney.text(position.bookCost)) · 每份 ¥\(NextMoney.text(position.costPerUnit, digits: 4))")
+                    TextField("持有份数", text: $units).keyboardType(.numberPad)
+                    TextField("每份成本（元）", text: $perShareCost).keyboardType(.decimalPad)
+                    Text("当前 \(position.units) 份 · 每份 ¥\(NextMoney.text(position.costPerUnit, digits: 4)) · 合计 ¥\(NextMoney.text(position.bookCost))")
                         .font(.caption).foregroundStyle(.secondary)
-                    if canSave, let parsedUnits, let parsedCost {
-                        Text("修改后每份成本 ¥\(NextMoney.text(parsedCost / Decimal(parsedUnits), digits: 4))")
+                    if canSave, let totalCostValue, let parsedUnits {
+                        Text("修改后合计成本 ¥\(NextMoney.text(totalCostValue))（\(parsedUnits) 份 × ¥\(NextMoney.text(parsedPerShare ?? 0, digits: 4))）")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -503,17 +509,146 @@ struct PositionEditSheet: View {
             .confirmationDialog("确认修正这条持仓？", isPresented: $confirm, titleVisibility: .visible) {
                 Button("确认保存") {
                     do {
-                        guard let parsedUnits, let parsedCost else { throw NextError.invalid("份额或成本格式无效") }
-                        try model.updatePosition(position.code, units: parsedUnits, totalCost: parsedCost)
+                        guard let parsedUnits, let totalCostValue else { throw NextError.invalid("份数或每份成本格式无效") }
+                        try model.updatePosition(position.code, units: parsedUnits, totalCost: totalCostValue)
                         dismiss()
                     } catch { self.error = error.localizedDescription }
                 }
                 Button("取消", role: .cancel) { }
-            } message: { Text("\(position.code) 改为 \(units) 份 / 总成本 ¥\(totalCost)。") }
+            } message: { Text("\(position.code) 改为 \(units) 份 × 每份 ¥\(perShareCost) = 合计 ¥\(totalCostValue.map { NextMoney.text($0) } ?? "—")。") }
         }
         .onAppear {
             if units.isEmpty { units = String(position.units) }
-            if totalCost.isEmpty { totalCost = NSDecimalNumber(decimal: position.bookCost).stringValue }
+            if perShareCost.isEmpty { perShareCost = NSDecimalNumber(decimal: position.costPerUnit).stringValue }
         }
+    }
+}
+
+
+// MARK: - 值不值得买 · 总览（列表外层）
+
+/// 总览项：评估结果本身不含代码，这里补上以便列表展示与跳转。
+struct WorthOverviewItem: Identifiable {
+    var id: String { code }
+    let code: String
+    let name: String
+    let assessment: NextWorthBuyAssessment
+}
+
+/// 自选 + 持仓一次全部打分，按分数降序。
+/// 只用本机已归档的日 K（≥20 根），不联网、不预测；没日 K 的如实列进「待日K」。
+/// 这样不用逐只点进去才能看到「值不值得买」。
+struct WorthBuyOverviewScreen: View {
+    @EnvironmentObject private var model: NextAppModel
+    @Environment(\.gp) private var p
+    @State private var items: [WorthOverviewItem] = []
+    @State private var missing: [String] = []
+    @State private var computing = true
+
+    private var codes: [String] {
+        model.watch + model.book.positions.map(\.code).filter { !model.watch.contains($0) }
+    }
+    private var portfolioTotal: Double {
+        NextNum.double(model.book.cash) + model.book.positions.reduce(0.0) { sum, item in
+            guard let price = model.quotes[item.code]?.quote.price, price > 0 else { return sum }
+            return sum + NextNum.double(price) * Double(item.units)
+        }
+    }
+    private var counts: (buy: Int, wait: Int, hold: Int) {
+        var buy = 0, wait = 0, hold = 0
+        for item in items {
+            switch item.assessment.action {
+            case "可考虑": buy += 1
+            case "等确认": wait += 1
+            default: hold += 1
+            }
+        }
+        return (buy, wait, hold)
+    }
+
+    var body: some View {
+        GPPageBackground {
+            EditorialSection(title: "值不值得买 · 总览", trailing: "\(items.count)/\(codes.count) 只有分", accent: p.terracotta) {
+                if computing {
+                    GPStatus(title: "正在打分", detail: "只用本机已归档的日 K（≥20 根），不联网、不预测涨跌。", symbol: "hourglass")
+                } else if items.isEmpty {
+                    GPStatus(title: "暂无可打分的标的", detail: "总览只用本机已归档的日 K。点进标的切到「日K」会触发 NAS 拉取，回来再看。", symbol: "chart.bar.doc.horizontal")
+                } else {
+                    HStack(spacing: 20) {
+                        GPValue(label: "可考虑", value: "\(counts.buy)", emphasis: p.risk)
+                        GPValue(label: "等确认", value: "\(counts.wait)", emphasis: p.terracotta)
+                        GPValue(label: "回避", value: "\(counts.hold)", emphasis: p.jade)
+                    }.padding(.bottom, 2)
+                    ForEach(items) { item in WorthOverviewRow(item: item) }
+                    Text("分数 = 技术面基准 + 股息率 + 价格位置 + 溢折价 + 仓位修正。逐条依据点进标的看，不构成投资建议。")
+                        .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                }
+                if !missing.isEmpty {
+                    Text("待日K（\(missing.count) 只）：\(missing.joined(separator: "、"))")
+                        .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .navigationTitle("值不值得买").navigationBarTitleDisplayMode(.inline)
+        .task { await compute() }
+    }
+
+    private func compute() async {
+        computing = true
+        await Task.yield()
+        var scored: [WorthOverviewItem] = []
+        var pending: [String] = []
+        let today = RuleDateText.today()
+        let total = portfolioTotal
+        for code in codes {
+            guard let quote = model.quotes[code]?.quote, quote.price > 0,
+                  let dataset = model.chartData["\(code):day"] else { pending.append(code); continue }
+            let events = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[code] ?? []))
+            let recent = NextDividendAnalytics.recentVerifiedPerShare(code: code, events: events, today: today)
+            let annual: Decimal = recent > 0 ? recent : (NextDividendAnalytics.projectedAnnualPerShare(code: code, events: events, today: today)?.amount ?? 0)
+            let position = model.book.positions.first { $0.code == code }
+            var weight: Double?
+            if total > 0, let position { weight = NextNum.double(quote.price) * Double(position.units) / total * 100 }
+            guard let assessment = NextWorthBuyEngine.evaluate(
+                code: code, price: quote.price, previousClose: quote.previousClose,
+                samples: dataset.orderedSamples, dividendPerShare: annual, iopv: quote.iopv,
+                costPerUnit: position?.costPerUnit, weightPercent: weight,
+                positionLimitPercent: NextNum.double(model.goal.concentrationLimit)) else { pending.append(code); continue }
+            scored.append(WorthOverviewItem(code: code, name: position?.name ?? model.quotes[code]?.quote.name ?? code, assessment: assessment))
+        }
+        items = scored.sorted { $0.assessment.score > $1.assessment.score }
+        missing = pending
+        computing = false
+    }
+}
+
+private struct WorthOverviewRow: View {
+    @Environment(\.gp) private var p
+    let item: WorthOverviewItem
+    private var tone: Color {
+        switch item.assessment.action {
+        case "可考虑": return p.risk
+        case "等确认": return p.terracotta
+        default: return p.jade
+        }
+    }
+    var body: some View {
+        NavigationLink(value: GPRoute.instrument(item.code)) {
+            HStack(alignment: .center, spacing: 10) {
+                Text("\(item.assessment.score)")
+                    .font(.system(size: 19, weight: .semibold, design: .rounded)).monospacedDigit()
+                    .foregroundStyle(tone).frame(width: 36, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name).font(.subheadline.weight(.medium)).foregroundStyle(p.ink).lineLimit(1)
+                    Text("\(item.code) · 日K \(item.assessment.barCount) 根" + (item.assessment.dividendYieldPercent.map { " · 股息率 \(NextNum.percent($0))" } ?? ""))
+                        .font(.caption2).foregroundStyle(p.muted).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Text(item.assessment.action).font(.caption.weight(.semibold)).foregroundStyle(tone)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(tone.opacity(0.12), in: Capsule())
+            }.padding(.vertical, 7)
+            .overlay(alignment: .bottom) { Rectangle().fill(p.line.opacity(0.7)).frame(height: 0.5) }
+        }.buttonStyle(.plain)
     }
 }

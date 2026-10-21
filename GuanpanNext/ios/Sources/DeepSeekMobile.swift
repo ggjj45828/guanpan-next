@@ -45,7 +45,7 @@ enum DeepSeekMobile {
     static func testConnection(key: String, profile: String, session: URLSession = .shared) async throws -> String {
         let model: String
         switch profile {
-        case "flash": model = "deepseek-flash"
+        case "flash": model = "deepseek-v4-flash"
         case "pro": model = "deepseek-v4-pro"
         default: throw DeepSeekError.invalidProfile
         }
@@ -71,7 +71,7 @@ enum DeepSeekMobile {
     static func analyze(prompt: String, key: String, profile: String, session: URLSession = .shared) async throws -> (model: String, content: String) {
         let model: String
         switch profile {
-        case "flash": model = "deepseek-flash"
+        case "flash": model = "deepseek-v4-flash"
         case "pro": model = "deepseek-v4-pro"
         default: throw DeepSeekError.invalidProfile
         }

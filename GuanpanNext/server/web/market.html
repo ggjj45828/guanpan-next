@@ -149,6 +149,7 @@ details.exlist .body{padding:6px 10px}
         <input id="aiCode" maxlength="6" placeholder="代码" style="width:90px" value="159941">
         <button class="act mini" onclick="loadResearch()">看缓存</button>
         <button class="act mini" onclick="runAI()">跑 AI 分析</button>
+        <button class="act mini" onclick="verifyAI()">验证 AI</button>
       </div>
       <div id="aiBody" class="sm mut">输入代码查询。</div>
     </div>
@@ -432,7 +433,27 @@ function fwdAdj(bars, events){
     return {date:b.date,open:adj(b.open),high:adj(b.high),low:adj(b.low),close:Math.max(0,Number(b.close)-later)};
   });
 }
-function redrawChart(){ if(isDay()) drawDaily(); else drawIntraday(); }
+// ---------- 画布尺寸：按设备像素比渲染，避免高分屏被拉糊 ----------
+// 逻辑坐标固定宽 900；高度随容器宽度自适应（CSS 高度与逻辑高度严格等比，
+// 所以横纵缩放系数相同，文字不会变形）。之前固定 900x600 再被 CSS 拉伸，
+// 大屏/高 DPR 下就是「分辨率不够」的来源。
+let CVW=900, CVH=600;
+function fitCanvas(){
+  const cv=$("chartCanvas");
+  const host=cv.parentElement||document.body;
+  const cssW=Math.max(300, Math.round(cv.clientWidth||host.clientWidth||900));
+  const cssH=Math.max(420, Math.min(880, Math.round(cssW*0.62)));
+  const dpr=Math.max(1, Math.min(3, window.devicePixelRatio||1));
+  const pw=Math.round(cssW*dpr), ph=Math.round(cssH*dpr);
+  if(cv.width!==pw) cv.width=pw;
+  if(cv.height!==ph) cv.height=ph;
+  cv.style.height=cssH+"px";
+  CVW=900; CVH=Math.round(900*cssH/cssW);
+  const ctx=cv.getContext("2d");
+  ctx.setTransform(pw/CVW,0,0,ph/CVH,0,0);
+  ctx.save(); ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,pw,ph); ctx.restore();
+}
+function redrawChart(){ fitCanvas(); if(isDay()) drawDaily(); else drawIntraday(); }
 function setLegend(html){ $("chartLegend").innerHTML=html; }
 function avg(a){ return a.length? a.reduce((s,x)=>s+x,0)/a.length : null; }
 function bookCostFor(code){ const p=BOOK&&BOOK.positions.find(p=>p.code===code); return p&&Number(p.units)? Number(p.bookCost)/Number(p.units):0; }
@@ -452,7 +473,7 @@ function drawMACD(ctx,W,L,R,xs,xe,macd,MT,MB){
 }
 
 function drawDaily(){
-  const cv=$("chartCanvas"); const ctx=cv.getContext("2d"); const W=cv.width,H=cv.height;
+  const cv=$("chartCanvas"); const ctx=cv.getContext("2d"); const W=CVW,H=CVH;
   ctx.clearRect(0,0,W,H);
   const all=CHART.bars||[];
   if(all.length<2){ $("chartInfo").textContent="日K数据不足（需≥2根，可能尚未归档）"; setLegend(""); return; }
@@ -467,7 +488,7 @@ function drawDaily(){
   const pad=(hi-lo)*0.08||hi*0.02; lo-=pad; hi+=pad;
   const costP=bookCostFor(CHART.code);
   const L=52, R=W-18, T=14;
-  const mB=330, vT=346, vB=410, MT=426, MB=566, labY=586;
+  const mB=H*0.550, vT=H*0.577, vB=H*0.683, MT=H*0.710, MB=H*0.943, labY=H*0.977;
   const x=i=> L + (i-s)/(e-s||1)*(R-L);
   const y=v=> mB - (v-lo)/(hi-lo)*(mB-T);
   ctx.fillStyle="#6b756e"; ctx.font="11px sans-serif"; ctx.textAlign="right";
@@ -495,7 +516,7 @@ function drawDaily(){
 }
 
 function drawIntraday(){
-  const cv=$("chartCanvas"); const ctx=cv.getContext("2d"); const W=cv.width,H=cv.height;
+  const cv=$("chartCanvas"); const ctx=cv.getContext("2d"); const W=CVW,H=CVH;
   ctx.clearRect(0,0,W,H);
   const rows=CHART.rows||[];
   if(rows.length<2){ $("chartInfo").textContent="今日分时尚未归档（需在 App 前台采集或等待 NAS 采集）"; setLegend(""); return; }
@@ -503,7 +524,7 @@ function drawIntraday(){
   const pad=(hi-lo)*0.1||hi*0.02; lo-=pad; hi+=pad;
   const prev = CHART.prevClose && CHART.prevClose>0 ? CHART.prevClose : (lo+hi)/2;
   // layout: 价格区 + 成交量区
-  const L=58, R=W-58, T=14, pB=330, vT=346, vB=410, MT=426, MB=566, tY=586;
+  const L=58, R=W-58, T=14, pB=H*0.550, vT=H*0.577, vB=H*0.683, MT=H*0.710, MB=H*0.943, tY=H*0.977;
   const X=s=>{ const d=new Date(s.timestamp); const m=d.getHours()*60+d.getMinutes()+(d.getSeconds()/60); const t0=9.5*60, tn=15*60; const frac=(m-t0)/(tn-t0); return L+Math.max(0,Math.min(1,frac))*(R-L); };
   const y=v=> pB - (v-lo)/(hi-lo)*(pB-T);
   // 累计均价
@@ -555,8 +576,8 @@ function openIndex(symbol,name){ CHART.code=symbol; CHART.name=name; $("chartCod
     if(!CHART.view) CHART.view={s:0,e:all.length-1};
     let span=CHART.view.e-CHART.view.s; if(span<1) span=all.length-1;
     const factor=e.deltaY>0?1.15:0.86; let nspan=Math.max(5,Math.round(span*factor));
-    const rect=cv.getBoundingClientRect(); const cx=(e.clientX-rect.left)/rect.width*cv.width;
-    const L=52,R=cv.width-18; const frac=Math.max(0,Math.min(1,(cx-L)/(R-L)));
+    const rect=cv.getBoundingClientRect(); const cx=(e.clientX-rect.left)/rect.width*CVW;
+    const L=52,R=CVW-18; const frac=Math.max(0,Math.min(1,(cx-L)/(R-L)));
     const center=Math.round(CHART.view.s+frac*span);
     let ns=center-Math.floor(nspan/2), ne=ns+nspan-1;
     if(ns<0){ne-=ns;ns=0;} if(ne>all.length-1){ns-=(ne-(all.length-1));ne=all.length-1;} if(ns<0)ns=0;
@@ -574,6 +595,7 @@ function openIndex(symbol,name){ CHART.code=symbol; CHART.name=name; $("chartCod
     e.preventDefault();
   }, {passive:false});
   cv.addEventListener('touchend', ()=>touch=null);
+  window.addEventListener('resize', ()=>{ if(CHART.code) redrawChart(); });
   function RorL(){ return (CHART.bars||[]).length; } // 平移灵敏度用全长估算
 })();
 
@@ -598,6 +620,23 @@ async function loadDividends(){
 }
 
 // ---------- 研究 / AI ----------
+// 真实连通性验证：让 NAS 用配置好的 key 发一条最小请求，不携带任何持仓数据。
+async function verifyAI(){
+  const body=$("aiBody"); body.className="sm mut"; body.textContent="正在让 NAS 向 DeepSeek 发一条最小验证请求…";
+  try{
+    const v=await api("/v1/ai/verify");
+    body.className="";
+    body.innerHTML='<div class="status ok">DeepSeek 连通 ✓</div>'
+      + '<div class="row"><span>模型</span><span class="right">'+(v.model||'–')+'</span></div>'
+      + '<div class="row"><span>档案</span><span class="right">'+(v.profile||'–')+'</span></div>'
+      + '<div class="sm mut" style="margin-top:6px">'+(v.message||'')+'</div>';
+  }catch(e){
+    body.className="";
+    body.innerHTML='<div class="status err">验证失败：'+e.message+'</div>'
+      + '<div class="sm mut" style="margin-top:6px">常见原因：NAS 未填 DEEPSEEK_API_KEY、key 失效、NAS 出不了外网、模型名不被支持。</div>';
+  }
+}
+
 async function loadResearch(){
   const code=$("aiCode").value.trim(); if(!isSix(code)){toast("请输入6位代码");return;}
   const body=$("aiBody"); body.className="sm mut"; body.textContent="读取缓存…";

@@ -5,6 +5,23 @@ struct NextNASStatus {
     let hasBook: Bool
     let book: NextBook?
 }
+/// NAS 上保存的账本历史版本。每次写入 NAS 都会留一份完整 JSON，
+/// 这里只取元数据，免得一次拉回几十份整账本。
+struct NextNASBookVersion: Decodable, Identifiable {
+    let revision: Int
+    let bytes: Int
+    let current: Bool
+    var id: Int { revision }
+    var sizeText: String {
+        bytes >= 1024 ? String(format: "%.1f KB", Double(bytes) / 1024) : "\(bytes) B"
+    }
+}
+struct NextNASBookHistory: Decodable {
+    let bookId: String
+    let current: Int
+    let versions: [NextNASBookVersion]
+}
+
 struct NextNASHealth: Decodable {
     let service: String
     let schemaVersion: Int
@@ -302,6 +319,42 @@ enum NextNASService {
         guard http.statusCode == 200 else { throw NextError.invalid("NAS 保存失败（HTTP \(http.statusCode)），本机账本未修改") }
         return try JSONDecoder().decode(RevisionResponse.self, from: data).revision
     }
+    /// 列出 NAS 上的账本历史版本。
+    static func readBookHistory(baseURL: String, session: URLSession = .shared) async throws -> NextNASBookHistory {
+        let url = try endpoint(baseURL).appendingPathComponent("history")
+        let (data, response) = try await session.data(for: URLRequest(url: url, timeoutInterval: 10))
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NextError.invalid("NAS 备份版本读取失败（\((response as? HTTPURLResponse).map { String($0.statusCode) } ?? "无响应")）")
+        }
+        return try JSONDecoder().decode(NextNASBookHistory.self, from: data)
+    }
+
+    /// 删除 NAS 上的某一个历史版本。当前生效版本服务端会拒绝（409）。
+    static func deleteBookVersion(_ revision: Int, baseURL: String, session: URLSession = .shared) async throws {
+        let url = try endpoint(baseURL).appendingPathComponent("history").appendingPathComponent(String(revision))
+        var request = URLRequest(url: url, timeoutInterval: 10); request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw NextError.invalid("NAS 没有返回 HTTP 状态") }
+        if http.statusCode == 409 { throw NextError.invalid("这是当前生效版本，不能删除；先推送一次新版本再删") }
+        guard http.statusCode == 200 else {
+            let message = (try? JSONDecoder().decode([String: String].self, from: data))?["error"] ?? "HTTP \(http.statusCode)"
+            throw NextError.invalid("删除失败：\(message)")
+        }
+    }
+
+    /// 只保留最近 `keep` 个版本，返回被删掉的个数。
+    static func pruneBookHistory(keep: Int, baseURL: String, session: URLSession = .shared) async throws -> Int {
+        var components = URLComponents(url: try endpoint(baseURL).appendingPathComponent("history"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "keep", value: String(keep))]
+        var request = URLRequest(url: components.url!, timeoutInterval: 15); request.httpMethod = "DELETE"
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NextError.invalid("清理失败（\((response as? HTTPURLResponse).map { String($0.statusCode) } ?? "无响应")）")
+        }
+        struct PruneResult: Decodable { let removed: Int }
+        return try JSONDecoder().decode(PruneResult.self, from: data).removed
+    }
+
     static func fetchMinute(code: String, day: Date, baseURL: String, session: URLSession = .shared) async throws -> NextChartDataset {
         guard code.count == 6, code.allSatisfy(\.isNumber) else { throw NextError.invalid("证券代码无效") }
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")

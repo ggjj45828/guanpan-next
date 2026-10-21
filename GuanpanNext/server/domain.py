@@ -374,6 +374,63 @@ class NextDatabase:
             db.execute("INSERT INTO real_book_history VALUES (?, ?, ?)", (book_id, revision, book_json))
         return revision
 
+    def real_history(self, book_id):
+        """NAS 侧保存的账本版本列表（每次写入都会留一份完整 JSON）。
+
+        只返回元数据，不回传整份账本 —— 网页/手机要恢复某个版本时再单取。
+        """
+        self.validate_id(book_id)
+        with self.connect() as db:
+            current = db.execute("SELECT revision FROM real_books WHERE id=?", (book_id,)).fetchone()
+            rows = db.execute(
+                "SELECT revision, length(body) FROM real_book_history WHERE id=? ORDER BY revision DESC",
+                (book_id,)).fetchall()
+        latest = current[0] if current else 0
+        return {"bookId": book_id, "current": latest,
+                "versions": [{"revision": r, "bytes": size, "current": r == latest} for r, size in rows]}
+
+    def real_history_body(self, book_id, revision):
+        self.validate_id(book_id)
+        if type(revision) is not int or revision <= 0:
+            raise InvalidData("invalid revision")
+        with self.connect() as db:
+            row = db.execute("SELECT body FROM real_book_history WHERE id=? AND revision=?",
+                             (book_id, revision)).fetchone()
+        if not row:
+            raise InvalidData("revision not found")
+        return {"revision": revision, "bookJSON": row[0]}
+
+    def delete_real_history(self, book_id, revision):
+        """删除一个历史版本。当前生效版本不能删 —— 删了就没有可回滚的锚点。"""
+        self.validate_id(book_id)
+        if type(revision) is not int or revision <= 0:
+            raise InvalidData("invalid revision")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT revision FROM real_books WHERE id=?", (book_id,)).fetchone()
+            if current and current[0] == revision:
+                raise Conflict("cannot delete the current revision; write a new revision first")
+            cursor = db.execute("DELETE FROM real_book_history WHERE id=? AND revision=?", (book_id, revision))
+            if cursor.rowcount == 0:
+                raise InvalidData("revision not found")
+        return revision
+
+    def prune_real_history(self, book_id, keep=20):
+        """只保留最近 keep 个版本（含当前版本），更早的删掉。返回被删数量。"""
+        self.validate_id(book_id)
+        if type(keep) is not int or keep < 1:
+            raise InvalidData("keep must be a positive integer")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT revision FROM real_books WHERE id=?", (book_id,)).fetchone()
+            latest = current[0] if current else 0
+            rows = db.execute("SELECT revision FROM real_book_history WHERE id=? ORDER BY revision DESC",
+                              (book_id,)).fetchall()
+            doomed = [r for (r,) in rows[keep:] if r != latest]
+            for revision in doomed:
+                db.execute("DELETE FROM real_book_history WHERE id=? AND revision=?", (book_id, revision))
+        return len(doomed)
+
     def get_legacy_inbox(self, inbox_id="main"):
         self.validate_id(inbox_id)
         with self.connect() as db:

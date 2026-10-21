@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
-from ai import provider_status, analyze_user_context, AIProviderError, profile_from_environment
+from ai import provider_status, verify_provider, analyze_user_context, AIProviderError, profile_from_environment
 from domain import Conflict, InvalidData, NextDatabase, convert_legacy_web_book
 from market import fetch_indices, fetch_tencent_quotes, fetch_tencent_daily, fetch_dividend_events, fetch_kline, symbol_for
 from workers import start_workers
@@ -56,6 +56,14 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
             if path == "/health":
                 return self.reply(200, {"service": "guanpan-next", "schemaVersion": 1, "authentication": "none", "web": True,
                                         "workers": database.worker_health(), "aiProvider": provider_status()})
+            if path == "/v1/ai/verify":
+                # 真实连通性探针：只发一句 "Reply with OK only."，不携带任何持仓数据。
+                try:
+                    return self.reply(200, verify_provider())
+                except AIProviderError as error:
+                    return self.reply(503, {"state": "unavailable", "error": str(error), "message": str(error)})
+                except Exception:
+                    return self.reply(502, {"state": "unavailable", "error": "DeepSeek 连通性验证失败", "message": "DeepSeek 连通性验证失败"})
             if path == "/api/data":
                 try: return self.reply(200, {"ok": True, **database.get_legacy_inbox("main")})
                 except InvalidData as error: return self.reply(400, {"error": str(error)})
@@ -149,9 +157,37 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                 except Exception:
                     return self.reply(502, {"error": "quote source unavailable; local cache remains authoritative"})
             if path.startswith("/v1/real/books/"):
-                try: return self.reply(200, database.get_real(path.rsplit("/", 1)[-1]))
-                except InvalidData as error: return self.reply(400, {"error": str(error)})
+                parts = path.strip("/").split("/")
+                try:
+                    # /v1/real/books/<id>/history        版本列表
+                    # /v1/real/books/<id>/history/<rev>  单个版本正文
+                    if len(parts) >= 5 and parts[4] == "history":
+                        if len(parts) == 6:
+                            return self.reply(200, database.real_history_body(parts[3], int(parts[5])))
+                        return self.reply(200, database.real_history(parts[3]))
+                    return self.reply(200, database.get_real(parts[3]))
+                except (InvalidData, ValueError) as error: return self.reply(400, {"error": str(error)})
             self.reply(404, {"error": "unknown route"})
+
+        def do_DELETE(self):
+            """删除 NAS 上保存的账本历史版本。
+
+            当前生效版本不允许删；`DELETE .../history?keep=N` 只保留最近 N 个。
+            """
+            parsed = urlparse(self.path); path = parsed.path
+            parts = path.strip("/").split("/")
+            try:
+                if len(parts) >= 4 and parts[:3] == ["v1", "real", "books"] and len(parts) >= 5 and parts[4] == "history":
+                    book_id = parts[3]
+                    if len(parts) == 6:
+                        revision = database.delete_real_history(book_id, int(parts[5]))
+                        return self.reply(200, {"ok": True, "deleted": revision})
+                    keep = int(parse_qs(parsed.query).get("keep", ["20"])[0])
+                    removed = database.prune_real_history(book_id, keep)
+                    return self.reply(200, {"ok": True, "kept": keep, "removed": removed})
+                return self.reply(404, {"error": "unknown route"})
+            except Conflict as error: return self.reply(409, {"error": str(error)})
+            except (InvalidData, ValueError) as error: return self.reply(400, {"error": str(error)})
 
         def do_POST(self):
             path = urlparse(self.path).path

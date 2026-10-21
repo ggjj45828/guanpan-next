@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
     var body: some Scene { WindowGroup { RootView().environmentObject(model) } }
 }
 
-enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, twin(NextTwinStrategy) }
+enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, twin(NextTwinStrategy) }
 private extension GPRoute {
     var persisted: NextRoute {
         switch self {
@@ -19,6 +19,7 @@ private extension GPRoute {
         case .fills: .fills
         case .history: .history
         case .backups: .backups
+        case .worthOverview: .intent("worth", "")
         case .twin(let strategy): .twin(strategy.rawValue)
         }
     }
@@ -29,6 +30,7 @@ private extension GPRoute {
         case .intent(let action, let code):
             if action == "decision" { .decision(code.isEmpty ? nil : code) }
             else if action == "dividends" { .dividends(code.isEmpty ? nil : code) }
+            else if action == "worth" { .worthOverview }
             else { nil }
         case .settings: .settings
         case .alerts: .alerts
@@ -61,8 +63,10 @@ struct RootView: View {
             PrimaryNavigation(title: "量化实验室", tab: .laboratory) { LaboratoryScreen() }.tabItem { Label("量化", systemImage: "waveform.path.ecg.rectangle") }.tag(NextTab.laboratory)
             PrimaryNavigation(title: "资产", tab: .assets) { AssetsScreen() }.tabItem { Label("资产", systemImage: "circle.hexagongrid") }.tag(NextTab.assets)
         }
-        .tint(GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort).forest)
-        .environment(\.gp, GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort))
+        .tint(GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort, appearance: model.preferences.appearance).forest)
+        .environment(\.gp, GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort, appearance: model.preferences.appearance))
+        .environment(\.gpAppearance, model.preferences.appearance)
+        .dynamicTypeSize(model.preferences.appearance.dynamicTypeSize)
         .preferredColorScheme(model.theme.colorScheme)
         .sheet(isPresented: $model.showSearch) { SearchSheet() }
         .alert("观盘 Pro", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
@@ -167,6 +171,7 @@ private struct RouteDestination: View {
         case .fills: LedgerHistoryScreen()
         case .history: DecisionHistoryScreen()
         case .backups: BackupRestoreScreen()
+        case .worthOverview: WorthBuyOverviewScreen()
         case .twin(let strategy): TwinDetailScreen(strategy: strategy)
         }
     }
@@ -274,12 +279,28 @@ private struct MarketScreen: View {
         default: return model.watch + model.book.positions.map(\.code).filter { !model.watch.contains($0) }
         }
     }
+    private var scoredCount: Int { visibleCodes.filter { model.chartData["\($0):day"] != nil }.count }
     var body: some View {
         List {
             Section {
                 GlobalIndexStrip()
             }
             .listRowBackground(p.canvas)
+            .listRowSeparator(.hidden)
+            Section {
+                NavigationLink(value: GPRoute.worthOverview) {
+                    HStack(spacing: 9) {
+                        Image(systemName: "gauge.with.dots.needle.50percent").font(.system(size: 15)).foregroundStyle(p.terracotta)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("值不值得买 · 总览").font(.subheadline.weight(.semibold)).foregroundStyle(p.ink)
+                            Text("本机规则打分 · \(visibleCodes.count) 只标的，已归档日K \(scoredCount) 只").font(.caption2).foregroundStyle(p.muted)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(p.muted)
+                    }.padding(.vertical, 4)
+                }
+            }
+            .listRowBackground(p.paper)
             .listRowSeparator(.hidden)
             Section {
                 HStack(alignment: .top) { Text("用熟悉的证券代码开始，详情里再展开行情、图表与研究。").font(.subheadline).foregroundStyle(p.muted); Spacer(); Button { Task { await model.refreshQuotes(codes: visibleCodes) } } label: { Label("刷新", systemImage: "arrow.clockwise").font(.caption.weight(.semibold)) }.disabled(visibleCodes.isEmpty) }
@@ -511,6 +532,26 @@ private struct DecisionScreen: View {
     @State private var requestingMobileAI = false
     @State private var showNASAIConsent = false
     @State private var mobileAIKeyAvailable = DeepSeekMobile.loadKey() != nil
+
+    // MARK: 外观（字号 / 字体 / 自定义颜色）
+    private var appearance: GPAppearance { model.preferences.appearance }
+    private func updateAppearance(_ mutate: (inout GPAppearance) -> Void) {
+        var next = model.preferences.appearance
+        mutate(&next)
+        model.saveAppearance(next)
+    }
+    private var inkBinding: Binding<Color> {
+        Binding(get: { appearance.inkHex.map { Color(hex: $0) } ?? p.ink },
+                set: { hex in if let value = hex.gpHex { updateAppearance { $0.inkHex = value } } })
+    }
+    private var paperBinding: Binding<Color> {
+        Binding(get: { appearance.paperHex.map { Color(hex: $0) } ?? p.paper },
+                set: { hex in if let value = hex.gpHex { updateAppearance { $0.paperHex = value } } })
+    }
+    private var canvasBinding: Binding<Color> {
+        Binding(get: { appearance.canvasHex.map { Color(hex: $0) } ?? p.canvas },
+                set: { hex in if let value = hex.gpHex { updateAppearance { $0.canvasHex = value } } })
+    }
     @State private var patientLimitPrice = ""
     @State private var patientLimitUnits = "100"
     @State private var patientLimitExpiry = Calendar.current.date(byAdding: .day, value: 30, to: Date()) ?? Date().addingTimeInterval(30 * 86400)
@@ -1238,7 +1279,22 @@ private struct AddPositionSheet: View {
     @State private var lookupStatus = "输入 6 位代码后自动查询名称"
     var body: some View {
         NavigationStack {
-            Form { Section("证券信息") { TextField("6 位场内代码", text: $code).keyboardType(.numberPad); TextField("名称（自动填入）", text: $name); Text(lookupStatus).font(.caption).foregroundStyle(.secondary); TextField("数量", text: $units).keyboardType(.numberPad); TextField("持仓总成本", text: $cost).keyboardType(.decimalPad) }; Section { Text("只写入你确认的新场内账本。不会自动导入旧版混合资产。真实交易由你在券商完成。").font(.caption).foregroundStyle(p.muted) } }
+            Form {
+                Section("证券信息") {
+                    TextField("6 位场内代码", text: $code).keyboardType(.numberPad)
+                    TextField("名称（自动填入）", text: $name)
+                    Text(lookupStatus).font(.caption).foregroundStyle(.secondary)
+                    TextField("份数（股 / 份）", text: $units).keyboardType(.numberPad)
+                    TextField("每份成本（元）", text: $cost).keyboardType(.decimalPad)
+                    if let u = Int(units), let c = try? NextMoney.parse(cost) {
+                        GPDataRow(title: "合计成本（自动计算）", value: "¥\(NextMoney.text(c * Decimal(u)))",
+                                  note: "\(u) 份 × ¥\(NextMoney.text(c, digits: 4)) · 券商里这个价叫「买入均价」")
+                    }
+                }
+                Section {
+                    Text("录入持仓只记录**当前事实**：份数 + 每份买入成本。它不产生买入流水，因此**不会计算摊薄成本**——摊薄成本只由买入/卖出流水推导，在「资产流水」里才成立。").font(.caption).foregroundStyle(p.muted)
+                }
+            }
                 .navigationTitle("录入持仓").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
                 .onChange(of: code) { _, value in
                     guard value.count == 6, value.allSatisfy(\.isNumber) else { name = ""; lookupStatus = "输入 6 位代码后自动查询名称"; return }
@@ -1251,7 +1307,7 @@ private struct AddPositionSheet: View {
                     }
                 }
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("核对并保存") { confirm = true }.disabled(code.count != 6 || name.isEmpty || Int(units) == nil || cost.isEmpty) } }
-                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let c = try? NextMoney.parse(cost) else { return }; onSave(code, name, u, c); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份 · 成本 ¥\(cost)。保存后会产生可审计记录。") }
+                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let c = try? NextMoney.parse(cost) else { return }; onSave(code, name, u, c * Decimal(u)); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份 × 每份 ¥\(cost) = 合计 ¥\(NextMoney.text((try? NextMoney.parse(cost)).map { $0 * Decimal(Int(units) ?? 0) } ?? 0))。保存后会产生可审计记录。") }
         }
     }
     let onSave: (String, String, Int, Decimal) -> Void
@@ -1350,7 +1406,26 @@ private struct SettingsScreen: View {
         GPPageBackground {
             VStack(alignment: .leading, spacing: 0) {
                 Text("用舒适的方式查看市场").font(.system(.title2, design: .serif).weight(.semibold)).foregroundStyle(p.ink).padding(.top, 8)
-                EditorialSection(title: "外观") { Picker("主题", selection: Binding(get: { model.theme }, set: model.saveTheme)) { ForEach(GPTheme.allCases) { Text($0.title).tag($0) } }.pickerStyle(.segmented).accessibilityIdentifier("settings.theme"); Text("字体大小跟随 iOS 动态字体设置；减少动态效果跟随系统辅助功能。").font(.caption).foregroundStyle(p.muted) }
+                EditorialSection(title: "外观", accent: p.chartViolet) {
+                    Picker("主题", selection: Binding(get: { model.theme }, set: model.saveTheme)) { ForEach(GPTheme.allCases) { Text($0.title).tag($0) } }.pickerStyle(.segmented).accessibilityIdentifier("settings.theme")
+                    Picker("字号", selection: Binding(get: { appearance.fontScale }, set: { value in updateAppearance { $0.fontScale = value } })) {
+                        ForEach(GPAppearance.scaleOptions, id: \.value) { option in Text(option.title).tag(option.value) }
+                    }.pickerStyle(.segmented).accessibilityIdentifier("settings.fontScale")
+                    Picker("字体", selection: Binding(get: { appearance.fontFamily }, set: { value in updateAppearance { $0.fontFamily = value } })) {
+                        ForEach(GPFontFamily.allCases) { Text($0.title).tag($0) }
+                    }.pickerStyle(.segmented).accessibilityIdentifier("settings.fontFamily")
+                    ColorPicker("文字颜色", selection: inkBinding, supportsOpacity: false)
+                        .accessibilityIdentifier("settings.inkColor")
+                    ColorPicker("卡片颜色", selection: paperBinding, supportsOpacity: false)
+                        .accessibilityIdentifier("settings.paperColor")
+                    ColorPicker("背景颜色", selection: canvasBinding, supportsOpacity: false)
+                        .accessibilityIdentifier("settings.canvasColor")
+                    if appearance.hasCustomColors {
+                        Button("恢复主题默认颜色") { updateAppearance { $0.inkHex = nil; $0.paperHex = nil; $0.canvasHex = nil } }
+                            .font(.caption.weight(.semibold)).tint(p.forest)
+                    }
+                    Text("字号改的是系统动态字体档位，导航栏、列表、表单会一起放大；颜色是在当前主题之上做覆盖。").font(.caption).foregroundStyle(p.muted)
+                }
                 EditorialSection(title: "通知与提醒") { NavigationLink(value: GPRoute.alerts) { IntentRow(icon: "bell.badge", title: "提醒和通知中心", detail: "价格、风险、限价计划与 NAS 状态") } }
                 EditorialSection(title: "账本与数据") { NavigationLink(value: GPRoute.fills) { IntentRow(icon: "list.bullet.rectangle", title: "审计记录", detail: "真实资产修改、撤销和版本") }; NavigationLink(value: GPRoute.backups) { IntentRow(icon: "externaldrive", title: "备份与恢复", detail: "数据隔离、校验、确认恢复") } }
                 EditorialSection(title: "连接状态") { GPDataRow(title: "行情服务", value: model.status); GPDataRow(title: "NAS 服务", value: model.syncStatus); GPDataRow(title: "同步通道", value: "个人资产手动 · 行情独立 · 研究独立") }
@@ -1597,6 +1672,7 @@ private struct LedgerHistoryScreen: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
     @State private var exportURL: URL?
+    @State private var pendingFillDelete: UUID?
     var body: some View {
         GPPageBackground {
             EditorialSection(title: "账本修改审计", trailing: "\(model.ledger.events.count) 条") {
@@ -1620,14 +1696,31 @@ private struct LedgerHistoryScreen: View {
                 ForEach(model.book.cashMovements.reversed()) { flow in GPDataRow(title: flow.reason, value: "\(flow.amount >= 0 ? "+" : "")¥\(NextMoney.text(flow.amount))", note: flow.date.formatted(date: .numeric, time: .shortened)) }
                 ForEach(model.book.fills.reversed()) { fill in
                     let buy = fill.side == "buy"
-                    GPDataRow(title: "\(fill.code) · \(buy ? "买入" : "卖出")",
-                              value: "\(fill.units) 份 × ¥\(NextMoney.text(fill.price, digits: 4))",
-                              note: "手续费 ¥\(NextMoney.text(fill.fee))" + (buy ? "" : " · 已实现 \(fill.realized >= 0 ? "+" : "")¥\(NextMoney.text(fill.realized))") + " · \(fill.date.formatted(date: .numeric, time: .shortened))",
-                              valueColor: buy ? p.risk : p.jade)
+                    HStack(alignment: .center, spacing: 6) {
+                        GPDataRow(title: "\(fill.code) · \(buy ? "买入" : "卖出")",
+                                  value: "\(fill.units) 份 × ¥\(NextMoney.text(fill.price, digits: 4))",
+                                  note: "手续费 ¥\(NextMoney.text(fill.fee))" + (buy ? "" : " · 已实现 \(fill.realized >= 0 ? "+" : "")¥\(NextMoney.text(fill.realized))") + " · \(fill.date.formatted(date: .numeric, time: .shortened))",
+                                  valueColor: buy ? p.risk : p.jade)
+                        Button { pendingFillDelete = fill.id } label: {
+                            Image(systemName: "trash").font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(p.risk.opacity(0.85)).frame(width: 30, height: 30)
+                        }.buttonStyle(.plain).accessibilityLabel("删除这条流水")
+                    }
                 }
+                if model.book.fills.isEmpty { Text("暂无成交流水。删除流水会同步回滚该笔对持仓与现金的影响。").font(.caption2).foregroundStyle(p.muted) }
                 ForEach(model.book.incomeEvents.reversed()) { income in GPDataRow(title: "\(income.kind.title) · \(income.name) · \(income.status.title)", value: "+¥\(NextMoney.text(income.netAmount))", note: "\(income.status == .received ? income.receivedAt?.formatted(date: .numeric, time: .shortened) ?? "已到账" : "预计到账 \(income.payDate.formatted(date: .numeric, time: .omitted))") · 税前 ¥\(NextMoney.text(income.grossAmount)) · 税费 ¥\(NextMoney.text(income.tax))") }
             }
         }.navigationTitle("资产流水与审计").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
+        .confirmationDialog("删除这条成交流水？", isPresented: Binding(get: { pendingFillDelete != nil }, set: { if !$0 { pendingFillDelete = nil } }), titleVisibility: .visible) {
+            Button("删除并回滚持仓与现金", role: .destructive) {
+                guard let id = pendingFillDelete else { return }
+                do { try model.deleteFill(id) } catch { model.errorMessage = error.localizedDescription }
+                pendingFillDelete = nil
+            }
+            Button("取消", role: .cancel) { pendingFillDelete = nil }
+        } message: {
+            Text("删除后这笔买入/卖出对持仓份额、账面成本和现金的影响会一并撤销；操作仍记入审计，可撤销。")
+        }
         .task { if exportURL == nil { exportURL = NextCSVExport.write(book: model.book, quotes: model.quotes) } }
     }
 }
@@ -1741,6 +1834,7 @@ private struct BackupRestoreScreen: View {
         GPPageBackground {
             GPStatus(title: "本机备份与可验证恢复", detail: "导出文件包含独立账本、A–H 模拟账户、行情缓存、图表、交易规则和审计记录，并带 SHA-256 校验。", symbol: "externaldrive")
             DataPanel(title: "操作前保护") { GPDataRow(title: "真实账本", value: "独立文件 · iOS 文件保护"); GPDataRow(title: "模拟账户", value: "独立文件与账户模型"); GPDataRow(title: "恢复前副本", value: "自动保存到本机恢复目录"); GPDataRow(title: "旧版资产", value: "不自动迁移或覆盖") }
+            NASBookVersionsPanel()
             GPActionButton(title: "导出完整备份", secondary: true, systemImage: "square.and.arrow.up") {
                 do { document = GuanpanBackupDocument(data: try JSONEncoder().encode(model.makeBackup())); isExporting = true }
                 catch { model.errorMessage = error.localizedDescription }
@@ -1853,3 +1947,132 @@ private func compactField(_ title: String, text: Binding<String>) -> some View {
 private func knownName(_ code: String) -> String { ["159941":"纳指 ETF", "563020":"低波红利", "159545":"港股红利", "159352":"A500"][code] ?? "场内证券" }
 private func shortTitle(_ strategy: NextTwinStrategy) -> String { switch strategy { case .A: "基准"; case .B: "原权重"; case .C: "目标配"; case .D: "再平衡"; case .E: "价值"; case .F: "风控"; case .G: "AI 多因子"; case .H: "自定义" } }
 private func strategyDescription(_ strategy: NextTwinStrategy) -> String { switch strategy { case .A: "完全不操作的对照基准；接受同一注资与分红，不主动买卖。"; case .B: "按初始组合比例进行定投；记录每笔假设与费用。"; case .C: "按用户设定的目标配置模拟定投。"; case .D: "按预设周期检查偏离并模拟再平衡。"; case .E: "基于已验证估值和红利数据进行智能价值调仓研究。"; case .F: "用趋势与风险约束管理模拟仓位。"; case .G: "AI 多因子自主模拟交易，在独立虚拟账户中持续研究与回放。"; case .H: "可配置条件与参数的用户自定义策略，与 A–G 账户分开比较。" } }
+
+
+// MARK: - NAS 账本版本（可删除）
+
+/// NAS 每接受一次账本写入就留一份完整历史版本。这里列出并允许删除旧版本。
+/// 只删 NAS 上的历史副本，不动手机账本，也不动当前生效版本（服务端会 409）。
+private struct NASBookVersionsPanel: View {
+    @EnvironmentObject private var model: NextAppModel
+    @Environment(\.gp) private var p
+    @State private var versions: [NextNASBookVersion] = []
+    @State private var action: VersionAction?
+    @State private var loading = false
+    @State private var note = ""
+
+    private enum VersionAction: Identifiable {
+        case delete(NextNASBookVersion), prune
+        var id: String {
+            switch self { case .delete(let version): return "delete-\(version.revision)"; case .prune: return "prune" }
+        }
+    }
+
+    private var baseURL: String { model.preferences.nasBaseURL.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var dialogTitle: String {
+        switch action {
+        case .delete(let version): return "删除 NAS 版本 \(version.revision)？"
+        case .prune: return "只保留最近 20 个版本？"
+        case nil: return ""
+        }
+    }
+    private var dialogMessage: String {
+        switch action {
+        case .delete: return "只删除 NAS 上的这份历史副本，手机账本与当前 NAS 账本不受影响。"
+        case .prune: return "会删除第 21 个及更早的版本，当前生效版本始终保留。"
+        case nil: return ""
+        }
+    }
+
+    var body: some View {
+        EditorialSection(title: "NAS 备份版本",
+                         trailing: baseURL.isEmpty ? "未配置" : (loading ? "读取中…" : "\(versions.count) 个"),
+                         accent: p.chartGold) {
+            if baseURL.isEmpty {
+                Text("先在设置里填写 NAS 地址，才能管理服务端保存的账本版本。").font(.caption).foregroundStyle(p.muted)
+            } else {
+                if versions.isEmpty {
+                    Text(loading ? "正在读取 NAS 版本…" : "NAS 上还没有保存过账本版本。同步一次账本后就会出现第一个版本。")
+                        .font(.caption).foregroundStyle(p.muted)
+                }
+                ForEach(versions) { version in
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("版本 \(version.revision)").font(.subheadline.weight(.medium)).foregroundStyle(p.ink)
+                            Text(version.sizeText + (version.current ? " · 当前生效" : " · 历史版本"))
+                                .font(.caption2).foregroundStyle(version.current ? p.jade : p.muted)
+                        }
+                        Spacer(minLength: 6)
+                        if !version.current {
+                            Button { action = .delete(version) } label: {
+                                Image(systemName: "trash").font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(p.risk.opacity(0.85)).frame(width: 32, height: 32)
+                            }.buttonStyle(.plain).accessibilityLabel("删除版本 \(version.revision)")
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .overlay(alignment: .bottom) { Rectangle().fill(p.line.opacity(0.7)).frame(height: 0.5) }
+                }
+                HStack(spacing: 12) {
+                    Button("只留最近 20 个") { action = .prune }.disabled(versions.count <= 20)
+                    Button("重新读取") { Task { await reload() } }
+                }.font(.caption.weight(.semibold)).tint(p.forest).padding(.top, 4)
+                if !note.isEmpty { Text(note).font(.caption2).foregroundStyle(p.muted) }
+                Text("每次同步账本，NAS 都会留一份完整版本。当前生效版本不能删；删除只影响 NAS 上的历史副本，不动手机账本。")
+                    .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .task { await reload() }
+        .confirmationDialog(dialogTitle,
+                            isPresented: Binding(get: { action != nil }, set: { if !$0 { action = nil } }),
+                            titleVisibility: .visible) {
+            switch action {
+            case .delete(let version):
+                Button("删除版本 \(version.revision)", role: .destructive) {
+                    Task { await remove(version) }
+                    action = nil
+                }
+            case .prune:
+                Button("清理旧版本", role: .destructive) {
+                    Task { await prune() }
+                    action = nil
+                }
+            case nil:
+                EmptyView()
+            }
+            Button("取消", role: .cancel) { action = nil }
+        } message: {
+            Text(dialogMessage)
+        }
+    }
+
+    private func reload() async {
+        guard !baseURL.isEmpty else { return }
+        loading = true
+        do {
+            let history = try await NASService.readBookHistory(baseURL: baseURL)
+            versions = history.versions
+            note = "当前生效版本 \(history.current)"
+        } catch {
+            versions = []
+            note = error.localizedDescription
+        }
+        loading = false
+    }
+
+    private func remove(_ version: NextNASBookVersion) async {
+        do {
+            try await NASService.deleteBookVersion(version.revision, baseURL: baseURL)
+            note = "已删除版本 \(version.revision)"
+            await reload()
+        } catch { note = error.localizedDescription }
+    }
+
+    private func prune() async {
+        do {
+            let removed = try await NASService.pruneBookHistory(keep: 20, baseURL: baseURL)
+            note = removed > 0 ? "已清理 \(removed) 个旧版本" : "没有可清理的旧版本"
+            await reload()
+        } catch { note = error.localizedDescription }
+    }
+}

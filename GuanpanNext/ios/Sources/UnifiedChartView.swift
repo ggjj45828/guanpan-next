@@ -21,6 +21,16 @@ struct UnifiedChartView: View {
     @Binding var selectedTime: Date?
     var securityCode: String? = nil
     var expanded = false
+    /// 分时图是**固定窗口**（09:30–15:00 一整天），不做缩放：同花顺的分时也是固定的，
+    /// 能缩的只有日 K / 周 / 月这类按根数取窗口的图。
+    private var zoomAllowed: Bool { interval.wrappedValue != .intraday }
+    /// 分时图比日 K 更吃高度。同花顺的分时主图几乎占满一屏，副图（MACD/量）也要能看清。
+    /// 之前统一 250 / 430，手机上主图被压得只剩一条带，MACD 柱挤成一条缝。
+    private var chartHeight: CGFloat {
+        let isIntraday = interval.wrappedValue == .intraday
+        if expanded { return isIntraday ? 660 : 560 }
+        return isIntraday ? 400 : 320
+    }
     @State private var magnification = 1.0
     @State private var pinchBase: Double?
     @State private var intradaySessionDate = Date()
@@ -86,7 +96,9 @@ struct UnifiedChartView: View {
         case .year: window = min(252, chartBars.count)
         case .intraday, .day, .week, .month, .all: window = chartBars.count
         }
-        let count = max(1, Int(Double(min(chartBars.count, window)) / max(1, magnification)))
+        // 分时不接受缩放：放大只对按根数取窗口的周期生效。
+        let effectiveZoom = zoomAllowed ? magnification : 1.0
+        let count = max(1, Int(Double(min(chartBars.count, window)) / max(1, effectiveZoom)))
         return Array(chartBars.suffix(count))
     }
     private var visibleTimeDomain: ClosedRange<Date>? {
@@ -196,7 +208,9 @@ struct UnifiedChartView: View {
                     }.buttonStyle(.plain).accessibilityIdentifier("chart.period.\(value.rawValue)")
                 }
                 Spacer(minLength: 0)
-                Button { magnification = magnification >= 4 ? 1 : magnification * 1.6; saveChartState() } label: { Image(systemName: "plus.magnifyingglass").font(.system(size: 12)).foregroundStyle(p.forest).frame(minWidth: 30, minHeight: 30) }.accessibilityLabel("缩放图表")
+                if zoomAllowed {
+                    Button { magnification = magnification >= 4 ? 1 : magnification * 1.6; saveChartState() } label: { Image(systemName: "plus.magnifyingglass").font(.system(size: 12)).foregroundStyle(p.forest).frame(minWidth: 30, minHeight: 30) }.accessibilityLabel("缩放图表")
+                }
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
@@ -242,7 +256,7 @@ struct UnifiedChartView: View {
             }
             if samples.isEmpty {
                 GPStatus(title: dataset == nil ? "暂无可绘制行情" : "该周期暂无历史数据", detail: dataset == nil ? "分时由手机读取，日 K 由 NAS 归档后下载；离线时显示已有缓存。" : "当前数据周期为“\(label(dataset!.interval))”。切换日 K 或分时查看；不会把其他周期的数据冒充为本周期。", symbol: "chart.xyaxis.line")
-                    .frame(height: expanded ? 430 : 250)
+                    .frame(height: chartHeight)
             } else {
                 GeometryReader { geometry in
                     Canvas { context, size in draw(context: &context, size: size) }
@@ -259,6 +273,7 @@ struct UnifiedChartView: View {
                             }
                         }.onEnded { _ in saveChartState() })
                         .simultaneousGesture(MagnifyGesture().onChanged { value in
+                            guard zoomAllowed else { return }
                             if pinchBase == nil { pinchBase = magnification }
                             magnification = min(8, max(1, (pinchBase ?? magnification) * Double(value.magnification)))
                         }.onEnded { _ in pinchBase = nil; saveChartState() })
@@ -266,11 +281,11 @@ struct UnifiedChartView: View {
                         .accessibilityIdentifier("chart.plot")
                         .accessibilityLabel("价格、IOPV、成交量共用价格纵轴的图表")
                         .accessibilityValue(selectedSample.map { "\($0.timestamp.formatted(date: .numeric, time: .shortened))，价格 ¥\(NextMoney.text($0.close, digits: 4))" } ?? "拖动或使用前后数据点操作查看历史")
-                        .accessibilityAction(named: "放大图表") { magnification = min(8, magnification * 1.5); saveChartState() }
-                        .accessibilityAction(named: "缩小图表") { magnification = max(1, magnification / 1.5); saveChartState() }
+                        .accessibilityAction(named: "放大图表") { guard zoomAllowed else { return }; magnification = min(8, magnification * 1.5); saveChartState() }
+                        .accessibilityAction(named: "缩小图表") { guard zoomAllowed else { return }; magnification = max(1, magnification / 1.5); saveChartState() }
                         .accessibilityAction(named: "上一个数据点") { moveCrosshair(-1) }
                         .accessibilityAction(named: "下一个数据点") { moveCrosshair(1) }
-                }.frame(height: expanded ? 430 : 250)
+                }.frame(height: chartHeight)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
                         legend("价格", color: p.chartBlue)
@@ -328,8 +343,8 @@ struct UnifiedChartView: View {
         // 原来 43 + 12 的留白让绘图区少了 55pt，看起来整张图偏窄。
         let left: CGFloat = 33, right: CGFloat = 5, top: CGFloat = 9
         let axisHeight: CGFloat = 17
-        let subHeight: CGFloat = subchart == .off ? 0 : 46
-        let subGap: CGFloat = subchart == .off ? 0 : 7
+        let subHeight: CGFloat = subchart == .off ? 0 : 78
+        let subGap: CGFloat = subchart == .off ? 0 : 9
         let plot = CGRect(x: left, y: top, width: max(1, size.width - left - right),
                           height: max(40, size.height - top - axisHeight - subHeight - subGap))
         for tick in 0...4 {
@@ -617,7 +632,8 @@ struct UnifiedChartView: View {
         }
         if !restored.visibleLayers.isEmpty { visibleLayers = restored.visibleLayers }
         selectedTime = state.crosshairTime
-        magnification = min(8, max(1, state.scale))
+        // 分时窗口固定，历史缩放值不再套用，避免切到分时后还带着日 K 的放大倍数。
+        magnification = zoomAllowed ? min(8, max(1, state.scale)) : 1
         let datasetDay = dataset?.orderedSamples.last?.timestamp
         latestIntradaySessionDate = state.latestIntradaySessionDate ?? datasetDay ?? Date()
         intradaySessionDate = state.intradaySessionDate ?? datasetDay ?? latestIntradaySessionDate

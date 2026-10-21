@@ -6,8 +6,10 @@ from decimal import Decimal, InvalidOperation
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+# DeepSeek 现行模型名（deepseek-chat / deepseek-reasoner 已于 2026-07-24 停用）。
+# flash 用 deepseek-v4-flash，pro 用 deepseek-v4-pro；写成 deepseek-flash 会直接 400。
 PROFILES = {
-    "flash": {"base": "https://api.deepseek.com", "model": "deepseek-flash"},
+    "flash": {"base": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
     "pro": {"base": "https://api.deepseek.com", "model": "deepseek-v4-pro"},
 }
 
@@ -89,7 +91,7 @@ def generate_research(factors, api_key=None, profile=None, opener=urlopen):
               "source": factors["source"], "close": factors["close"],
               "ma20": factors["ma20"], "ma250": factors["ma250"],
               "momentum20": factors["momentum20"], "drawdown20": factors["drawdown20"]}
-    payload = {"model": profile["model"], "stream": False, "max_tokens": 550,
+    payload = {"model": profile["model"], "stream": False, "max_tokens": 900,
                "messages": [
                    {"role": "system", "content": "你是投资研究助手。仅使用给定的有日期与来源的数据。区分事实、推断、风险和等待条件；缺失信息请说未知。不得声称已下单，不得凭空给出 IOPV、盘口或交易规则。用中文简洁回答。"},
                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]}

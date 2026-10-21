@@ -6,13 +6,15 @@ struct LocalPreferences: Codable {
     var watch = ["159941", "563020", "159545", "159352"]
     var navigation = NextNavigationState()
     var theme = GPTheme.system
+    /// 字号档位 / 字体族 / 自定义文字·卡片·背景色。
+    var appearance = GPAppearance()
     var notifications = NextNotificationCenter()
     var nasBaseURL = ""
     var legacyWebBaseURL = ""
     var nasRevision: Int?
-    enum CodingKeys: String, CodingKey { case goal, watch, navigation, theme, notifications, nasBaseURL, legacyWebBaseURL, nasRevision }
-    init(goal: NextGoal = NextGoal(), watch: [String] = ["159941", "563020", "159545", "159352"], navigation: NextNavigationState = NextNavigationState(), theme: GPTheme = .system, notifications: NextNotificationCenter = NextNotificationCenter(), nasBaseURL: String = "", legacyWebBaseURL: String = "", nasRevision: Int? = nil) {
-        self.goal = goal; self.watch = watch; self.navigation = navigation; self.theme = theme; self.notifications = notifications
+    enum CodingKeys: String, CodingKey { case goal, watch, navigation, theme, appearance, notifications, nasBaseURL, legacyWebBaseURL, nasRevision }
+    init(goal: NextGoal = NextGoal(), watch: [String] = ["159941", "563020", "159545", "159352"], navigation: NextNavigationState = NextNavigationState(), theme: GPTheme = .system, appearance: GPAppearance = GPAppearance(), notifications: NextNotificationCenter = NextNotificationCenter(), nasBaseURL: String = "", legacyWebBaseURL: String = "", nasRevision: Int? = nil) {
+        self.goal = goal; self.watch = watch; self.navigation = navigation; self.theme = theme; self.appearance = appearance; self.notifications = notifications
         self.nasBaseURL = nasBaseURL; self.legacyWebBaseURL = legacyWebBaseURL; self.nasRevision = nasRevision
     }
     init(from decoder: Decoder) throws {
@@ -21,6 +23,7 @@ struct LocalPreferences: Codable {
         watch = try values.decodeIfPresent([String].self, forKey: .watch) ?? ["159941", "563020", "159545", "159352"]
         navigation = try values.decodeIfPresent(NextNavigationState.self, forKey: .navigation) ?? NextNavigationState()
         theme = try values.decodeIfPresent(GPTheme.self, forKey: .theme) ?? .system
+        appearance = try values.decodeIfPresent(GPAppearance.self, forKey: .appearance) ?? GPAppearance()
         notifications = try values.decodeIfPresent(NextNotificationCenter.self, forKey: .notifications) ?? NextNotificationCenter()
         nasBaseURL = try values.decodeIfPresent(String.self, forKey: .nasBaseURL) ?? ""
         legacyWebBaseURL = try values.decodeIfPresent(String.self, forKey: .legacyWebBaseURL) ?? ""
@@ -212,6 +215,41 @@ struct LocalPreferences: Codable {
         try commitRealLedger(updated, action: "删除场内持仓", reason: "用户确认删除 \(code)")
     }
 
+    /// 删除一条成交流水，并按相反方向回滚它对**持仓与现金**的影响。
+    /// 这是必要的：只删流水不回滚，账本就会出现「有持仓无买入记录」的假账，
+    /// 摊薄成本和已实现盈亏都会跟着错。
+    func deleteFill(_ id: UUID) throws {
+        guard let fill = book.fills.first(where: { $0.id == id }) else { throw NextError.invalid("找不到这条流水") }
+        var updated = book
+        updated.fills.removeAll { $0.id == id }
+        let gross = fill.price * Decimal(fill.units)
+        let index = updated.positions.firstIndex { $0.code == fill.code }
+        if fill.side == "buy" {
+            // 回滚买入：现金加回，持仓减份数、减成本。
+            updated.cash += gross + fill.fee
+            guard let index else { throw NextError.invalid("这只持仓已不存在，无法回滚这笔买入") }
+            let newUnits = updated.positions[index].units - fill.units
+            guard newUnits >= 0 else { throw NextError.invalid("回滚后份额为负：这笔买入的份额已经卖出，请先删对应的卖出流水") }
+            updated.positions[index].bookCost -= gross + fill.fee
+            if updated.positions[index].bookCost < 0 { updated.positions[index].bookCost = 0 }
+            updated.positions[index].units = newUnits
+            if newUnits == 0 { updated.positions.remove(at: index) }
+        } else {
+            // 回滚卖出：现金扣回，持仓加回份数与当初结转的成本。
+            guard updated.cash - (gross - fill.fee) >= 0 else { throw NextError.invalid("回滚后现金为负，请先补足现金再删这笔卖出") }
+            updated.cash -= gross - fill.fee
+            let restoredCost = max(0, gross - fill.fee - fill.realized)
+            if let index {
+                updated.positions[index].units += fill.units
+                updated.positions[index].bookCost += restoredCost
+            } else {
+                updated.positions.append(NextPosition(code: fill.code, name: fill.code, units: fill.units, bookCost: restoredCost))
+            }
+        }
+        try commitRealLedger(updated, action: "删除成交流水",
+                             reason: "用户删除 \(fill.code) \(fill.side == "buy" ? "买入" : "卖出") \(fill.units) 份 · ¥\(NextMoney.text(fill.price))，已同步回滚持仓与现金")
+    }
+
     /// 修正录入错误的份额或总成本。**不改现金、不虚构成交**，只订正账本里的持仓事实。
     func updatePosition(_ code: String, units: Int, totalCost: Decimal) throws {
         guard units > 0, totalCost > 0, !totalCost.isNaN else { throw NextError.invalid("份额与总成本必须大于 0") }
@@ -316,6 +354,7 @@ struct LocalPreferences: Codable {
         routeRequestID = UUID()
     }
     func saveTheme(_ theme: GPTheme) { preferences.theme = theme }
+    func saveAppearance(_ appearance: GPAppearance) { preferences.appearance = appearance }
     func refreshNotificationStatus() async { notificationStatus = await NextLocalNotificationService.authorizationStatus() }
     func requestNotificationPermission() async { notificationStatus = await NextLocalNotificationService.requestAuthorization() }
     func postLocalAlert(level: String, fingerprint: String, title: String, detail: String, stamp: NextDataStamp) {
@@ -838,7 +877,7 @@ struct LocalPreferences: Codable {
         ledger = NextAuditedBook(current: incoming.book, events: incoming.audits)
         experiment = incoming.experiment
         twins = incoming.twins
-        preferences = LocalPreferences(goal: incoming.goal, watch: incoming.watch, navigation: incoming.navigation, theme: GPTheme(rawValue: incoming.theme.rawValue) ?? .system, notifications: incoming.notifications, nasBaseURL: preferences.nasBaseURL, legacyWebBaseURL: preferences.legacyWebBaseURL, nasRevision: nil)
+        preferences = LocalPreferences(goal: incoming.goal, watch: incoming.watch, navigation: incoming.navigation, theme: GPTheme(rawValue: incoming.theme.rawValue) ?? .system, appearance: preferences.appearance, notifications: incoming.notifications, nasBaseURL: preferences.nasBaseURL, legacyWebBaseURL: preferences.legacyWebBaseURL, nasRevision: nil)
         quotes = incoming.cachedQuotes; chartData = incoming.chartData; rules = incoming.instrumentRules; orderBooks = incoming.orderBooks
         decisions = incoming.decisionHistory
         nasResearch = incoming.nasResearch
