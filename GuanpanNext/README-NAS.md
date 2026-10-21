@@ -73,7 +73,7 @@
 - 次日或下一个可用归档交易日，以真实归档日 K 开盘价执行前一天的虚拟意图，现金不足时能部分买入并保留剩余数量到后续可用交易日。卖出先于买入释放模拟现金。记录明确写明 `archived daily open proxy; no orderbook or queue evidence`，不是交易所队列或保证成交。每日日终记录权益、NAV、回撤、AI 运行状态和审计信息；即使当天 AI 失败，也会保留旧委托的日 K 结算和当日净值，但不会创建新订单。
 - 本地 68 项测试覆盖结构校验、DeepSeek mock、最多 12 证券的紧凑历史上下文、虚拟资金账户、修订冲突、开盘代理撮合、部分成交续单与真实账本隔离；尚未用真实 key 调用 DeepSeek，也未在 NAS 持续运行。历史回测中的 G 仍是多因子历史代理，两者不能混称。
 
-在 NAS 新项目目录复制 `.env.example` 为 `.env`，填入 NAS 后台研究使用的 `DEEPSEEK_API_KEY`，选择 `GUANPAN_AI_PROFILE=flash` 或 `pro`。也可用 `custom` 配置 OpenAI 兼容 HTTPS 服务的 `GUANPAN_AI_BASE_URL` 和 `GUANPAN_AI_MODEL`。不要把 NAS key 提交到 Git 或发到网页。iOS 另有可选的手机端 key 输入：保存在本机 Keychain，仅在用户明确发起 ETF 分析时直连模型；不上传 NAS、不进入账本/备份。NAS key 与 iPhone key 是两份独立配置。预置模型名为 `deepseek-flash` 与 `deepseek-v4-pro`。
+在 NAS 新项目目录复制 `.env.example` 为 `.env`，填入 NAS 后台研究使用的 `DEEPSEEK_API_KEY`，选择 `GUANPAN_AI_PROFILE=flash` 或 `pro`。也可用 `custom` 配置 OpenAI 兼容 HTTPS 服务的 `GUANPAN_AI_BASE_URL` 和 `GUANPAN_AI_MODEL`。不要把 NAS key 提交到 Git 或发到网页。iOS 另有可选的手机端 key 输入：保存在本机 Keychain，仅在用户明确发起 ETF 分析时直连模型；不上传 NAS、不进入账本/备份。NAS key 与 iPhone key 是两份独立配置。预置模型名为 `deepseek-v4-flash`（flash 档案）与 `deepseek-v4-pro`（pro 档案）。**注意：旧的 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 停用；写成 `deepseek-flash`（缺 v4-）会直接 400 Model Not Exist。**
 
 填入 key 后重建/重启容器，再手动运行一次连通性检查：
 
@@ -84,7 +84,30 @@ docker compose exec guanpan-next python check_ai.py
 
 检查只发送一条“Reply with OK only”探针，不发送持仓或行情，不会在容器启动时自动调用；DeepSeek 可能按服务商规则计费。返回 `verified` 才表示该 NAS 容器的 key、模型和网络请求已真实验证。`configured_unverified` 只表示环境变量非空，不能证明 key 有效。`/v1/research/{代码}` 也只返回不含 key 的配置状态。AI 解读任务仍基于已归档的单只证券日 K 因子，会把该数据发给 DeepSeek。
 
+也可以在网页「研究 / AI」区块点 **验证 AI**，或直接请求：
+
+```sh
+curl http://127.0.0.1:8786/v1/ai/verify
+# 通了：{"state":"verified","model":"deepseek-v4-flash",...}
+# 没配 key：503 {"state":"unavailable","error":"NAS 尚未配置 DeepSeek API key"}
+```
+
+`/health` 的 `aiProvider.state` 也是同一口径：`missing_key` / `invalid_profile` / `configured_unverified` / `verified`。
+
 这四条线程互不依赖账本同步开关；当前仍缺 NAS 真机部署与 DeepSeek 实际凭据测试。
+
+## 账本备份版本：可列出、可删除
+
+NAS 每次接受一次账本写入（`POST /v1/real/books/main`）都会在 `real_book_history` 留一份**完整版本**，用于回滚与核对。
+
+| 操作 | 接口 |
+|---|---|
+| 列出版本（只含元数据） | `GET /v1/real/books/main/history` |
+| 取某个版本的完整账本 | `GET /v1/real/books/main/history/{revision}` |
+| 删除某个历史版本 | `DELETE /v1/real/books/main/history/{revision}` |
+| 只保留最近 N 个 | `DELETE /v1/real/books/main/history?keep=20` |
+
+规则：**当前生效版本不允许删除**（服务端返回 409），因为它是回滚锚点；删除只影响 NAS 上的历史副本，不动手机账本。iOS 的「资产 → 备份与恢复 → NAS 备份版本」里可以逐条删或一键只留最近 20 个。
 
 ## 手机与 NAS 联通：三条同步线（对应你说的三种线）
 

@@ -22,6 +22,14 @@ struct NextNASBookHistory: Decodable {
     let versions: [NextNASBookVersion]
 }
 
+/// `/v1/ai/verify` 的返回。`state == "verified"` 才代表 NAS 上的 key、模型和出网都真的通了。
+struct NextNASAIVerify: Decodable {
+    let state: String
+    let profile: String?
+    let model: String?
+    let message: String?
+}
+
 struct NextNASHealth: Decodable {
     let service: String
     let schemaVersion: Int
@@ -319,6 +327,20 @@ enum NextNASService {
         guard http.statusCode == 200 else { throw NextError.invalid("NAS 保存失败（HTTP \(http.statusCode)），本机账本未修改") }
         return try JSONDecoder().decode(RevisionResponse.self, from: data).revision
     }
+    /// 让 NAS 用自己配置的 key 发一条最小探针（不携带持仓/行情），验证 AI 是否真的可用。
+    static func verifyAI(baseURL: String, session: URLSession = .shared) async throws -> NextNASAIVerify {
+        let url = try validateURL(baseURL).appendingPathComponent("v1").appendingPathComponent("ai").appendingPathComponent("verify")
+        // DeepSeek 冷启动可能较慢，给足 40 秒。
+        let (data, response) = try await session.data(for: URLRequest(url: url, timeoutInterval: 40))
+        guard let http = response as? HTTPURLResponse else { throw NextError.invalid("NAS 没有返回 HTTP 状态") }
+        if http.statusCode == 200 {
+            return try JSONDecoder().decode(NextNASAIVerify.self, from: data)
+        }
+        struct Failure: Decodable { let error: String?; let message: String? }
+        let failure = try? JSONDecoder().decode(Failure.self, from: data)
+        throw NextError.invalid(failure?.error ?? failure?.message ?? "AI 验证失败（HTTP \(http.statusCode)）")
+    }
+
     /// 列出 NAS 上的账本历史版本。
     static func readBookHistory(baseURL: String, session: URLSession = .shared) async throws -> NextNASBookHistory {
         let url = try endpoint(baseURL).appendingPathComponent("history")

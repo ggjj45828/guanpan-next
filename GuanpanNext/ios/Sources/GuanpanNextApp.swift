@@ -533,25 +533,6 @@ private struct DecisionScreen: View {
     @State private var showNASAIConsent = false
     @State private var mobileAIKeyAvailable = DeepSeekMobile.loadKey() != nil
 
-    // MARK: 外观（字号 / 字体 / 自定义颜色）
-    private var appearance: GPAppearance { model.preferences.appearance }
-    private func updateAppearance(_ mutate: (inout GPAppearance) -> Void) {
-        var next = model.preferences.appearance
-        mutate(&next)
-        model.saveAppearance(next)
-    }
-    private var inkBinding: Binding<Color> {
-        Binding(get: { appearance.inkHex.map { Color(hex: $0) } ?? p.ink },
-                set: { hex in if let value = hex.gpHex { updateAppearance { $0.inkHex = value } } })
-    }
-    private var paperBinding: Binding<Color> {
-        Binding(get: { appearance.paperHex.map { Color(hex: $0) } ?? p.paper },
-                set: { hex in if let value = hex.gpHex { updateAppearance { $0.paperHex = value } } })
-    }
-    private var canvasBinding: Binding<Color> {
-        Binding(get: { appearance.canvasHex.map { Color(hex: $0) } ?? p.canvas },
-                set: { hex in if let value = hex.gpHex { updateAppearance { $0.canvasHex = value } } })
-    }
     @State private var patientLimitPrice = ""
     @State private var patientLimitUnits = "100"
     @State private var patientLimitExpiry = Calendar.current.date(byAdding: .day, value: 30, to: Date()) ?? Date().addingTimeInterval(30 * 86400)
@@ -1393,14 +1374,33 @@ private struct SettingsScreen: View {
     @Environment(\.gp) private var p
     @State private var dynamicTypeNote = false
     @State private var nasURL = ""
-    @State private var legacyWebURL = ""
     @State private var confirmSync = false
     @State private var confirmDownload = false
-    @State private var confirmLegacyImport = false
     @State private var deepSeekKey = ""
+    @State private var testingNASAI = false
+    @State private var nasAIStatus: String?
     @State private var deepSeekProfile = UserDefaults.standard.string(forKey: "guanpan.deepseek.profile") ?? "flash"
     @State private var mobileAIStatus = DeepSeekMobile.loadKey() == nil ? "未保存 API key" : "本机钥匙串已保存 API key"
     @State private var mobileAIKeyAvailable = DeepSeekMobile.loadKey() != nil
+    // MARK: 外观（字号 / 字体 / 自定义颜色）
+    private var appearance: GPAppearance { model.preferences.appearance }
+    private func updateAppearance(_ mutate: (inout GPAppearance) -> Void) {
+        var next = model.preferences.appearance
+        mutate(&next)
+        model.saveAppearance(next)
+    }
+    private var inkBinding: Binding<Color> {
+        Binding(get: { appearance.inkHex.map { Color(hex: $0) } ?? p.ink },
+                set: { hex in if let value = hex.gpHex { updateAppearance { $0.inkHex = value } } })
+    }
+    private var paperBinding: Binding<Color> {
+        Binding(get: { appearance.paperHex.map { Color(hex: $0) } ?? p.paper },
+                set: { hex in if let value = hex.gpHex { updateAppearance { $0.paperHex = value } } })
+    }
+    private var canvasBinding: Binding<Color> {
+        Binding(get: { appearance.canvasHex.map { Color(hex: $0) } ?? p.canvas },
+                set: { hex in if let value = hex.gpHex { updateAppearance { $0.canvasHex = value } } })
+    }
     @State private var testingMobileAI = false
     var body: some View {
         GPPageBackground {
@@ -1408,10 +1408,10 @@ private struct SettingsScreen: View {
                 Text("用舒适的方式查看市场").font(.system(.title2, design: .serif).weight(.semibold)).foregroundStyle(p.ink).padding(.top, 8)
                 EditorialSection(title: "外观", accent: p.chartViolet) {
                     Picker("主题", selection: Binding(get: { model.theme }, set: model.saveTheme)) { ForEach(GPTheme.allCases) { Text($0.title).tag($0) } }.pickerStyle(.segmented).accessibilityIdentifier("settings.theme")
-                    Picker("字号", selection: Binding(get: { appearance.fontScale }, set: { value in updateAppearance { $0.fontScale = value } })) {
+                    Picker("字号", selection: Binding(get: { appearance.fontScale }, set: { (value: Double) in updateAppearance { $0.fontScale = value } })) {
                         ForEach(GPAppearance.scaleOptions, id: \.value) { option in Text(option.title).tag(option.value) }
                     }.pickerStyle(.segmented).accessibilityIdentifier("settings.fontScale")
-                    Picker("字体", selection: Binding(get: { appearance.fontFamily }, set: { value in updateAppearance { $0.fontFamily = value } })) {
+                    Picker("字体", selection: Binding(get: { appearance.fontFamily }, set: { (value: GPFontFamily) in updateAppearance { $0.fontFamily = value } })) {
                         ForEach(GPFontFamily.allCases) { Text($0.title).tag($0) }
                     }.pickerStyle(.segmented).accessibilityIdentifier("settings.fontFamily")
                     ColorPicker("文字颜色", selection: inkBinding, supportsOpacity: false)
@@ -1473,7 +1473,7 @@ private struct SettingsScreen: View {
                     if let status = model.aiProviderStatus {
                         GPDataRow(title: "模型档案", value: status.model ?? status.profile ?? "未知")
                         if status.configured {
-                            Text("NAS 已配置密钥；此状态只证明环境变量非空，不能证明密钥和模型可用。真实连通性探针请在 NAS 项目目录运行部署说明中的 check_ai.py。")
+                            Text("NAS 已配置密钥；此状态只证明环境变量非空，不能证明密钥和模型可用。点上方「验证 NAS 上的 DeepSeek」做真实探针（只发一句 OK，不携带持仓）。")
                                 .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                         } else {
                             Text("此项是 NAS 后台研究配置。请在 NAS 部署目录的 .env 设置 DEEPSEEK_API_KEY，再重建服务。手机端 key 与 NAS 后台 key 分开保存。")
@@ -1483,6 +1483,20 @@ private struct SettingsScreen: View {
                         Text("连接 NAS 后可查看后台研究配置状态。手机端 key 单独保存在本机；NAS 后台研究仍需在 NAS 部署目录配置自己的 key。")
                             .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                     }
+                    GPActionButton(title: testingNASAI ? "正在验证…" : "验证 NAS 上的 DeepSeek", secondary: true, systemImage: "checkmark.seal") {
+                        Task {
+                            testingNASAI = true
+                            defer { testingNASAI = false }
+                            do {
+                                let result = try await NextNASService.verifyAI(baseURL: model.preferences.nasBaseURL)
+                                nasAIStatus = "已验证 · \(result.model ?? "模型未知") · state=\(result.state)"
+                            } catch { nasAIStatus = "验证失败 · \(error.localizedDescription)" }
+                        }
+                    }.disabled(testingNASAI || model.preferences.nasBaseURL.isEmpty)
+                    if let nasAIStatus {
+                        Text(nasAIStatus).font(.caption).foregroundStyle(nasAIStatus.hasPrefix("已验证") ? p.jade : p.terracotta)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     GPActionButton(title: "检查 NAS 连接与 AI 配置状态", secondary: true, systemImage: "arrow.clockwise") { Task { await model.probeNAS() } }
                 }
                 EditorialSection(title: "新 NAS 连接") {
@@ -1491,23 +1505,13 @@ private struct SettingsScreen: View {
                     GPActionButton(title: "从 NAS 下载账本", secondary: true, systemImage: "arrow.down.doc") { confirmDownload = true }
                     GPActionButton(title: "上传本机账本到 NAS", secondary: true, systemImage: "arrow.up.doc") { confirmSync = true }
                     Divider().padding(.vertical, 4)
-                    Text("一次性下载旧网页账本").font(.subheadline.weight(.semibold)).foregroundStyle(p.ink)
-                    TextField("旧网页地址，例如 http://192.168.1.20:8789", text: $legacyWebURL).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).textFieldStyle(.roundedBorder).accessibilityIdentifier("settings.legacy.address")
-                    GPActionButton(title: "从旧网页下载并预览", secondary: true, systemImage: "arrow.down.doc") {
-                        do {
-                            try model.configureLegacyWeb(baseURL: legacyWebURL)
-                            Task { await model.downloadLegacyWebToPhone(); confirmLegacyImport = model.legacyImportPreview != nil }
-                        } catch { model.errorMessage = error.localizedDescription }
-                    }.accessibilityIdentifier("settings.legacy.download")
-                    Text("手机读取旧网页 /api/data，先在新版 NAS 的独立迁移暂存区转换预览。只有新版真实账本和本机校验允许时，确认后才导入；本机会先保存恢复副本。新版 NAS 地址使用容器映射端口 30001。场外基金不导入。")
-                        .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                     Text("家庭网络可直连 http://NAS内网地址:30001；公网连接必须使用 HTTPS。NAS 使用独立服务和数据库，无需应用口令。账本同步采用修订号保护；冲突时停止，不自动覆盖。")
                         .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 EditorialSection(title: "无障碍") { Button("减少动态效果") { dynamicTypeNote = true }.font(.caption.weight(.medium)); Text("底部导航、表单、列表行和图表均提供可访问标签；页面遵循安全区并避让系统键盘。").font(.caption).foregroundStyle(p.muted) }
                 Text("观盘 Pro · 新原生账本结构").font(.caption2).foregroundStyle(p.muted).padding(.vertical, 18)
             }
-        }.onAppear { mobileAIKeyAvailable = DeepSeekMobile.loadKey() != nil; nasURL = model.preferences.nasBaseURL; legacyWebURL = model.preferences.legacyWebBaseURL }
+        }.onAppear { mobileAIKeyAvailable = DeepSeekMobile.loadKey() != nil; nasURL = model.preferences.nasBaseURL }
             .confirmationDialog("确认从 NAS 下载真实账本并替换本机账本？", isPresented: $confirmDownload, titleVisibility: .visible) {
                 Button("确认下载", role: .destructive) { Task { await model.downloadBookManually() } }
                 Button("取消", role: .cancel) { }
@@ -1516,14 +1520,6 @@ private struct SettingsScreen: View {
                 Button("确认同步", role: .destructive) { Task { await model.syncBookManually() } }
                 Button("取消", role: .cancel) { }
             } message: { Text("仅当服务端修订与已确认的上次同步一致，或服务端仍为空账本时才会写入。真实资产不自动合并、不连接券商。") }
-            .confirmationDialog("确认导入已预览的旧账本？", isPresented: $confirmLegacyImport, titleVisibility: .visible) {
-                Button("备份并导入到手机与新版 NAS", role: .destructive) { Task { await model.confirmLegacyWebImport() } }
-                Button("取消", role: .cancel) { model.cancelLegacyWebImport() }
-            } message: {
-                if let preview = model.legacyImportPreview, let summary = preview.summary {
-                    Text("迁移快照修订 \(preview.revision)：现金 \(summary.cash.map { NextMoney.text($0) } ?? "—") 元、场内持仓 \(summary.positions) 只、成交 \(summary.fills) 条、现金流水 \(summary.cashMovements) 条、ETF 分红事件 \(summary.dividendEvents ?? 0) 条、历史 \(summary.history) 条、自选 \(summary.watchCodes?.count ?? 0) 只。场外基金 \(summary.ignoredOTCFunds) 只不导入。确认前会备份本机；新版 NAS 必须仍为空。")
-                } else { Text("未取得可确认的迁移预览。") }
-            }
             .alert("系统动效设置", isPresented: $dynamicTypeNote) { Button("好", role: .cancel) { } } message: { Text("请在 iOS 设置 → 辅助功能 → 动态效果中启用“减少动态效果”。应用会遵循系统设置。") }
     }
 }
@@ -2050,7 +2046,7 @@ private struct NASBookVersionsPanel: View {
         guard !baseURL.isEmpty else { return }
         loading = true
         do {
-            let history = try await NASService.readBookHistory(baseURL: baseURL)
+            let history = try await NextNASService.readBookHistory(baseURL: baseURL)
             versions = history.versions
             note = "当前生效版本 \(history.current)"
         } catch {
@@ -2062,7 +2058,7 @@ private struct NASBookVersionsPanel: View {
 
     private func remove(_ version: NextNASBookVersion) async {
         do {
-            try await NASService.deleteBookVersion(version.revision, baseURL: baseURL)
+            try await NextNASService.deleteBookVersion(version.revision, baseURL: baseURL)
             note = "已删除版本 \(version.revision)"
             await reload()
         } catch { note = error.localizedDescription }
@@ -2070,7 +2066,7 @@ private struct NASBookVersionsPanel: View {
 
     private func prune() async {
         do {
-            let removed = try await NASService.pruneBookHistory(keep: 20, baseURL: baseURL)
+            let removed = try await NextNASService.pruneBookHistory(keep: 20, baseURL: baseURL)
             note = removed > 0 ? "已清理 \(removed) 个旧版本" : "没有可清理的旧版本"
             await reload()
         } catch { note = error.localizedDescription }
