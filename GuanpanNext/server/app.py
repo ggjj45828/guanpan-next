@@ -66,6 +66,10 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                 return self.html()
             if path in ("/market", "/market.html"):
                 return self.html("market.html")
+            if path in ("/classic", "/classic.html"):
+                # 旧版《观盘 Pro 智能看盘》：数据本来只存 localStorage，换端口就丢；
+                # 现在托管在这里并配了 /api/web/data，数据落在 NAS 上。
+                return self.html("classic.html")
             if path == "/health":
                 return self.reply(200, {"service": "guanpan-next", "schemaVersion": 1, "authentication": "none", "web": True,
                                         "codeVersion": code_version(),
@@ -80,6 +84,10 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                     return self.reply(502, {"state": "unavailable", "error": "DeepSeek 连通性验证失败", "message": "DeepSeek 连通性验证失败"})
             if path == "/api/data":
                 try: return self.reply(200, {"ok": True, **database.get_legacy_inbox("main")})
+                except InvalidData as error: return self.reply(400, {"error": str(error)})
+            if path == "/api/web/data":
+                # 旧版网页的整包数据（localStorage 的替代品）。只读，不会动真实账本。
+                try: return self.reply(200, {"ok": True, **database.get_web_snapshot("classic")})
                 except InvalidData as error: return self.reply(400, {"error": str(error)})
             if path == "/v1/legacy/books/main":
                 try:
@@ -265,6 +273,15 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                     if value.get("mode") != "legacy-stage-confirmed":
                         raise InvalidData("legacy staging requires explicit migration action")
                     revision = database.put_legacy_inbox("main", value.get("expectedRevision"), value.get("data"))
+                    return self.reply(200, {"ok": True, "revision": revision})
+                if path == "/api/web/data":
+                    # 旧版网页 POST 的形状是 {tok, data}。没有 data 就拒，别猜。
+                    payload = value.get("data")
+                    if not isinstance(payload, dict):
+                        raise InvalidData("web snapshot requires a data object")
+                    expected = value.get("expectedRevision")
+                    revision = database.put_web_snapshot("classic", payload,
+                                                         int(expected) if isinstance(expected, int) else None)
                     return self.reply(200, {"ok": True, "revision": revision})
                 if path.startswith("/v1/backtests/"):
                     strategy = path.rsplit("/", 1)[-1]

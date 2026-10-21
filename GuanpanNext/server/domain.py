@@ -316,6 +316,10 @@ class NextDatabase:
         with self.connect() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
+                -- 旧版网页（观盘 Pro 智能看盘）的数据包：它本来只存 localStorage，
+                -- 换端口/清缓存就全丢。存到 NAS 后，任何设备打开都能拉回来。
+                CREATE TABLE IF NOT EXISTS web_snapshots (
+                    id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS legacy_inbox (
                     id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS real_books (
@@ -438,6 +442,36 @@ class NextDatabase:
             for revision in doomed:
                 db.execute("DELETE FROM real_book_history WHERE id=? AND revision=?", (book_id, revision))
         return len(doomed)
+
+    def get_web_snapshot(self, snapshot_id="classic"):
+        self.validate_id(snapshot_id)
+        with self.connect() as db:
+            row = db.execute("SELECT revision, body, updated_at FROM web_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+        if not row:
+            return {"revision": 0, "data": None, "updatedAt": None}
+        return {"revision": row[0], "data": json.loads(row[1]), "updatedAt": row[2]}
+
+    def put_web_snapshot(self, snapshot_id, data, expected=None):
+        """旧版网页的整包数据。expected 为 None 时不校验（老网页不带修订号），
+        带了就必须相等，否则 409 —— 两个设备同时写不会互相覆盖。"""
+        self.validate_id(snapshot_id)
+        if not isinstance(data, dict):
+            raise InvalidData("web snapshot must be an object")
+        body = json.dumps(data, ensure_ascii=False, separators=(",", ":"), default=str)
+        if len(body.encode("utf-8")) > 16 * 1024 * 1024:
+            raise InvalidData("web snapshot exceeds 16 MiB")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT revision FROM web_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+            current = row[0] if row else 0
+            if expected is not None and int(expected) != current:
+                raise Conflict("web snapshot revision changed")
+            revision = current + 1
+            db.execute("INSERT OR REPLACE INTO web_snapshots (id, revision, body, updated_at) VALUES (?, ?, ?, ?)",
+                       (snapshot_id, revision, body, now))
+            db.execute("COMMIT")
+        return revision
 
     def get_legacy_inbox(self, inbox_id="main"):
         self.validate_id(inbox_id)
