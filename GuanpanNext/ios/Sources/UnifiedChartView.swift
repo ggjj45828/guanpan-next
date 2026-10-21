@@ -28,8 +28,8 @@ struct UnifiedChartView: View {
     /// 之前统一 250 / 430，手机上主图被压得只剩一条带，MACD 柱挤成一条缝。
     private var chartHeight: CGFloat {
         let isIntraday = interval.wrappedValue == .intraday
-        if expanded { return isIntraday ? 660 : 560 }
-        return isIntraday ? 400 : 320
+        if expanded { return isIntraday ? 700 : 560 }
+        return isIntraday ? 440 : 320
     }
     @State private var magnification = 1.0
     @State private var pinchBase: Double?

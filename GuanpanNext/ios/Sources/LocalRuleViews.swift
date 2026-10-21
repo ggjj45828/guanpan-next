@@ -349,7 +349,14 @@ struct GlobalIndexStrip: View {
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 7) {
-                    ForEach(shown) { quote in GlobalIndexCard(quote: quote) }
+                    ForEach(shown) { quote in
+                        // 指数卡片以前只是纯展示，点了没有任何反应；现在整张卡都是一个导航入口。
+                        NavigationLink(value: GPRoute.indexDetail(quote.symbol)) {
+                            GlobalIndexCard(quote: quote)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("查看该指数走势")
+                    }
                 }
             }
             if !message.isEmpty {
@@ -388,7 +395,7 @@ private struct GlobalIndexCard: View {
             }
             Text(quote.price > 0 ? NextNum.text(quote.price) : "—")
                 .font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(quote.price > 0 ? p.ink : p.muted)
-            Text(quote.price > 0 ? "\(NextNum.signed(quote.changePercent))%" : "点击刷新")
+            Text(quote.price > 0 ? "\(NextNum.signed(quote.changePercent))%" : "无报价")
                 .font(.system(size: 9.5, weight: .medium, design: .monospaced)).foregroundStyle(tone)
         }
         .frame(width: 78, alignment: .leading)
@@ -397,6 +404,7 @@ private struct GlobalIndexCard: View {
             LinearGradient(colors: [p.paper, tone.opacity(0.10)], startPoint: .topLeading, endPoint: .bottomTrailing),
             in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(tone.opacity(0.22), lineWidth: 0.8))
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(quote.name) \(quote.price > 0 ? NextNum.text(quote.price) : "无数据") \(quote.price > 0 ? NextNum.signed(quote.changePercent) + "%" : "")")
     }

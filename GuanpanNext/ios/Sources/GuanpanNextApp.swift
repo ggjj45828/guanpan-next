@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
     var body: some Scene { WindowGroup { RootView().environmentObject(model) } }
 }
 
-enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, twin(NextTwinStrategy) }
+enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, indexDetail(String), twin(NextTwinStrategy) }
 private extension GPRoute {
     var persisted: NextRoute {
         switch self {
@@ -20,6 +20,7 @@ private extension GPRoute {
         case .history: .history
         case .backups: .backups
         case .worthOverview: .intent("worth", "")
+        case .indexDetail(let symbol): .intent("index", symbol)
         case .twin(let strategy): .twin(strategy.rawValue)
         }
     }
@@ -31,6 +32,7 @@ private extension GPRoute {
             if action == "decision" { .decision(code.isEmpty ? nil : code) }
             else if action == "dividends" { .dividends(code.isEmpty ? nil : code) }
             else if action == "worth" { .worthOverview }
+            else if action == "index" { code.isEmpty ? nil : .indexDetail(code) }
             else { nil }
         case .settings: .settings
         case .alerts: .alerts
@@ -172,6 +174,7 @@ private struct RouteDestination: View {
         case .history: DecisionHistoryScreen()
         case .backups: BackupRestoreScreen()
         case .worthOverview: WorthBuyOverviewScreen()
+        case .indexDetail(let symbol): IndexDetailScreen(symbol: symbol)
         case .twin(let strategy): TwinDetailScreen(strategy: strategy)
         }
     }
