@@ -697,8 +697,12 @@ extension NextBook {
         let buys = related.filter { $0.side == "buy" }
         let sells = related.filter { $0.side == "sell" }
         let average = position.units > 0 ? position.bookCost / Decimal(position.units) : 0
-        // 补录持仓没有买入流水，摊薄口径无法成立。
-        let hasFullHistory = !buys.isEmpty
+        // 摊薄成本只有在「流水能解释当前份额」时才成立：
+        // 买入份数 − 卖出份数 必须等于当前持仓。否则用残缺流水算出来的摊薄成本是错的
+        // （极端情况会出现负成本或把成本算成一半），此时退回买入均价并在界面标注。
+        let boughtUnits = buys.reduce(0) { $0 + $1.units }
+        let soldUnits = sells.reduce(0) { $0 + $1.units }
+        let hasFullHistory = !buys.isEmpty && (boughtUnits - soldUnits) == position.units
         var diluted: Decimal?
         if hasFullHistory, position.units > 0 {
             let buyCost = buys.reduce(Decimal.zero) { $0 + $1.price * Decimal($1.units) + $1.fee }
@@ -1330,3 +1334,28 @@ struct NextTwinBacktest: Codable, Equatable, Identifiable {
     }
 }
 
+// MARK: - 账本同步指纹
+
+extension NextBook {
+    /// 用户可改动的账本内容指纹，用来判断「本机是不是有改动没上传」。
+    ///
+    /// 不含 `history`（资产快照是行情衍生物，每天自动增行，拿来当指纹会导致
+    /// 天天提示"有未上传改动"）。每一条内容单独编码后排序再拼接，
+    /// 这样数组顺序变化不会误判成改动。
+    var syncFingerprint: String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        func encode<T: Encodable>(_ value: T) -> String {
+            guard let data = try? encoder.encode(value) else { return "" }
+            return String(decoding: data, as: UTF8.self)
+        }
+        var parts = ["cash=\(cash)"]
+        parts += positions.map { encode($0) }.sorted()
+        parts += fills.map { encode($0) }.sorted()
+        parts += cashMovements.map { encode($0) }.sorted()
+        parts += incomeEvents.map { encode($0) }.sorted()
+        parts += dividendEvents.map { encode($0) }.sorted()
+        return parts.joined(separator: "\n")
+    }
+}

@@ -12,10 +12,17 @@ struct LocalPreferences: Codable {
     var nasBaseURL = ""
     var legacyWebBaseURL = ""
     var nasRevision: Int?
-    enum CodingKeys: String, CodingKey { case goal, watch, navigation, theme, appearance, notifications, nasBaseURL, legacyWebBaseURL, nasRevision }
-    init(goal: NextGoal = NextGoal(), watch: [String] = ["159941", "563020", "159545", "159352"], navigation: NextNavigationState = NextNavigationState(), theme: GPTheme = .system, appearance: GPAppearance = GPAppearance(), notifications: NextNotificationCenter = NextNotificationCenter(), nasBaseURL: String = "", legacyWebBaseURL: String = "", nasRevision: Int? = nil) {
+    /// 上次成功上传到 NAS 时本机账本的指纹；和当前账本不一致就说明「有改动没上传」。
+    var nasSyncedFingerprint: String?
+    /// 上次成功上传的时间，用来在界面上说清"到底什么时候同步过"。
+    var nasSyncedAt: Date?
+    /// 自动上传本机账本（默认开）。关掉后只保留手动上传。
+    var nasAutoUpload = true
+    enum CodingKeys: String, CodingKey { case goal, watch, navigation, theme, appearance, notifications, nasBaseURL, legacyWebBaseURL, nasRevision, nasSyncedFingerprint, nasSyncedAt, nasAutoUpload }
+    init(goal: NextGoal = NextGoal(), watch: [String] = ["159941", "563020", "159545", "159352"], navigation: NextNavigationState = NextNavigationState(), theme: GPTheme = .system, appearance: GPAppearance = GPAppearance(), notifications: NextNotificationCenter = NextNotificationCenter(), nasBaseURL: String = "", legacyWebBaseURL: String = "", nasRevision: Int? = nil, nasSyncedFingerprint: String? = nil, nasSyncedAt: Date? = nil, nasAutoUpload: Bool = true) {
         self.goal = goal; self.watch = watch; self.navigation = navigation; self.theme = theme; self.appearance = appearance; self.notifications = notifications
         self.nasBaseURL = nasBaseURL; self.legacyWebBaseURL = legacyWebBaseURL; self.nasRevision = nasRevision
+        self.nasSyncedFingerprint = nasSyncedFingerprint; self.nasSyncedAt = nasSyncedAt; self.nasAutoUpload = nasAutoUpload
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -28,6 +35,9 @@ struct LocalPreferences: Codable {
         nasBaseURL = try values.decodeIfPresent(String.self, forKey: .nasBaseURL) ?? ""
         legacyWebBaseURL = try values.decodeIfPresent(String.self, forKey: .legacyWebBaseURL) ?? ""
         nasRevision = try values.decodeIfPresent(Int.self, forKey: .nasRevision)
+        nasSyncedFingerprint = try values.decodeIfPresent(String.self, forKey: .nasSyncedFingerprint)
+        nasSyncedAt = try values.decodeIfPresent(Date.self, forKey: .nasSyncedAt)
+        nasAutoUpload = try values.decodeIfPresent(Bool.self, forKey: .nasAutoUpload) ?? true
     }
 }
 
@@ -162,6 +172,8 @@ struct LocalPreferences: Codable {
     @Published var requestedRoute: GPRoute?
     @Published var routeRequestID = UUID()
     private let repository: NextLocalRepository
+    /// 合并自动上传用的延迟任务；连点几次"录入"只发一次。
+    private var autoUploadTask: Task<Void, Never>?
 
     var book: NextBook { ledger.current }
     var goal: NextGoal { preferences.goal }
@@ -171,6 +183,49 @@ struct LocalPreferences: Codable {
                   + patientLimitPlans.filter { $0.state == "等待价格提醒" }.map(\.code))).sorted()
     }
     var theme: GPTheme { preferences.theme }
+
+    /// 模拟/回测用的标的池：**有真实持仓就用持仓**（按份额从大到小），没有才退回自选。
+    /// 以前一律用自选，等于让策略去跑一堆自己没买的标的。
+    var simulationUniverse: [String] {
+        let held = book.positions.filter { $0.units > 0 }.sorted { $0.units > $1.units }.map(\.code)
+        return held.isEmpty ? watch : held
+    }
+
+    /// 真实账本口径的总资产 = 现金 + 持仓市值（缺报价的按成本兜底，并保证不漏算）。
+    var realBookEquity: Decimal {
+        var total = book.cash
+        for position in book.positions where position.units > 0 {
+            if let quote = quotes[position.code]?.quote, quote.price > 0 {
+                total += quote.price * Decimal(position.units)
+            } else {
+                total += position.bookCost
+            }
+        }
+        return total
+    }
+
+    /// 把真实账本的当前状态复制成 A–H 的起点：同样的份额、同样的成本、同样的现金。
+    /// 只填充**还空着**的账户（没有订单也没有持仓），不会覆盖已经在跑的模拟。
+    @discardableResult
+    func seedTwinsFromRealBook() -> String {
+        let holdings = book.positions.filter { $0.units > 0 }
+        guard !holdings.isEmpty else { return "真实账本还没有持仓，先录入再复制为模拟起点" }
+        var next = twins
+        var seeded = 0
+        let source = "真实账本 · \(holdings.count) 只持仓 + 现金 ¥\(NextMoney.text(book.cash))"
+        for strategy in NextTwinStrategy.allCases {
+            guard var account = next.accounts[strategy.rawValue] else { continue }
+            guard account.simulation.orders.isEmpty, account.simulation.positions.isEmpty else { continue }
+            account.simulation.positions = holdings
+            account.simulation.cash = book.cash
+            account.seedSource = source
+            next.accounts[strategy.rawValue] = account
+            seeded += 1
+        }
+        guard seeded > 0 else { return "A–H 都已有模拟记录，未覆盖；要重新开始请在对应策略里先清空" }
+        twins = next
+        return "已把 \(holdings.count) 只持仓 + 现金 ¥\(NextMoney.text(book.cash)) 复制为 \(seeded) 个策略的起点"
+    }
 
     /// 名称解析统一入口：账本里存的名称 > 报价里的 > 名称簿（跨启动）> 内置目录 > 代码本身。
     /// 以前界面上到处是裸代码或"场内证券"，就是因为每个地方各自取一次、取不到就没人兜底。
@@ -226,6 +281,7 @@ struct LocalPreferences: Codable {
         var copy = ledger
         try copy.apply(updated, action: action, reason: reason, at: Date())
         ledger = copy
+        scheduleAutoUpload()
     }
     func addPosition(code: String, name: String, units: Int, cost: Decimal) throws {
         guard !book.positions.contains(where: { $0.code == code }), units > 0, cost > 0 else { throw NextError.invalid("代码、份额或持仓成本无效，或该证券已经存在") }
@@ -581,11 +637,17 @@ struct LocalPreferences: Codable {
             guard repository.integrityWarning == nil else { throw NextError.invalid("本机数据完整性待恢复；下载已停止") }
             try repository.writeSafetyCopy(try makeBackup())
             try commitRealLedger(incoming, action: "从 NAS 下载真实账本", reason: "用户确认下载 NAS 修订 \(remote.revision)；原账本已备份")
-            preferences.nasRevision = remote.revision; preferences = preferences
+            preferences.nasRevision = remote.revision
+            preferences.nasSyncedFingerprint = incoming.syncFingerprint
+            preferences.nasSyncedAt = Date()
+            preferences = preferences
             syncStatus = "已从 NAS 下载账本 · 修订 \(remote.revision)"
         } catch { syncStatus = "下载停止 · \(error.localizedDescription)" }
     }
-    func syncBookManually() async {
+    /// 手动上传。`force = true` 时跳过"本机记录的修订必须等于 NAS 修订"的检查，
+    /// 直接用刚读到的远端修订号覆盖 —— 这是修订号走岔（恢复过备份、换过手机、
+    /// NAS 被网页端写过）之后唯一的出路，否则会永远卡在"请先下载核对"。
+    func syncBookManually(force: Bool = false) async {
         let snapshot = book
         let baseURL = preferences.nasBaseURL
         let knownRevision = preferences.nasRevision
@@ -593,20 +655,93 @@ struct LocalPreferences: Codable {
             let remote = try await NextNASService.readStatus(baseURL: baseURL)
             guard preferences.nasBaseURL == baseURL else { throw NextError.invalid("NAS 地址在同步过程中发生变化；本次未上传") }
             guard book == snapshot, preferences.nasRevision == knownRevision else { throw NextError.invalid("本机账本或同步修订在连接期间发生变化；请重新核对后同步") }
-            if let knownRevision {
-                guard remote.revision == knownRevision else { throw NextError.invalid("NAS 修订已变化；请先下载核对") }
-            } else {
-                guard remote.revision == 0 && !remote.hasBook else { throw NextError.invalid("NAS 已有未关联账本；请先下载核对") }
+            if !force {
+                if let knownRevision {
+                    guard remote.revision == knownRevision else { throw NextError.invalid("NAS 修订已变为 \(remote.revision)（本机记录 \(knownRevision)）；请先下载核对，或用「强制覆盖」") }
+                } else {
+                    guard remote.revision == 0 && !remote.hasBook else { throw NextError.invalid("NAS 已有账本但本机没有同步记录；请先下载核对，或用「强制覆盖」") }
+                }
             }
             let revision = try await NextNASService.pushBook(snapshot, expectedRevision: remote.revision, baseURL: baseURL)
             guard preferences.nasBaseURL == baseURL else {
                 syncStatus = "已写入原 NAS 修订 \(revision)，但设置中的 NAS 地址已更改；新地址修订未修改，请重新检查连接。"
                 return
             }
-            preferences.nasRevision = revision; preferences = preferences
+            preferences.nasRevision = revision
+            preferences.nasSyncedFingerprint = snapshot.syncFingerprint
+            preferences.nasSyncedAt = Date()
+            preferences = preferences
             syncStatus = book == snapshot ? "用户确认上传完成 · 修订 \(revision)" : "NAS 已保存快照修订 \(revision)；上传期间本机账本有新变化，请再次同步。"
         } catch { syncStatus = "上传停止 · \(error.localizedDescription)" }
     }
+    // MARK: - 账本上传状态
+
+    /// 本机账本是否有改动还没上传到 NAS。按内容指纹判断，而不是"上次点没点过上传"。
+    var hasPendingUpload: Bool {
+        guard !preferences.nasBaseURL.isEmpty else { return false }
+        return preferences.nasSyncedFingerprint != book.syncFingerprint
+    }
+
+    /// 给界面用的一句话状态：到底同步过没有、什么时候、修订几。
+    var syncStateText: String {
+        guard !preferences.nasBaseURL.isEmpty else { return "未配置 NAS" }
+        if hasPendingUpload { return "有改动待上传" }
+        if let revision = preferences.nasRevision, let at = preferences.nasSyncedAt {
+            return "已同步 · 修订 \(revision) · \(at.formatted(date: .omitted, time: .shortened))"
+        }
+        if let revision = preferences.nasRevision { return "已同步 · 修订 \(revision)" }
+        return "尚无同步记录"
+    }
+
+    /// 改账本后延迟 3 秒合并上传：连续录入不会每敲一下就打一次 NAS。
+    private func scheduleAutoUpload() {
+        guard preferences.nasAutoUpload, !preferences.nasBaseURL.isEmpty else { return }
+        autoUploadTask?.cancel()
+        autoUploadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.autoUploadBookIfNeeded()
+        }
+    }
+
+    /// 自动上传。三条硬规矩：
+    /// 1. 只在有未上传改动时才发；
+    /// 2. 修订号对不上（NAS 被别人写了）**不覆盖**，只把状态说清楚；
+    /// 3. 上传成功后把内容指纹记下来，界面才能显示"已同步"。
+    func autoUploadBookIfNeeded() async {
+        guard preferences.nasAutoUpload, !preferences.nasBaseURL.isEmpty else { return }
+        guard hasPendingUpload else { return }
+        let snapshot = book
+        let fingerprint = snapshot.syncFingerprint
+        let baseURL = preferences.nasBaseURL
+        do {
+            let remote = try await NextNASService.readStatus(baseURL: baseURL)
+            guard preferences.nasBaseURL == baseURL, book.syncFingerprint == fingerprint else { return }
+            if let known = preferences.nasRevision {
+                guard remote.revision == known else {
+                    syncStatus = "未自动上传 · NAS 修订已变为 \(remote.revision)（本机记录 \(known)）；请先下载核对，不覆盖"
+                    return
+                }
+            } else {
+                guard remote.revision == 0 && !remote.hasBook else {
+                    syncStatus = "未自动上传 · NAS 上已有账本但本机没有同步记录；请先下载核对"
+                    return
+                }
+            }
+            let revision = try await NextNASService.pushBook(snapshot, expectedRevision: remote.revision, baseURL: baseURL)
+            guard preferences.nasBaseURL == baseURL else { return }
+            preferences.nasRevision = revision
+            preferences.nasSyncedFingerprint = fingerprint
+            preferences.nasSyncedAt = Date()
+            preferences = preferences
+            syncStatus = book.syncFingerprint == fingerprint
+                ? "已自动上传 · 修订 \(revision) · \(Date.now.formatted(date: .omitted, time: .shortened))"
+                : "已上传修订 \(revision)；之后又有新改动，稍后自动再传"
+        } catch {
+            syncStatus = "自动上传失败 · \(error.localizedDescription)（本机账本未受影响）"
+        }
+    }
+
     func chartState(for code: String) -> NextChartState { preferences.navigation.chartStates[code] ?? NextChartState() }
     func saveChartState(_ state: NextChartState, for code: String) {
         preferences.navigation.chartStates[code] = state
@@ -627,14 +762,15 @@ struct LocalPreferences: Codable {
     func runTwinBacktest(_ strategy: NextTwinStrategy, fastWindow: Int = 20, slowWindow: Int = 60,
                         monthlyContribution: Decimal = 0) async {
         guard !preferences.nasBaseURL.isEmpty else { backtestStatus = "回测未运行 · 请先连接 NAS"; return }
-        let eligible = watch.filter { rules[$0]?.isHistoricalBacktestEligible == true }
-        guard !eligible.isEmpty else { backtestStatus = "回测未运行 · 缺少已核验 ETF 交易单位/费率；未猜测手数"; return }
-        guard let virtualCash = twins.accounts[strategy.rawValue]?.simulation.cash, virtualCash > 0 else {
-            backtestStatus = "回测未运行 · 该策略没有可用的虚拟起始资金"; return
-        }
+        let eligible = simulationUniverse.filter { rules[$0]?.isHistoricalBacktestEligible == true }
+        guard !eligible.isEmpty else { backtestStatus = "回测未运行 · 持仓/自选里缺少已核验 ETF 交易单位与费率；未猜测手数"; return }
+        let virtualCash = twins.accounts[strategy.rawValue]?.simulation.cash ?? 0
+        // 起点资金优先用真实总资产：以前固定一万，和账户规模完全不搭。
+        let capital = realBookEquity > 0 ? realBookEquity : virtualCash
+        guard capital > 0 else { backtestStatus = "回测未运行 · 没有可用的起始资金"; return }
         backtestStatus = "NAS 正在读取日 K 并回放 \(strategy.rawValue) 策略…"
         do {
-            let result = try await NextNASService.runBacktest(strategy: strategy, codes: eligible, initialCash: virtualCash,
+            let result = try await NextNASService.runBacktest(strategy: strategy, codes: eligible, initialCash: capital,
                 baseURL: preferences.nasBaseURL, rules: rules, monthlyContribution: monthlyContribution,
                 fastWindow: fastWindow, slowWindow: slowWindow)
             twinBacktests[strategy.rawValue] = result
@@ -657,7 +793,7 @@ struct LocalPreferences: Codable {
     func startNASGAccount(initialCash: Decimal) async {
         guard !preferences.nasBaseURL.isEmpty else { nasGStatus = "启动失败 · 请先连接 NAS"; return }
         guard initialCash > 0 else { nasGStatus = "启动失败 · 虚拟初始资金必须大于零"; return }
-        let eligible = preferences.watch.filter { rules[$0]?.isHistoricalBacktestEligible == true }
+        let eligible = simulationUniverse.filter { rules[$0]?.isHistoricalBacktestEligible == true }
         guard !eligible.isEmpty, eligible.count <= 12 else {
             nasGStatus = "启动失败 · 自选中需要 1–12 只已核验的 ETF、交易单位和 ¥0.10 手续费规则"; return
         }

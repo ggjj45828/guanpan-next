@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -79,6 +80,8 @@ struct RootView: View {
             // 派息不再需要手工一条条录：每次回到前台先同步派息历史，
             // 并按已实施派息与当前持仓份额自动登记待收（不自动加现金）。
             Task { await model.syncAllDividendHistory() }
+            // 回到前台先补一次账本上传：手机上改了持仓、没手动点过上传，NAS 上就一直是旧快照。
+            Task { await model.autoUploadBookIfNeeded() }
             while !Task.isCancelled {
                 let isSession = NextMarketClock.isRegularSession()
                 if isSession {
@@ -805,8 +808,23 @@ private struct DecisionScreen: View {
                 "currentWeight": weight.map { NSDecimalNumber(decimal: $0).stringValue as Any } ?? (NSNull() as Any),
                 "targetWeight": model.goal.targetWeights[item.code].map { NSDecimalNumber(decimal: $0).stringValue as Any } ?? (NSNull() as Any)]
         }
+        // 把「口径」也交给模型：不然它会自己按成本价或昨收乱推总资产与当日盈亏，
+        // 得出的仓位建议和 App 界面对不上。
+        let valuation = NextPortfolioCalculator.summary(book: model.book, quotes: model.quotes, at: Date(), mode: .diluted)
+        let valuationPayload: [String: Any] = [
+            "totalEquity": NSDecimalNumber(decimal: valuation.totalValue).stringValue,
+            "marketValue": NSDecimalNumber(decimal: valuation.investedValue).stringValue,
+            "cash": NSDecimalNumber(decimal: valuation.cash).stringValue,
+            "floatingPnl": NSDecimalNumber(decimal: valuation.floatingProfit).stringValue,
+            "dailyPnl": valuation.dailyChange.map { NSDecimalNumber(decimal: $0).stringValue as Any } ?? (NSNull() as Any),
+            "quoteComplete": valuation.isComplete,
+            "costMode": valuation.mode.title,
+            "definition": "总资产=现金+持仓市值；浮动盈亏=市值−成本(按 costMode)；当日盈亏=昨仓按昨收、今日买入按买入价、今日卖出按卖出价，含手续费",
+            "anomalies": valuation.anomalies.map { ["code": $0.code, "name": $0.name, "reason": $0.reason] }
+        ]
         return ["security": security, "dailyBars": Array(bars), "position": positionPayload ?? NSNull(),
             "allPositions": portfolioPositions, "cash": NSDecimalNumber(decimal: model.book.cash).stringValue, "recentFills": Array(fills),
+            "valuation": valuationPayload,
             "goal": ["years": model.goal.years, "monthlyBudget": NSDecimalNumber(decimal: model.goal.monthlyBudget).stringValue,
                      "concentrationLimit": NSDecimalNumber(decimal: model.goal.concentrationLimit).stringValue,
                      "targetWeights": model.goal.targetWeights.mapValues { NSDecimalNumber(decimal: $0).stringValue }], "dividends": Array(dividends)]
@@ -822,8 +840,14 @@ private struct DecisionScreen: View {
         if let quote {
             quoteText = "名称：\(quote.quote.name)；代码：\(code)；价格：¥\(NextMoney.text(quote.quote.price, digits: 4))；昨收：¥\(NextMoney.text(quote.quote.previousClose, digits: 4))；来源：\(quote.quote.source)；行情时间：\(quote.quote.time.formatted(date: .numeric, time: .shortened))；数据标签：\(quote.stamp.label(now: Date()))。"
         } else { quoteText = "名称：\(knownName(code))；代码：\(code)；本机没有缓存报价，不得推测当前价格。" }
-        let positionText = position.map { "本机记录相关持仓：\($0.units) 份，账面成本 ¥\(NextMoney.text($0.bookCost))，持仓成本单价 ¥\(NextMoney.text($0.costPerUnit, digits: 4))。" } ?? "本机未记录该 ETF 的持仓。"
-        let prompt = "请分析用户是否应继续观察或制定耐心限价计划。\n\(quoteText)\n\(positionText)\n投资期限：\(model.goal.years) 年；每月新增预算：¥\(NextMoney.text(model.goal.monthlyBudget))；单一集中度提醒线：\(NextMoney.text(model.goal.concentrationLimit))%。\nETF 固定手续费按用户设定每笔 0.10 元估算；不得把未验证的交易规则或盘口当成事实。请按结论、证据、风险、等待条件、后续跟踪回答；数据不足就明确指出。"
+        let summary = NextPortfolioCalculator.summary(book: model.book, quotes: model.quotes, at: Date(), mode: .diluted)
+        let positionText = position.map { item -> String in
+            let weight = summary.positions.first { $0.code == item.code }?.weightPercent
+            let weightText = weight.map { String(format: "占总资产 %.1f%%", $0) } ?? "暂无报价，算不出权重"
+            return "本机记录相关持仓：\(item.units) 份，账面成本 ¥\(NextMoney.text(item.bookCost))，成本单价 ¥\(NextMoney.text(item.costPerUnit, digits: 4))，\(weightText)。"
+        } ?? "本机未记录该 ETF 的持仓。"
+        let accountText = "账户口径：总资产 ¥\(NextMoney.text(summary.totalValue))（现金 ¥\(NextMoney.text(summary.cash)) + 持仓市值 ¥\(NextMoney.text(summary.investedValue))）；浮动盈亏 \(summary.floatingProfit >= 0 ? "+" : "")¥\(NextMoney.text(summary.floatingProfit))；当日盈亏 \(summary.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "缺完整报价，不作估算")；持有 \(summary.positions.count) 只。"
+        let prompt = "请分析用户是否应继续观察或制定耐心限价计划。\n\(quoteText)\n\(positionText)\n\(accountText)\n投资期限：\(model.goal.years) 年；每月新增预算：¥\(NextMoney.text(model.goal.monthlyBudget))；单一集中度提醒线：\(NextMoney.text(model.goal.concentrationLimit))%。\nETF 固定手续费按用户设定每笔 0.10 元估算；不得把未验证的交易规则或盘口当成事实。请按结论、证据、风险、等待条件、后续跟踪回答；数据不足就明确指出。"
         let profile = UserDefaults.standard.string(forKey: "guanpan.deepseek.profile") ?? "flash"
         do {
             let response = try await DeepSeekMobile.analyze(prompt: prompt, key: key, profile: profile)
@@ -850,7 +874,7 @@ private struct LaboratoryScreen: View {
     @State private var customFastWindow = "20"
     @State private var customSlowWindow = "60"
     @State private var backtestMonthlyContribution = "0"
-    @State private var nasGInitialCash = "10000"
+    @State private var nasGInitialCash = ""
     @State private var nasGCrosshair: Date?
     @State private var showNASGConfirmation = false
     @State private var pendingNASGAction = "start"
@@ -862,6 +886,18 @@ private struct LaboratoryScreen: View {
                 EditorialSection(title: "策略组 · A–G + H") {
                     ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 7) { ForEach(NextTwinStrategy.allCases) { strategy in Button { selected = strategy } label: { VStack(spacing: 3) { Text(strategy.rawValue).font(.system(.headline, design: .rounded).weight(.bold)); Text(shortTitle(strategy)).font(.system(size: 9)).lineLimit(1) }.frame(width: 65, height: 49).foregroundStyle(selected == strategy ? Color.white : p.ink).background(selected == strategy ? p.forestDeep : p.raised, in: RoundedRectangle(cornerRadius: 11)) }.buttonStyle(.plain).accessibilityLabel("\(strategy.rawValue) \(strategy.title)") } } }
                     NavigationLink(value: GPRoute.twin(selected)) { Label("策略假设与运行记录", systemImage: "arrow.up.right").font(.caption.weight(.medium)) }.tint(p.forest)
+                    HStack(spacing: 8) {
+                        Button { message = model.seedTwinsFromRealBook() } label: {
+                            Label("以当前持仓为起点", systemImage: "arrow.triangle.branch")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.bordered).tint(p.forest)
+                        .disabled(model.book.positions.isEmpty)
+                        Text("起点：\(model.simulationUniverse.count) 只标的 · 总资产 ¥\(NextMoney.text(model.realBookEquity))")
+                            .font(.system(size: 9.5)).foregroundStyle(p.muted).lineLimit(2)
+                    }
+                    Text("策略不再一律 1 万起步：标的是你真实持仓（没有持仓才用自选），回测起始资金是你真实总资产；点按钮可把份额与现金原样复制给还没跑过的策略账户。")
+                        .font(.system(size: 9.5)).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 GridCheckPanel()
                 EditorialSection(title: "A–H 历史成绩对照") {
@@ -1014,7 +1050,13 @@ private struct LaboratoryScreen: View {
             Button("确认同步注资", role: .destructive) { do { try model.addTwinFunding(try NextMoney.parse(funding), reason: reason); message = "已向 A–H 模拟账户记录相同金额与时点" } catch { model.errorMessage = error.localizedDescription } }
             Button("取消", role: .cancel) { }
         } message: { Text("仅改变 A–H 虚拟账户的资金流；不会读取或修改真实资产。") }
-        .task { if selected == .G { await model.refreshNASGAccount() } }
+        .task {
+            // G 账户的"虚拟初始资金"默认填真实总资产，而不是写死一万。
+            if nasGInitialCash.isEmpty, model.realBookEquity > 0 {
+                nasGInitialCash = NSDecimalNumber(decimal: model.realBookEquity).stringValue
+            }
+            if selected == .G { await model.refreshNASGAccount() }
+        }
     }
 }
 
@@ -1434,7 +1476,21 @@ private struct SettingsScreen: View {
                 }
                 EditorialSection(title: "通知与提醒") { NavigationLink(value: GPRoute.alerts) { IntentRow(icon: "bell.badge", title: "提醒和通知中心", detail: "价格、风险、限价计划与 NAS 状态") } }
                 EditorialSection(title: "账本与数据") { NavigationLink(value: GPRoute.fills) { IntentRow(icon: "list.bullet.rectangle", title: "审计记录", detail: "真实资产修改、撤销和版本") }; NavigationLink(value: GPRoute.backups) { IntentRow(icon: "externaldrive", title: "备份与恢复", detail: "数据隔离、校验、确认恢复") } }
-                EditorialSection(title: "连接状态") { GPDataRow(title: "行情服务", value: model.status); GPDataRow(title: "NAS 服务", value: model.syncStatus); GPDataRow(title: "同步通道", value: "个人资产手动 · 行情独立 · 研究独立") }
+                EditorialSection(title: "连接状态") {
+                    GPDataRow(title: "行情服务", value: model.status)
+                    GPDataRow(title: "NAS 服务", value: model.syncStatus)
+                    GPDataRow(title: "账本上传", value: model.syncStateText,
+                              note: "按账本内容指纹判断；只有真的改了才会传，修订号冲突时停止不覆盖")
+                    Toggle("自动上传本机账本", isOn: Binding(
+                        get: { model.preferences.nasAutoUpload },
+                        set: { value in
+                            model.preferences.nasAutoUpload = value; model.preferences = model.preferences
+                            if value { Task { await model.autoUploadBookIfNeeded() } }
+                        }))
+                        .font(.caption)
+                        .accessibilityIdentifier("settings.nas.autoUpload")
+                    GPDataRow(title: "同步通道", value: "个人资产自动+手动 · 行情独立 · 研究独立")
+                }
                 EditorialSection(title: "AI 投资研究") {
                     Picker("DeepSeek 模型", selection: $deepSeekProfile) {
                         Text("Flash · 日常研究").tag("flash")
@@ -1524,8 +1580,9 @@ private struct SettingsScreen: View {
             } message: { Text("本机数据先保存可验证的恢复副本；NAS 账本经校验后写入本机并留下审计记录。") }
             .confirmationDialog("确认把本机真实账本同步到新 NAS？", isPresented: $confirmSync, titleVisibility: .visible) {
                 Button("确认同步", role: .destructive) { Task { await model.syncBookManually() } }
+                Button("强制覆盖 NAS 上的版本", role: .destructive) { Task { await model.syncBookManually(force: true) } }
                 Button("取消", role: .cancel) { }
-            } message: { Text("仅当服务端修订与已确认的上次同步一致，或服务端仍为空账本时才会写入。真实资产不自动合并、不连接券商。") }
+            } message: { Text("确认同步：只有服务端修订与上次同步一致（或服务端为空）才写入。若一直提示「NAS 修订已变化」，说明两边修订号走岔了（恢复过备份/换过手机/网页端写过），可以改用「强制覆盖」：以本机账本为准覆盖 NAS 当前版本。真实资产不会自动合并、不连接券商。") }
             .alert("系统动效设置", isPresented: $dynamicTypeNote) { Button("好", role: .cancel) { } } message: { Text("请在 iOS 设置 → 辅助功能 → 动态效果中启用“减少动态效果”。应用会遵循系统设置。") }
     }
 }

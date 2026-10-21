@@ -372,20 +372,31 @@ struct UnifiedChartView: View {
         if visibleLayers.contains("price") {
             let hasOHLC = interval.wrappedValue != .intraday && samples.contains { $0.open != nil && $0.high != nil && $0.low != nil }
             if hasOHLC {
-                let candleWidth = max(2, min(9, plot.width / CGFloat(max(1, samples.count)) * 0.58))
+                // 蜡烛体必须落在整像素上：以前用圆角矩形 + 亚像素中心，宽度只有 1–3px 时
+                // 圆角会把两侧糊成灰边，一串 K 线看上去发虚。改成直角矩形 + 整像素对齐，
+                // 影线固定 1pt（3x 屏正好 3 个像素），才和同花顺一样"细但清"。
+                let rawWidth = plot.width / CGFloat(max(1, samples.count)) * 0.62
+                let candleWidth = max(1, min(9, rawWidth.rounded()))
+                let half = candleWidth / 2
                 for point in samples {
                     guard let open = point.open, let high = point.high, let low = point.low else { continue }
-                    let centerX = x(point.timestamp), yHigh = priceY(high), yLow = priceY(low)
-                    var wick = Path(); wick.move(to: CGPoint(x: centerX, y: yHigh)); wick.addLine(to: CGPoint(x: centerX, y: yLow))
+                    let snapped = (x(point.timestamp) + 0.5).rounded() - 0.5
+                    let yHigh = priceY(high), yLow = priceY(low)
                     let rising = point.close >= open
                     let color = rising ? p.terracotta : p.jade
-                    context.stroke(wick, with: .color(color), lineWidth: 0.9)
+                    var wick = Path()
+                    wick.move(to: CGPoint(x: snapped, y: yHigh))
+                    wick.addLine(to: CGPoint(x: snapped, y: yLow))
+                    context.stroke(wick, with: .color(color), lineWidth: 1)
                     let yOpen = priceY(open), yClose = priceY(point.close)
-                    let rect = CGRect(x: centerX - candleWidth / 2, y: min(yOpen, yClose), width: candleWidth, height: max(1.2, abs(yOpen - yClose)))
-                    context.fill(Path(roundedRect: rect, cornerRadius: 0.6), with: .color(color))
+                    let top = min(yOpen, yClose).rounded()
+                    let bottom = max(yOpen, yClose).rounded()
+                    let rect = CGRect(x: (snapped - half).rounded(), y: top,
+                                      width: candleWidth, height: max(1, bottom - top))
+                    context.fill(Path(rect), with: .color(color))
                 }
             } else {
-                context.stroke(pricePath, with: .color(p.chartBlue), style: StrokeStyle(lineWidth: 1.25, lineCap: .round, lineJoin: .round))
+                context.stroke(pricePath, with: .color(p.chartBlue), style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
             }
         }
         if visibleLayers.contains("iopv") {
@@ -395,7 +406,7 @@ struct UnifiedChartView: View {
                 let pos = CGPoint(x: x(point.timestamp), y: priceY(iopv))
                 if !started { iopvPath.move(to: pos); started = true } else { iopvPath.addLine(to: pos) }
             }
-            context.stroke(iopvPath, with: .color(p.chartViolet), style: StrokeStyle(lineWidth: 1.45, lineCap: .round, lineJoin: .round, dash: [4, 2]))
+            context.stroke(iopvPath, with: .color(p.chartViolet), style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round, dash: [3, 2]))
         }
         // Moving averages include earlier bars outside the zoom window.
         let fullSamples = workingSamples
@@ -436,7 +447,7 @@ struct UnifiedChartView: View {
                 let position = CGPoint(x: x(point.timestamp), y: priceY(cumulativePrice / cumulativeVolume))
                 if !started { averagePath.move(to: position); started = true } else { averagePath.addLine(to: position) }
             }
-            if started { context.stroke(averagePath, with: .color(p.chartGold), style: StrokeStyle(lineWidth: 1.35, lineCap: .round)) }
+            if started { context.stroke(averagePath, with: .color(p.chartGold), style: StrokeStyle(lineWidth: 1, lineCap: .round)) }
         }
         if visibleLayers.contains("range"), let highest = samples.compactMap({ $0.high ?? $0.close }).max(),
            let lowest = samples.compactMap({ $0.low ?? $0.close }).min() {
@@ -461,7 +472,7 @@ struct UnifiedChartView: View {
             let y = priceY(cost)
             if y >= plot.minY && y <= plot.maxY {
                 var costPath = Path(); costPath.move(to: CGPoint(x: plot.minX, y: y)); costPath.addLine(to: CGPoint(x: plot.maxX, y: y))
-                context.stroke(costPath, with: .color(p.chartCost), style: StrokeStyle(lineWidth: 1.1, dash: [6, 3]))
+                context.stroke(costPath, with: .color(p.chartCost), style: StrokeStyle(lineWidth: 0.9, dash: [6, 3]))
             } else {
                 let labelY = cost < domain.lowerBound ? plot.maxY : plot.minY
                 context.draw(Text("成本线超出本段价格轴 · ¥\(NextMoney.text(cost, digits: 3))").font(.system(size: 8, weight: .medium)).foregroundColor(p.muted), at: CGPoint(x: plot.midX, y: labelY))
@@ -534,8 +545,9 @@ struct UnifiedChartView: View {
         for (index, point) in bars.enumerated() {
             guard let volume = point.volume, tones.indices.contains(index) else { continue }
             let height = (rect.height - 12) * cg(volume / maxVolume)
-            let barRect = CGRect(x: xOf(point.timestamp) - barWidth / 2, y: rect.maxY - max(1, height), width: barWidth, height: max(1, height))
-            context.fill(Path(roundedRect: barRect, cornerRadius: 0.8), with: .color(tones[index].opacity(0.72)))
+            let snapped = (xOf(point.timestamp) + 0.5).rounded() - 0.5
+            let barRect = CGRect(x: (snapped - barWidth / 2).rounded(), y: rect.maxY - max(1, height), width: max(1, barWidth.rounded()), height: max(1, height))
+            context.fill(Path(barRect), with: .color(tones[index]))
         }
         context.draw(Text("量 \(NextMoney.text(maxVolume, digits: 0))").font(.system(size: 7.5, design: .monospaced)).foregroundColor(p.muted),
                      at: CGPoint(x: rect.minX + 30, y: rect.minY + 5))
@@ -558,8 +570,9 @@ struct UnifiedChartView: View {
             let value = turnovers[index]
             guard value > 0, tones.indices.contains(index) else { continue }
             let height = (rect.height - 12) * cg(value / maxTurnover)
-            let barRect = CGRect(x: xOf(point.timestamp) - barWidth / 2, y: rect.maxY - max(1, height), width: barWidth, height: max(1, height))
-            context.fill(Path(roundedRect: barRect, cornerRadius: 0.8), with: .color(tones[index].opacity(0.45)))
+            let snapped = (xOf(point.timestamp) + 0.5).rounded() - 0.5
+            let barRect = CGRect(x: (snapped - barWidth / 2).rounded(), y: rect.maxY - max(1, height), width: max(1, barWidth.rounded()), height: max(1, height))
+            context.fill(Path(barRect), with: .color(tones[index].opacity(0.9)))
         }
         context.draw(Text("额 \(amountText(maxTurnover))·估算").font(.system(size: 7.5, design: .monospaced)).foregroundColor(p.muted),
                      at: CGPoint(x: rect.minX + 46, y: rect.minY + 5))

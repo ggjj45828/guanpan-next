@@ -43,13 +43,26 @@ struct HoldingsBreakdownPanel: View {
         EditorialSection(title: "持仓盈亏", trailing: mode.title, accent: p.jade) {
             HStack(alignment: .top, spacing: 14) {
                 GPValue(label: "总资产", value: "¥\(NextMoney.text(data.totalValue))",
-                        footnote: data.isComplete ? "现金 + 持仓市值" : "部分持仓缺报价")
+                        footnote: data.isComplete ? "现金 + 持仓市值"
+                            : (data.anomalies.isEmpty ? "部分持仓缺报价" : "\(data.anomalies.count) 只报价异常，已排除"))
                 GPValue(label: "今日盈亏", value: data.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—",
                         footnote: data.dailyChange == nil ? "需完整新鲜行情" : "昨仓按昨收、今买按买入价",
                         emphasis: data.dailyChange.map { $0 >= 0 ? p.risk : p.jade })
                 GPValue(label: "浮动盈亏", value: "\(data.floatingProfit >= 0 ? "+" : "")¥\(NextMoney.text(data.floatingProfit))",
                         footnote: "\(NextNum.signed(NextNum.double(data.floatingPercent)))% · \(mode.title)",
                         emphasis: data.floatingProfit >= 0 ? p.risk : p.jade)
+            }
+            if !data.anomalies.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(data.anomalies) { item in
+                        HStack(alignment: .top, spacing: 5) {
+                            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9)).foregroundStyle(p.terracotta)
+                            Text("\(item.name)（\(item.code)）：\(item.reason)")
+                                .font(.system(size: 10)).foregroundStyle(p.terracotta)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }.padding(.top, 2)
             }
             HStack(spacing: 6) {
                 ForEach(NextCostDisplayMode.allCases) { item in

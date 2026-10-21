@@ -336,7 +336,7 @@ struct IndexIntradayChart: View {
                 Gradient(colors: [tone.opacity(0.22), tone.opacity(0.02)]),
                 startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
         }
-        context.stroke(line, with: .color(tone), style: StrokeStyle(lineWidth: 1.4, lineJoin: .round))
+        context.stroke(line, with: .color(tone), style: StrokeStyle(lineWidth: 1, lineJoin: .round))
         if let lastPoint = samples.indices.last.map({ point($0, size) }) {
             let dot = Path(ellipseIn: CGRect(x: lastPoint.x - 2, y: lastPoint.y - 2, width: 4, height: 4))
             context.fill(dot, with: .color(tone))

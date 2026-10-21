@@ -40,6 +40,16 @@ struct NextPositionSummary: Identifiable, Equatable {
     var id: String { code }
 }
 
+/// 报价异常：行情源偶发串号（同一个代码返回了别的品种）时，价格会离谱到几十倍。
+/// 这种情况必须**把该持仓排除在总资产之外并明说**，不能拿它算市值 ——
+/// 一次串号就能把总资产从 9 千算成 1 万 5。
+struct NextPortfolioAnomaly: Identifiable, Equatable {
+    let code: String
+    let name: String
+    let reason: String
+    var id: String { code }
+}
+
 struct NextRealizedItem: Identifiable, Equatable {
     let code: String
     let name: String
@@ -61,6 +71,8 @@ struct NextPortfolioSummary: Equatable {
     let realizedTotal: Decimal
     let realizedByCode: [NextRealizedItem]
     let recentSells: [NextFill]
+    /// 被排除在汇总之外的异常报价（有持仓但报价不可信）。
+    let anomalies: [NextPortfolioAnomaly]
 }
 
 enum NextPortfolioCalculator {
@@ -77,6 +89,7 @@ enum NextPortfolioCalculator {
         var pricedCost = Decimal.zero
         var daily = Decimal.zero
         var complete = true
+        var anomalies: [NextPortfolioAnomaly] = []
 
         for position in book.positions where position.units > 0 {
             guard let cached = quotes[position.code], cached.usableForDisplay(at: now) else {
@@ -84,6 +97,14 @@ enum NextPortfolioCalculator {
                 continue
             }
             let quote = cached.quote
+            let storedCost = position.costPerUnit
+            if let reason = anomalyReason(quote: quote, storedCostPerUnit: storedCost) {
+                anomalies.append(NextPortfolioAnomaly(code: position.code,
+                                                      name: NextNameBook.display(position.name, code: position.code),
+                                                      reason: reason))
+                complete = false
+                continue
+            }
             let value = quote.price * Decimal(position.units)
             let basis = book.costBasis(for: position.code)
             var perUnit: Decimal
@@ -150,7 +171,27 @@ enum NextPortfolioCalculator {
             positions: rows.sorted { $0.marketValue > $1.marketValue },
             realizedTotal: book.fills.reduce(Decimal.zero) { $0 + $1.realized },
             realizedByCode: realizedItems,
-            recentSells: book.fills.filter { $0.side == "sell" }.sorted { $0.date > $1.date }.prefix(5).map { $0 })
+            recentSells: book.fills.filter { $0.side == "sell" }.sorted { $0.date > $1.date }.prefix(5).map { $0 },
+            anomalies: anomalies)
+    }
+
+    /// 报价异常判定。两种都能在不误伤正常行情的前提下抓住「串号」：
+    /// 1. 与昨收偏离超过 25%（ETF 有涨跌幅限制，正常到不了）；
+    /// 2. 与账本成本相差 3 倍以上（除权不会让价格在一天内变三倍）。
+    static func anomalyReason(quote: NextQuote, storedCostPerUnit: Decimal) -> String? {
+        guard quote.price > 0, quote.previousClose > 0 else { return "报价缺失或为零" }
+        let change = quote.price / quote.previousClose - 1
+        let limit = Decimal(string: "0.25")!
+        if change > limit || change < -limit {
+            let percent = NextNum.double(change) * 100
+            return "报价与昨收偏离 \(String(format: "%.1f", percent))%，疑似行情源串号，已排除在总资产之外"
+        }
+        guard storedCostPerUnit > 0 else { return nil }
+        let ratio = quote.price / storedCostPerUnit
+        if ratio > 3 || ratio < Decimal(string: "0.3333")! {
+            return "报价是账本成本的 \(String(format: "%.1f", NextNum.double(ratio))) 倍，疑似行情源串号，已排除在总资产之外"
+        }
+        return nil
     }
 }
 
