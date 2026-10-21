@@ -56,7 +56,12 @@ final class NextCoreTests: XCTestCase {
         XCTAssertEqual(book.total(using: ["159941": quote(time: now)]), 240)
         XCTAssertEqual(book.positions[0].costPerUnit, 1.2)
     }
-    func testDailyAssetChangeRequiresCompleteFreshQuotes() {
+    /// 当日盈亏必须与持仓列表（PortfolioSummary）同一口径：
+    /// 只要每只持仓都有可用行情就出数，行情是缓存的也照样给（新鲜度由 quality 标注，
+    /// 不谎称实时）；缺报价、或报价异常（疑似串号）才保守隐藏。
+    /// 旧逻辑额外要求「全部行情都新鲜」，会出现首页/真实资产页显示
+    /// 「需完整新鲜行情」而持仓列表照样给数 —— 同一个数两处不一致。
+    func testDailyAssetChangeMatchesHoldingsSummaryRegardlessOfFreshness() {
         var book = NextBook(); book.cash = 100
         book.positions = [NextPosition(code: "159941", name: "纳指ETF", units: 100, bookCost: 120)]
         let fresh = quote(time: now, price: 1.5)
@@ -65,9 +70,20 @@ final class NextCoreTests: XCTestCase {
         XCTAssertEqual(value.total, 250)
         XCTAssertEqual(value.dailyChange, 10)
         XCTAssertEqual(NSDecimalNumber(decimal: value.dailyChangePercent ?? 0).doubleValue, 4.1666666667, accuracy: 0.000001)
+        // 缓存行情：仍然给数（与持仓列表一致），但 quality 不能是实时
         let stale = quote(time: now.addingTimeInterval(-3600), price: 1.5)
         let oldStamp = NextDataStamp(source: "test", observedAt: stale.time, quality: .cached, detail: "")
-        XCTAssertNil(book.valuation(using: ["159941": NextCachedQuote(quote: stale, stamp: oldStamp)], at: now).dailyChange)
+        let staleValue = book.valuation(using: ["159941": NextCachedQuote(quote: stale, stamp: oldStamp)], at: now)
+        XCTAssertEqual(staleValue.dailyChange, 10)
+        XCTAssertTrue(staleValue.quality != .live)
+        // 缺报价：绝不把部分估值当作当日盈亏
+        XCTAssertNil(book.valuation(using: [:], at: now).dailyChange)
+        // 报价异常（疑似串号）：保守隐藏，与持仓列表一致
+        let bogus = quote(time: now, price: 5)
+        let bogusStamp = NextDataStamp(source: "test", observedAt: now, quality: .live, detail: "")
+        let bogusValue = book.valuation(using: ["159941": NextCachedQuote(quote: bogus, stamp: bogusStamp)], at: now)
+        XCTAssertNil(bogusValue.dailyChange)
+        XCTAssertNil(bogusValue.total)
     }
     func testOnlineQuoteCacheLabelAgesWithoutAnotherNetworkRequest() {
         let observed = now.addingTimeInterval(-3600)
