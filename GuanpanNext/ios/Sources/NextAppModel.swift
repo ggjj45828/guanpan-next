@@ -346,6 +346,20 @@ struct LocalPreferences: Codable {
                              reason: "用户订正 \(code)：\(previous.units) 份 / ¥\(NextMoney.text(previous.bookCost)) → \(units) 份 / ¥\(NextMoney.text(totalCost))")
     }
 
+    /// 现金变动统一入口：转入/转出都走这里，写账本并留审计。
+    /// 买卖会自己联动现金，这个方法只用于「券商那边真的划了钱进/出」。
+    func addCash(_ amount: Decimal, reason: String) throws {
+        guard !amount.isNaN, amount != 0 else { throw NextError.invalid("现金变动金额不能为零") }
+        let note = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !note.isEmpty else { throw NextError.invalid("现金变动需要写明来源") }
+        var updated = book
+        guard updated.cash + amount >= 0 else { throw NextError.invalid("转出超过可用现金 ¥\(NextMoney.text(updated.cash))") }
+        updated.cash += amount
+        updated.cashMovements.append(NextCashMovement(date: Date(), amount: amount, reason: note))
+        try commitRealLedger(updated, action: amount > 0 ? "记录现金转入" : "记录现金转出",
+                             reason: "\(note)；金额 ¥\(NextMoney.text(abs(amount)))")
+    }
+
     func recordTrade(code: String, name: String, side: String, units: Int, price: Decimal, fee: Decimal) throws {
         guard code.count == 6, code.allSatisfy(\.isNumber), units > 0, price > 0,
               side == "buy" || side == "sell", fee >= 0, !fee.isNaN else { throw NextError.invalid("成交代码、方向、价格、份额或手续费无效") }
@@ -357,7 +371,10 @@ struct LocalPreferences: Codable {
         let positionIndex = updated.positions.firstIndex { $0.code == code }
         var realized: Decimal = 0
         if side == "buy" {
-            guard updated.cash >= gross + fee else { throw NextError.invalid("账本现金不足。请先在资产页记录真实转入；若只是补录已有持仓，可直接从此证券录入持仓。") }
+            guard updated.cash >= gross + fee else {
+                let shortfall = gross + fee - updated.cash
+                throw NextError.invalid("现金不足：本笔需要 ¥\(NextMoney.text(gross + fee))（含手续费 ¥\(NextMoney.text(fee))），可用 ¥\(NextMoney.text(updated.cash))，还差 ¥\(NextMoney.text(shortfall))。请点「先补充现金」记录一笔转入；若只是补录已有持仓，用「录入持仓」不会动现金。")
+            }
             updated.cash -= gross + fee
             if let positionIndex {
                 updated.positions[positionIndex].units += units
@@ -894,6 +911,17 @@ struct LocalPreferences: Codable {
             postLocalAlert(level: "行情", fingerprint: "market-refresh-unavailable", title: "行情刷新失败", detail: "\(error.localizedDescription)。当前显示本机缓存，不据此生成新的价格计划。", stamp: NextDataStamp(source: "行情刷新", observedAt: Date(), quality: .stale, detail: "请求失败"))
         }
     }
+    /// 只刷新分时（不碰日 K 与 NAS 档案注册），用于盘中每隔一分钟补一次曲线。
+    /// 失败就静默保留现有曲线 —— 自动刷新不该弹窗打断人。
+    func refreshIntraday(_ code: String) async {
+        do {
+            let raw = try await NextMarketDataService.fetchIntraday(code: code)
+            let dataset = quotes[code].map { raw.attachingVerifiedIOPV($0.quote) } ?? raw
+            try dataset.validate()
+            chartData[code] = dataset
+        } catch { }
+    }
+
     func refreshInstrument(_ code: String) async {
         await registerNASArchive(code)
         await refreshQuotes(codes: [code])

@@ -82,12 +82,24 @@ struct RootView: View {
             Task { await model.syncAllDividendHistory() }
             // 回到前台先补一次账本上传：手机上改了持仓、没手动点过上传，NAS 上就一直是旧快照。
             Task { await model.autoUploadBookIfNeeded() }
+            // 打开软件就先刷一次：进来就有最新价，不用手动点。
+            if !model.monitoredCodes.isEmpty { await model.refreshQuotes(codes: model.monitoredCodes) }
+            if let code = model.preferences.navigation.selectedSecurity, !code.isEmpty {
+                await model.refreshInstrument(code)
+            }
+            var tick = 0
             while !Task.isCancelled {
                 let isSession = NextMarketClock.isRegularSession()
                 if isSession {
                     await model.refreshQuotes(codes: model.monitoredCodes)
+                    // 分时是分钟级数据，行情 10 秒一跳、曲线每 60 秒（6 跳）补一次就够。
+                    tick += 1
+                    if tick % 6 == 0,
+                       let code = model.preferences.navigation.selectedSecurity, !code.isEmpty {
+                        await model.refreshIntraday(code)
+                    }
                 }
-                let delay: UInt64 = isSession ? 60_000_000_000 : 300_000_000_000
+                let delay: UInt64 = isSession ? 10_000_000_000 : 300_000_000_000
                 do { try await Task.sleep(nanoseconds: delay) } catch { break }
             }
         }
@@ -1326,7 +1338,7 @@ private struct AddPositionSheet: View {
                     }
                 }
                 Section {
-                    Text("录入持仓只记录**当前事实**：份数 + 每份买入成本。它不产生买入流水，因此**不会计算摊薄成本**——摊薄成本只由买入/卖出流水推导，在「资产流水」里才成立。").font(.caption).foregroundStyle(p.muted)
+                    Text("录入持仓只记录**当前事实**：份数 + 每份买入成本。它不产生买入流水，因此**不会计算摊薄成本**，也**不会动现金**（现金只由买入/卖出、以及「现金变动」改变）。").font(.caption).foregroundStyle(p.muted)
                 }
             }
                 .navigationTitle("录入持仓").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
@@ -1358,6 +1370,7 @@ struct GPTradeRequest: Identifiable {
 struct TradeEntrySheet: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.gp) private var p
     let request: GPTradeRequest
     @State private var units = ""
     @State private var price = ""
@@ -1368,6 +1381,13 @@ struct TradeEntrySheet: View {
     /// 名称没查出来时返回的是代码本身（不再用「场内证券」这种占位词），据此判断是否还在等名称。
     private var nameResolved: Bool { name != request.code }
     private var verifiedETF: Bool { model.rules[request.code]?.assetClass == .etf || model.quotes[request.code]?.quote.providerInstrumentType == "ETF" }
+    /// 本笔需要的现金（买入含手续费）。字段没填全就是 nil。
+    private var tradeAmount: Decimal? {
+        guard let count = Int(units), count > 0,
+              let unitPrice = try? NextMoney.parse(price), unitPrice > 0 else { return nil }
+        let feeValue = (try? NextMoney.parse(fee)) ?? 0
+        return unitPrice * Decimal(count) + max(0, feeValue)
+    }
     var body: some View {
         NavigationStack {
             Form {
@@ -1383,6 +1403,29 @@ struct TradeEntrySheet: View {
                 Section("真实账本") {
                     Text("可用现金 ¥\(NextMoney.text(model.book.cash))")
                     Text("持有 \(model.book.positions.first(where: { $0.code == request.code })?.units ?? 0) 份")
+                    if let amount = tradeAmount {
+                        if request.side == "buy" {
+                            let after = model.book.cash - amount
+                            if after < 0 {
+                                Text("本笔需 ¥\(NextMoney.text(amount))，成交后现金会变成 ¥\(NextMoney.text(after))，还差 ¥\(NextMoney.text(-after))。")
+                                    .font(.caption).foregroundStyle(p.risk)
+                                Button("先补充现金 ¥\(NextMoney.text(-after))") {
+                                    do {
+                                        try model.addCash(-after, reason: "买入 \(name) \(units) 份前补充现金")
+                                        model.errorMessage = nil
+                                    } catch { model.errorMessage = error.localizedDescription }
+                                }
+                                Text("补充会记一笔现金转入（可审计），然后就可以正常记录这笔买入了。")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            } else {
+                                Text("本笔需 ¥\(NextMoney.text(amount))（含手续费），成交后剩 ¥\(NextMoney.text(after))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Text("本笔回款 ¥\(NextMoney.text(amount))，成交后现金 ¥\(NextMoney.text(model.book.cash + amount))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     if request.side == "buy" && model.book.positions.allSatisfy({ $0.code != request.code }) {
                         Button("这是已有持仓：直接补录") { confirmImport = true }
                             .disabled(!nameResolved || Int(units) == nil || price.isEmpty)
@@ -1497,7 +1540,8 @@ private struct SettingsScreen: View {
                         .font(.caption)
                         .accessibilityIdentifier("settings.nas.autoUpload")
                     GPDataRow(title: "NAS 服务", value: model.syncStatus)
-                    GPDataRow(title: "行情服务", value: model.status)
+                    GPDataRow(title: "行情服务", value: model.status,
+                              note: "盘中每 10 秒自动刷新，分时每 60 秒；收盘后每 5 分钟。打开应用即刷一次")
                     GPDataRow(title: "同步通道", value: "账本(自动+手动) · 行情 · 研究，三条互相独立")
                 }
                 EditorialSection(title: "AI 投资研究") {
