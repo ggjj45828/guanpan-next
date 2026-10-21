@@ -104,6 +104,13 @@ struct GPPalette {
     var chartViolet: Color { comfort ? Color(hex: 0x806C96) : scheme == .dark ? Color(hex: 0xC0A4E8) : Color(hex: 0x8872B7) }
     var chartGold: Color { comfort ? Color(hex: 0x9B7D42) : scheme == .dark ? Color(hex: 0xE2C178) : Color(hex: 0xB08A3C) }
     var chartCost: Color { comfort ? Color(hex: 0xA45F6C) : scheme == .dark ? Color(hex: 0xE38FA3) : Color(hex: 0xB85C78) }
+    /// 涨跌语义色（全局唯一来源）：国内口径「红涨绿跌」。
+    /// 任何价格变动的着色都必须走 `changeTone(_:)` 或这两个属性；
+    /// 不要再拿 risk / jade / terracotta 当涨跌色用（它们是「警示 / 建议 / 均线」语义）。
+    var gpUp: Color { comfort ? Color(hex: 0xA8432F) : scheme == .dark ? Color(hex: 0xFF6B5E) : Color(hex: 0xDB3B34) }
+    var gpDown: Color { comfort ? Color(hex: 0x3D765D) : scheme == .dark ? Color(hex: 0x4FC07E) : Color(hex: 0x1E9E5A) }
+    /// 价格线本身用 `ink`（近黑），涨跌用 `gpUp`/`gpDown`，与「price=黑、涨红跌绿」一致。
+    func changeTone(_ value: Double) -> Color { value >= 0 ? gpUp : gpDown }
 }
 
 private struct GPPaletteKey: EnvironmentKey {

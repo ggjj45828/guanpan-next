@@ -31,6 +31,9 @@ struct NextPosition: Codable, Identifiable, Equatable {
     var name: String
     var units: Int
     var bookCost: Decimal
+    /// 建仓日：你实际开始持有这只的日期。用来判断分红归属——只登记建仓日及之后的派息，
+    /// 之前发生的除息不算你的（你刚录入持仓时不会冒出历史分红待确认）。无流水又无此日期时按迁移日处理。
+    var acquiredAt: Date? = nil
     var costPerUnit: Decimal { units > 0 ? bookCost / Decimal(units) : 0 }
 }
 struct NextFill: Codable, Identifiable, Equatable {
@@ -610,7 +613,7 @@ enum NextResearch {
 
 // Persisted navigation lets deep links, search and scene restoration return to
 // the same user context instead of rebuilding a flow from an internal menu.
-enum NextTab: String, Codable, CaseIterable { case overview, market, decision, laboratory, assets }
+enum NextTab: String, Codable, CaseIterable { case overview, market, decision, laboratory, assets, income, mine }
 enum NextRoute: Codable, Equatable {
     case instrument(String), intent(String, String), chart(String), portfolio(String), replay(String)
     case settings, alerts, fills, history, backups, twin(String)
@@ -1087,7 +1090,7 @@ struct NextAppArchive: Codable, Equatable {
     var dividendEvents: [String: [NextETFDividendEvent]] = [:]
     var patientLimitPlans: [NextPatientLimitPlan] = []
     var twinBacktests: [String: NextTwinBacktest] = [:]
-    var theme: NextTheme = .system
+    var theme: NextTheme = .light
     private enum CodingKeys: String, CodingKey { case schemaVersion, book, experiment, twins, goal, watch, navigation, cachedQuotes, chartData, instrumentRules, orderBooks, notifications, audits, decisionHistory, nasResearch, dividendEvents, patientLimitPlans, twinBacktests, theme }
     init() {}
     init(from decoder: Decoder) throws {
@@ -1110,7 +1113,7 @@ struct NextAppArchive: Codable, Equatable {
         dividendEvents = try values.decodeIfPresent([String: [NextETFDividendEvent]].self, forKey: .dividendEvents) ?? [:]
         patientLimitPlans = try values.decodeIfPresent([NextPatientLimitPlan].self, forKey: .patientLimitPlans) ?? []
         twinBacktests = try values.decodeIfPresent([String: NextTwinBacktest].self, forKey: .twinBacktests) ?? [:]
-        theme = try values.decodeIfPresent(NextTheme.self, forKey: .theme) ?? .system
+        theme = try values.decodeIfPresent(NextTheme.self, forKey: .theme) ?? .light
     }
     func validate() throws {
         guard schemaVersion == 1 else { throw NextError.invalid("本机数据版本不受支持") }

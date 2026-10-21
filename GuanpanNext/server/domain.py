@@ -318,6 +318,8 @@ class NextDatabase:
                 PRAGMA journal_mode=WAL;
                 -- 旧版网页（观盘 Pro 智能看盘）的数据包：它本来只存 localStorage，
                 -- 换端口/清缓存就全丢。存到 NAS 后，任何设备打开都能拉回来。
+                -- 组合网格：NAS 后台按真实持仓自动跑，只做模拟，不碰 real_books。
+                CREATE TABLE IF NOT EXISTS grid_state (id TEXT PRIMARY KEY, body TEXT, updated_at TEXT);
                 CREATE TABLE IF NOT EXISTS web_snapshots (
                     id TEXT PRIMARY KEY, revision INTEGER NOT NULL, body TEXT NOT NULL, updated_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS legacy_inbox (
@@ -442,6 +444,27 @@ class NextDatabase:
             for revision in doomed:
                 db.execute("DELETE FROM real_book_history WHERE id=? AND revision=?", (book_id, revision))
         return len(doomed)
+
+    def get_grid_state(self, grid_id="portfolio"):
+        self.validate_id(grid_id)
+        with self.connect() as db:
+            row = db.execute("SELECT body, updated_at FROM grid_state WHERE id=?", (grid_id,)).fetchone()
+        if not row or not row[0]:
+            return {"state": None, "updatedAt": None}
+        return {"state": json.loads(row[0]), "updatedAt": row[1]}
+
+    def put_grid_state(self, state, grid_id="portfolio"):
+        self.validate_id(grid_id)
+        if not isinstance(state, dict):
+            raise InvalidData("grid state must be an object")
+        body = json.dumps(state, ensure_ascii=False, separators=(",", ":"), default=str)
+        if len(body.encode("utf-8")) > 8 * 1024 * 1024:
+            raise InvalidData("grid state too large")
+        stamp = datetime.now(timezone.utc).isoformat()
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO grid_state (id, body, updated_at) VALUES (?, ?, ?)",
+                       (grid_id, body, stamp))
+        return stamp
 
     def get_web_snapshot(self, snapshot_id="classic"):
         self.validate_id(snapshot_id)

@@ -29,7 +29,7 @@ struct IndexDetailScreen: View {
     private var name: String { GlobalIndexFeed.displayName(symbol) }
     private var tone: Color {
         guard let quote, quote.price > 0 else { return p.muted }
-        return quote.changePercent >= 0 ? p.risk : p.jade
+        return p.changeTone(NextNum.double(quote.changePercent))
     }
     private var effectivePrevious: Decimal? {
         if let previousClose, previousClose > 0 { return previousClose }
@@ -325,7 +325,7 @@ struct IndexIntradayChart: View {
             let current = point(index, size)
             if index == 0 { line.move(to: current) } else { line.addLine(to: current) }
         }
-        let tone = isUp ? p.risk : p.jade
+        let tone = isUp ? p.gpUp : p.gpDown
         // 面积：把折线闭合到底边，用低透明度填充，幅度小的时候也不至于看不见。
         if let first = samples.indices.first, let last = samples.indices.last {
             var area = line

@@ -573,5 +573,102 @@ enum NextNASService {
     private static func endpoint(_ baseURL: String) throws -> URL {
         try validateURL(baseURL).appendingPathComponent("v1").appendingPathComponent("real").appendingPathComponent("books").appendingPathComponent("main")
     }
+
+    // MARK: - 网格状态（明日挂单表）
+    /// NAS 网格引擎的整包状态：账户汇总 + 每只标的的「明日挂单表」(ladder)。
+    /// 网格不预测涨跌，只回答「若明天走到某价，该买/卖多少」——这是真实的未来操作指引。
+    static func fetchGridStatus(baseURL: String, session: URLSession = .shared) async throws -> NextNASGridStatus {
+        let url = try validateURL(baseURL).appendingPathComponent("v1").appendingPathComponent("grid").appendingPathComponent("status")
+        let (data, response) = try await session.data(for: URLRequest(url: url, timeoutInterval: 12))
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw NextError.invalid("NAS 网格状态读取失败；确认 NAS 容器与 30001 端口可达") }
+        return try JSONDecoder().decode(NextNASGridStatus.self, from: data)
+    }
+}
+
+/// `GET /v1/grid/status` 的返回。价格字段来自服务端 Decimal 量化，一律以字符串传输，客户端再转 Decimal。
+struct NextNASGridStatus: Decodable {
+    let ok: Bool
+    let initialized: Bool
+    let updatedAt: String?
+    let summary: NextNASGridSummary?
+    let ladder: [NextNASGridLadderRow]
+    let daily: [NextNASGridDaily]
+    let fills: [NextNASGridFill]
+
+    enum CodingKeys: String, CodingKey { case ok, initialized, updatedAt, summary, ladder, daily, fills }
+
+    // 未初始化的 NAS 只回 {ok, initialized:false, summary:null, daily:[], fills:[]}，
+    // 整个 ladder 键都不存在。用合成 Decodable 会抛 keyNotFound，导致新 NAS 一打开就报错，
+    // 所以这里对 ladder/daily/fills 一律按「缺省空数组」处理。
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decode(Bool.self, forKey: .ok)
+        initialized = try c.decode(Bool.self, forKey: .initialized)
+        updatedAt = try c.decodeIfPresent(String.self, forKey: .updatedAt)
+        summary = try c.decodeIfPresent(NextNASGridSummary.self, forKey: .summary)
+        ladder = try c.decodeIfPresent([NextNASGridLadderRow].self, forKey: .ladder) ?? []
+        daily = try c.decodeIfPresent([NextNASGridDaily].self, forKey: .daily) ?? []
+        fills = try c.decodeIfPresent([NextNASGridFill].self, forKey: .fills) ?? []
+    }
+}
+struct NextNASGridSummary: Decodable {
+    let startEquity: String
+    let equity: String
+    let cash: String
+    let pnl: String
+    let pnlPercent: String
+    let fees: String
+    let buys: Int
+    let sells: Int
+    let todayFills: Int
+    let days: Int
+    let plans: [NextNASGridPlan]
+}
+struct NextNASGridPlan: Decodable {
+    let code: String
+    let anchor: String
+    let stepPercent: String
+    let levels: Int
+    let sharesPerRung: Int
+    let units: Int
+    let buys: Int
+    let sells: Int
+    let fees: String
+}
+struct NextNASGridLadderRow: Decodable, Identifiable {
+    let code: String
+    let price: String
+    let anchor: String
+    let stepPercent: String
+    let position: Int
+    let buysLeft: Int
+    let sellsLeft: Int
+    let cashEnoughFor: Int
+    let rungs: [NextNASGridRung]
+    let note: String
+    var id: String { code }
+}
+struct NextNASGridRung: Decodable, Identifiable {
+    let side: String
+    let level: Int
+    let price: String
+    let units: Int
+    let reachable: Bool
+    var id: String { "\(side)-\(level)" }
+    var isBuy: Bool { side == "buy" }
+}
+struct NextNASGridDaily: Decodable {
+    let day: String?
+    let equity: String?
+    let cash: String?
+    let pnl: String?
+}
+struct NextNASGridFill: Decodable {
+    let code: String?
+    let side: String?
+    let level: Int?
+    let price: String?
+    let units: Int?
+    let at: String?
 }
 private extension NextBook { func validated() throws -> NextBook { try validate(); return self } }

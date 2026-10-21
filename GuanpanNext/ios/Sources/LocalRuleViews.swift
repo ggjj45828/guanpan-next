@@ -41,6 +41,17 @@ struct WorthBuyPanel: View {
         EditorialSection(title: "值不值得买", trailing: "本机规则打分", accent: p.terracotta) {
             if let assessment {
                 WorthBuyScoreHeader(assessment: assessment)
+                ScoreRadarChart(dimensions: assessment.dimensions)
+                    .frame(maxWidth: .infinity)
+                HStack(spacing: 6) {
+                    Text("六维均值 \(Int(assessment.dimensionAverage.rounded()))")
+                        .font(.caption.weight(.semibold)).foregroundStyle(p.terracotta)
+                    Text("趋势 / 位置 / 估值 / 股息 / 仓位 / 流动性，越高越适合买入；灰色为数据不足按中性估的")
+                        .font(.caption2).foregroundStyle(p.muted)
+                    Spacer(minLength: 0)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                ScoreRadarBreakdown(dimensions: assessment.dimensions)
                 WorthBuyBreakdown(assessment: assessment)
                 if let yield = assessment.dividendYieldPercent {
                     GPDataRow(title: "股息率（近 12 个月）",
@@ -51,7 +62,7 @@ struct WorthBuyPanel: View {
                 }
                 if let position, let gap = assessment.costGapPercent {
                     GPDataRow(title: "相对账面成本", value: "\(NextNum.signed(gap))%",
-                              note: "成本 ¥\(NextMoney.text(position.costPerUnit, digits: 4)) · 只作参考，不参与打分", valueColor: gap >= 0 ? p.risk : p.jade)
+                              note: "成本 ¥\(NextMoney.text(position.costPerUnit, digits: 4)) · 只作参考，不参与打分", valueColor: p.changeTone(NextNum.double(gap)))
                 }
                 ForEach(assessment.notes, id: \.self) { note in
                     Text(note).font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
@@ -385,7 +396,7 @@ private struct GlobalIndexCard: View {
     let quote: GlobalIndexQuote
     private var tone: Color {
         if quote.price <= 0 { return p.muted }
-        return quote.changePercent >= 0 ? p.risk : p.jade
+        return p.changeTone(NextNum.double(quote.changePercent))
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -587,6 +598,7 @@ struct WorthBuyOverviewScreen: View {
                         GPValue(label: "等确认", value: "\(counts.wait)", emphasis: p.terracotta)
                         GPValue(label: "回避", value: "\(counts.hold)", emphasis: p.jade)
                     }.padding(.bottom, 2)
+                    ScoreRadarPortfolioChart(assessments: items.map(\.assessment))
                     ForEach(items) { item in WorthOverviewRow(item: item) }
                     Text("分数 = 技术面基准 + 股息率 + 价格位置 + 溢折价 + 仓位修正。逐条依据点进标的看，不构成投资建议。")
                         .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
@@ -650,6 +662,9 @@ private struct WorthOverviewRow: View {
                     Text(item.name).font(.subheadline.weight(.medium)).foregroundStyle(p.ink).lineLimit(1)
                     Text("\(item.code) · 日K \(item.assessment.barCount) 根" + (item.assessment.dividendYieldPercent.map { " · 股息率 \(NextNum.percent($0))" } ?? ""))
                         .font(.caption2).foregroundStyle(p.muted).lineLimit(1)
+                    if let hint = weakHint {
+                        Text(hint).font(.caption2).foregroundStyle(p.muted).lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 0)
                 Text(item.assessment.action).font(.caption.weight(.semibold)).foregroundStyle(tone)
@@ -658,5 +673,12 @@ private struct WorthOverviewRow: View {
             }.padding(.vertical, 7)
             .overlay(alignment: .bottom) { Rectangle().fill(p.line.opacity(0.7)).frame(height: 0.5) }
         }.buttonStyle(.plain)
+    }
+
+    /// 六维里最低的两项，让「为什么分低」在列表页就能看出来，不必逐只点进去。
+    private var weakHint: String? {
+        let ranked = item.assessment.dimensions.sorted { $0.value < $1.value }.prefix(2)
+        guard !ranked.isEmpty else { return nil }
+        return "短板：" + ranked.map { "\($0.title) \(Int($0.value.rounded()))" }.joined(separator: " · ")
     }
 }

@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
     var body: some Scene { WindowGroup { RootView().environmentObject(model) } }
 }
 
-enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, indexDetail(String), twin(NextTwinStrategy) }
+enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, indexDetail(String) }
 private extension GPRoute {
     var persisted: NextRoute {
         switch self {
@@ -22,7 +22,6 @@ private extension GPRoute {
         case .backups: .backups
         case .worthOverview: .intent("worth", "")
         case .indexDetail(let symbol): .intent("index", symbol)
-        case .twin(let strategy): .twin(strategy.rawValue)
         }
     }
     static func restore(_ route: NextRoute) -> GPRoute? {
@@ -40,7 +39,6 @@ private extension GPRoute {
         case .fills: .fills
         case .history: .history
         case .backups: .backups
-        case .twin(let raw): NextTwinStrategy(rawValue: raw).map { .twin($0) }
         case .portfolio(_), .replay(_): nil
         }
     }
@@ -60,11 +58,12 @@ struct RootView: View {
     private var tabSelection: Binding<NextTab> { Binding(get: { model.preferences.navigation.selectedTab }, set: { model.preferences.navigation.selectedTab = $0; model.preferences = model.preferences }) }
     var body: some View {
         TabView(selection: tabSelection) {
-            PrimaryNavigation(title: "总览", tab: .overview) { OverviewScreen() }.tabItem { Label("总览", systemImage: "sun.horizon") }.tag(NextTab.overview)
             PrimaryNavigation(title: "行情", tab: .market) { MarketScreen() }.tabItem { Label("行情", systemImage: "chart.xyaxis.line") }.tag(NextTab.market)
-            PrimaryNavigation(title: "AI 决策", tab: .decision) { DecisionScreen(code: nil) }.tabItem { Label("AI 决策", systemImage: "sparkles") }.tag(NextTab.decision)
-            PrimaryNavigation(title: "量化实验室", tab: .laboratory) { LaboratoryScreen() }.tabItem { Label("量化", systemImage: "waveform.path.ecg.rectangle") }.tag(NextTab.laboratory)
-            PrimaryNavigation(title: "资产", tab: .assets) { AssetsScreen() }.tabItem { Label("资产", systemImage: "circle.hexagongrid") }.tag(NextTab.assets)
+            PrimaryNavigation(title: "持仓", tab: .assets) { AssetsScreen() }.tabItem { Label("持仓", systemImage: "square.stack.3d.up.fill") }.tag(NextTab.assets)
+            PrimaryNavigation(title: "网格", tab: .laboratory) { GridLabScreen() }.tabItem { Label("网格", systemImage: "grid.cornersections.fill") }.tag(NextTab.laboratory)
+            PrimaryNavigation(title: "收息", tab: .income) { DividendHistoryScreen(code: nil) }.tabItem { Label("收息", systemImage: "yensign.circle.fill") }.tag(NextTab.income)
+            PrimaryNavigation(title: "AI 引擎", tab: .decision) { DecisionScreen(code: nil) }.tabItem { Label("AI 引擎", systemImage: "sparkles") }.tag(NextTab.decision)
+            PrimaryNavigation(title: "我的", tab: .mine) { SettingsScreen() }.tabItem { Label("我的", systemImage: "person.crop.circle.fill") }.tag(NextTab.mine)
         }
         .tint(GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort, appearance: model.preferences.appearance).forest)
         .environment(\.gp, GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort, appearance: model.preferences.appearance))
@@ -190,7 +189,6 @@ private struct RouteDestination: View {
         case .backups: BackupRestoreScreen()
         case .worthOverview: WorthBuyOverviewScreen()
         case .indexDetail(let symbol): IndexDetailScreen(symbol: symbol)
-        case .twin(let strategy): TwinDetailScreen(strategy: strategy)
         }
     }
 }
@@ -237,10 +235,10 @@ private struct OverviewScreen: View {
                             GPValue(label: "账本现金", value: "¥\(NextMoney.text(book.cash))")
                         }
                         HStack(alignment: .top) {
-                            GPValue(label: "浮动盈亏", value: floatingProfit.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: "持仓市值 − 持仓成本", emphasis: floatingProfit.map { $0 >= 0 ? p.risk : p.jade })
+                            GPValue(label: "浮动盈亏", value: floatingProfit.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: "持仓市值 − 持仓成本", emphasis: floatingProfit.map { p.changeTone(NextNum.double($0)) })
                             Spacer(minLength: 12)
                             let totalProfit = floatingProfit.map { $0 + realizedProfit }
-                            GPValue(label: "累计损益", value: totalProfit.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: "含已实现与浮动", emphasis: totalProfit.map { $0 >= 0 ? p.risk : p.jade })
+                            GPValue(label: "累计损益", value: totalProfit.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: "含已实现与浮动", emphasis: totalProfit.map { p.changeTone(NextNum.double($0)) })
                         }
                         HStack(spacing: 7) {
                             Image(systemName: "sun.max")
@@ -248,7 +246,7 @@ private struct OverviewScreen: View {
                             Spacer()
                             Text(valuation.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "需完整新鲜行情")
                                 .monospacedDigit().font(.subheadline.weight(.semibold))
-                                .foregroundStyle(valuation.dailyChange.map { $0 >= 0 ? p.risk : p.jade } ?? p.muted)
+                                .foregroundStyle(valuation.dailyChange.map { p.changeTone(NextNum.double($0)) } ?? p.muted)
                         }.font(.caption.weight(.medium)).foregroundStyle(p.muted).padding(.top, 1)
                     }
                 }.padding(18)
@@ -277,7 +275,6 @@ private struct OverviewScreen: View {
                 }
                 EditorialSection(title: "接着做") {
                     NavigationLink(value: GPRoute.decision(nil)) { IntentRow(icon: "sparkles", title: "分析买入机会", detail: "先组织行情、持仓、预算与风险") }
-                    NavigationLink(value: GPRoute.twin(.G)) { IntentRow(icon: "waveform.path.ecg", title: "查看 G 自主模拟", detail: "独立账户 · A–G 与 H 方案比较") }
                 }
             }
         }.safeAreaInset(edge: .bottom) { Color.clear.frame(height: 4) }
@@ -388,7 +385,7 @@ struct InstrumentRow: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 4) { Text(name).gpFont(size: 14, relativeTo: .body, weight: .semibold).foregroundStyle(p.ink); Text("\(code)\(units.map { " · \($0) 份" } ?? "")").gpFont(size: 10, relativeTo: .caption, design: .monospaced).foregroundStyle(p.muted) }
             Spacer(minLength: 2)
-            VStack(alignment: .trailing, spacing: 4) { Text(validQuote.map { "¥\(NextMoney.text($0.price, digits: 4))" } ?? "—").gpFont(size: 13, relativeTo: .subheadline, weight: .semibold, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let validQuote, let change = validQuote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 2))%").gpFont(size: 10, relativeTo: .caption, design: .monospaced).foregroundStyle(change >= 0 ? p.risk : p.jade) }; Text(quote?.stamp.label(now: Date()) ?? "暂无行情").gpFont(size: 8, relativeTo: .caption2).foregroundStyle(quote?.stamp.quality == .stale ? p.terracotta : p.muted).lineLimit(1) }
+            VStack(alignment: .trailing, spacing: 4) { Text(validQuote.map { "¥\(NextMoney.text($0.price, digits: 4))" } ?? "—").gpFont(size: 13, relativeTo: .subheadline, weight: .semibold, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let validQuote, let change = validQuote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 2))%").gpFont(size: 10, relativeTo: .caption, design: .monospaced).foregroundStyle(p.changeTone(NextNum.double(change))) }; Text(quote?.stamp.label(now: Date()) ?? "暂无行情").gpFont(size: 8, relativeTo: .caption2).foregroundStyle(quote?.stamp.quality == .stale ? p.terracotta : p.muted).lineLimit(1) }
             Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(p.muted).padding(.leading, 2)
         }.padding(.vertical, 10).contentShape(Rectangle())
     }
@@ -418,7 +415,7 @@ private struct InstrumentDetailScreen: View {
     var body: some View {
         GPPageBackground {
             VStack(alignment: .leading, spacing: 0) {
-                HStack { VStack(alignment: .leading, spacing: 5) { Text("\(name) · \(code) · \(quote.map { $0.source } ?? "数据源待接入")").font(.caption.monospaced()).foregroundStyle(p.muted); Text(quote.map { "¥\(NextMoney.text($0.price, digits: 4))" } ?? "暂无有效报价").gpFont(size: 34, relativeTo: .largeTitle, weight: .medium, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let quote, let change = quote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 2))%　·　\(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption.monospaced()).foregroundStyle(change >= 0 ? p.risk : p.jade) } else { Text(model.quotes[code]?.stamp.label(now: Date()) ?? "无数据 · 不计算涨跌").font(.caption).foregroundStyle(p.muted) } }; Spacer(); Button { Task { await model.refreshInstrument(code) } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(p.forest).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel("刷新行情"); Button { if model.watch.contains(code) { model.removeWatch(code) } else { try? model.addWatch(code) } } label: { Image(systemName: model.watch.contains(code) ? "star.fill" : "star").foregroundStyle(p.terracotta).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel(model.watch.contains(code) ? "取消关注" : "关注") }
+                HStack { VStack(alignment: .leading, spacing: 5) { Text("\(name) · \(code) · \(quote.map { $0.source } ?? "数据源待接入")").font(.caption.monospaced()).foregroundStyle(p.muted); Text(quote.map { "¥\(NextMoney.text($0.price, digits: 4))" } ?? "暂无有效报价").gpFont(size: 34, relativeTo: .largeTitle, weight: .medium, design: .rounded).monospacedDigit().foregroundStyle(p.ink); if let quote, let change = quote.changePercent { Text("\(change >= 0 ? "+" : "")\(NextMoney.text(change, digits: 2))%　·　\(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption.monospaced()).foregroundStyle(p.changeTone(NextNum.double(change))) } else { Text(model.quotes[code]?.stamp.label(now: Date()) ?? "无数据 · 不计算涨跌").font(.caption).foregroundStyle(p.muted) } }; Spacer(); Button { Task { await model.refreshInstrument(code) } } label: { Image(systemName: "arrow.clockwise").foregroundStyle(p.forest).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel("刷新行情"); Button { if model.watch.contains(code) { model.removeWatch(code) } else { try? model.addWatch(code) } } label: { Image(systemName: model.watch.contains(code) ? "star.fill" : "star").foregroundStyle(p.terracotta).frame(width: 44, height: 44).contentShape(Rectangle()) }.accessibilityLabel(model.watch.contains(code) ? "取消关注" : "关注") }
                     .padding(.top, 5).padding(.bottom, 14)
                 if let quote, let iopv = quote.iopv { Text("当前 IOPV ¥\(NextMoney.text(iopv, digits: 4)) · 溢折价 \(NextMoney.text((quote.price / iopv - 1) * 100, digits: 2))% · 同源时点 \(quote.time.formatted(date: .omitted, time: .shortened))").font(.caption2.monospaced()).foregroundStyle(p.terracotta).padding(.bottom, 8) }
                 if let stamp = model.quotes[code]?.stamp { Text(stamp.label(now: Date())).font(.caption2).foregroundStyle(p.muted).padding(.bottom, 8) }
@@ -494,7 +491,6 @@ private struct InstrumentDetailScreen: View {
                     HStack { Button("记录买入") { tradeRequest = GPTradeRequest(code: code, side: "buy") }; if (position?.units ?? 0) > 0 { Button("记录卖出") { tradeRequest = GPTradeRequest(code: code, side: "sell") } } }.buttonStyle(.bordered).tint(p.forest)
                     NavigationLink(value: GPRoute.decision(code)) { IntentRow(icon: "sparkles", title: "分析买入机会", detail: "组织行情、持仓、资金、限价计划与风险") }.accessibilityIdentifier("instrument.analyze-buy")
                     NavigationLink(value: GPRoute.alerts) { IntentRow(icon: "bell.badge", title: "设置价格提醒", detail: "自动带入当前证券代码；只用新鲜行情触发") }
-                    NavigationLink(value: GPRoute.twin(.G)) { IntentRow(icon: "waveform.path.ecg", title: "在数字孪生中观察", detail: "只影响 G 模拟账户，不触碰真实账本") }
                 }
                 if !model.notice.isEmpty { Text(model.notice).font(.caption).foregroundStyle(p.muted).padding(.vertical, 8) }
             }
@@ -620,6 +616,7 @@ private struct DecisionScreen: View {
                     if let code { Task { await model.refreshNASResearch(code) } }
                 }.padding(.vertical, 10)
                 if let code {
+                    AIInputsCard(code: code)
                     EditorialSection(title: "NAS DeepSeek 私人顾问") {
                         Text("使用 NAS 已配置的模型密钥；点击后，本次分析会把该 ETF 的报价、IOPV（若来源提供）、最多 250 根日 K、相关持仓、现金、近 30 笔该证券流水、分红档案和投资目标发送到你的 NAS，再由 NAS 请求模型。不会传输 API key，也不会发出交易。")
                             .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
@@ -644,7 +641,7 @@ private struct DecisionScreen: View {
                         if let mobileAIError { GPStatus(title: "手机端 AI 暂不可用", detail: mobileAIError, symbol: "exclamationmark.triangle") }
                         if let mobileAIResult {
                             DataPanel(title: "DeepSeek 分析", caption: "已记录到历史决策") {
-                                Text(mobileAIResult).font(.subheadline).foregroundStyle(p.ink).textSelection(.enabled)
+                                AIAnswerView(text: mobileAIResult)
                             }
                         }
                     }
@@ -653,7 +650,7 @@ private struct DecisionScreen: View {
                     if let code, let report = model.nasResearch[code] {
                         EditorialSection(title: "NAS 独立研究") {
                             if let ai = report.ai {
-                                Text(ai.content).font(.subheadline).foregroundStyle(p.ink)
+                                AIAnswerView(text: ai.content)
                                 GPDataRow(title: "来源", value: "\(ai.provider) · \(ai.model)", note: "数据截至 \(ai.asOf) · 不连接券商")
                                 if let staleMessage = researchDateStatus(report, code: code) {
                                     Label(staleMessage, systemImage: "clock.badge.exclamationmark").font(.caption).foregroundStyle(p.terracotta)
@@ -881,7 +878,7 @@ private struct DecisionScreen: View {
         let healthText = healthIssues.isEmpty
             ? "数据现状：账本体检没有发现缺口。"
             : "数据现状：账本有 \(healthIssues.count) 项待处理（" + healthIssues.prefix(3).map { "\($0.code) \($0.title)" }.joined(separator: "；") + "），涉及这些标的的数字请说明不确定性。"
-        let prompt = "请分析用户是否应继续观察或制定耐心限价计划。\n\(quoteText)\n\(positionText)\n\(accountText)\n\(healthText)\n投资期限：\(model.goal.years) 年；每月新增预算：¥\(NextMoney.text(model.goal.monthlyBudget))；单一集中度提醒线：\(NextMoney.text(model.goal.concentrationLimit))%。\nETF 固定手续费按用户设定每笔 0.10 元估算；不得把未验证的交易规则或盘口当成事实。请按结论、证据、风险、等待条件、后续跟踪回答；数据不足就明确指出。"
+        let prompt = "请分析用户是否应继续观察或制定耐心限价计划。\n\(quoteText)\n\(positionText)\n\(accountText)\n\(healthText)\n投资期限：\(model.goal.years) 年；每月新增预算：¥\(NextMoney.text(model.goal.monthlyBudget))；单一集中度提醒线：\(NextMoney.text(model.goal.concentrationLimit))%。\nETF 固定手续费按用户设定每笔 0.10 元估算；不得把未验证的交易规则或盘口当成事实。请严格按这些小标题逐条作答，每个标题单独起一行：结论、证据、风险、等待条件、失效条件、后续跟踪；并单独给一行「置信度：高/中/低」。数据不足就明确指出，不编造，不承诺收益，不建议自动下单。"
         let profile = UserDefaults.standard.string(forKey: "guanpan.deepseek.profile") ?? "flash"
         do {
             let response = try await DeepSeekMobile.analyze(prompt: prompt, key: key, profile: profile)
@@ -896,201 +893,195 @@ private struct DecisionScreen: View {
     }
 }
 
-private struct LaboratoryScreen: View {
+/// 借鉴小万量化的「结构化结论」：把 AI 自由文本按 结论/证据/风险/等待条件/失效条件/后续跟踪 拆成区块，
+/// 并抽出「置信度：高/中/低」做成徽标；拆不出区块就原样展示全文（优雅降级，不丢信息）。
+private struct AIAnswerView: View {
+    @Environment(\.gp) private var p
+    let text: String
+    private static let headers = ["结论", "证据", "风险", "等待条件", "失效条件", "后续跟踪"]
+
+    private var confidence: String? {
+        guard let r = text.range(of: "置信度") else { return nil }
+        let tail = text[r.upperBound...].prefix(8)
+        if tail.contains("高") { return "高" }
+        if tail.contains("中") { return "中" }
+        if tail.contains("低") { return "低" }
+        return nil
+    }
+    private var sections: [(title: String, body: String)] {
+        var out: [(title: String, body: String)] = []
+        var currentTitle: String?
+        var buffer: [String] = []
+        func flush() {
+            if let title = currentTitle {
+                let body = buffer.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !body.isEmpty { out.append((title: title, body: body)) }
+            }
+            currentTitle = nil; buffer = []
+        }
+        for raw in text.components(separatedBy: "\n") {
+            let probe = Self.stripped(raw.trimmingCharacters(in: .whitespaces))
+            if let header = Self.headers.first(where: { probe.hasPrefix($0) }) {
+                flush()
+                currentTitle = header
+                var rest = String(probe.dropFirst(header.count)).trimmingCharacters(in: .whitespaces)
+                if rest.hasPrefix(":") || rest.hasPrefix("：") { rest = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces) }
+                if !rest.isEmpty { buffer.append(rest) }
+            } else if currentTitle != nil {
+                buffer.append(raw)
+            }
+        }
+        flush()
+        return out
+    }
+    private static func stripped(_ s: String) -> String {
+        var r = s
+        while let f = r.first, "*#>".contains(f) || f == "-" || f == "•" || f == " " { r.removeFirst() }
+        return r
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let confidence {
+                HStack(spacing: 6) {
+                    Text("置信度").font(.caption2).foregroundStyle(p.muted)
+                    Text(confidence).font(.caption.weight(.semibold))
+                        .padding(.horizontal, 9).padding(.vertical, 3)
+                        .background(confidence == "高" ? p.forest.opacity(0.16) : confidence == "中" ? p.chartGold.opacity(0.20) : p.risk.opacity(0.16), in: Capsule())
+                        .foregroundStyle(confidence == "高" ? p.forest : confidence == "中" ? p.chartGold : p.risk)
+                }
+            }
+            if sections.isEmpty {
+                Text(text).font(.subheadline).foregroundStyle(p.ink).textSelection(.enabled)
+            } else {
+                ForEach(sections.indices, id: \.self) { i in
+                    let sec = sections[i]
+                    let caution = sec.title == "风险" || sec.title == "失效条件"
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 5) {
+                            Image(systemName: caution ? "exclamationmark.triangle.fill" : "circle.fill").font(.system(size: 7)).foregroundStyle(caution ? p.terracotta : p.forest)
+                            Text(sec.title).font(.caption.weight(.semibold)).foregroundStyle(caution ? p.terracotta : p.forest)
+                        }
+                        Text(sec.body).font(.subheadline).foregroundStyle(p.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    }
+                }
+            }
+            Text("AI 生成 · 仅供研究，不构成交易指令。").font(.caption2).foregroundStyle(p.muted)
+        }
+    }
+}
+
+/// 借鉴小万量化的「来源采集/决策链」——但用诚实版：把本次分析真正吃进去的输入列出来供核对，
+/// 不假装有多阶段引擎。只读展示，不改任何数据。
+private struct AIInputsCard: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
-    @State private var selected: NextTwinStrategy = .G
-    @State private var funding = "1000"
-    @State private var reason = "统一追加模拟资金"
-    @State private var showFundingConfirm = false
-    @State private var message = ""
-    @State private var backtestCrosshair: Date?
-    @State private var customFastWindow = "20"
-    @State private var customSlowWindow = "60"
-    @State private var backtestMonthlyContribution = "0"
-    @State private var nasGInitialCash = ""
-    @State private var nasGCrosshair: Date?
-    @State private var showNASGConfirmation = false
-    @State private var pendingNASGAction = "start"
-    private var account: NextTwinAccount? { model.twins.accounts[selected.rawValue] }
+    let code: String
+    private var healthCount: Int {
+        NextBookHealth.issues(book: model.book, quotes: model.quotes, at: Date(), concentrationLimit: NextNum.double(model.goal.concentrationLimit)).count
+    }
+    var body: some View {
+        EditorialSection(title: "本次分析的输入", trailing: "可核对", accent: p.forest) {
+            if let cached = model.quotes[code] {
+                GPDataRow(title: "行情快照", value: "¥\(NextMoney.text(cached.quote.price, digits: 4))",
+                          note: "\(cached.quote.source) · \(cached.quote.time.formatted(date: .numeric, time: .shortened)) · \(cached.stamp.label(now: Date()))")
+            } else {
+                GPDataRow(title: "行情快照", value: "无缓存报价", note: "分析会标为缺口，不推测价格")
+            }
+            if let position = model.book.positions.first(where: { $0.code == code }) {
+                GPDataRow(title: "本机持仓", value: "\(position.units) 份 · 成本 ¥\(NextMoney.text(position.bookCost))",
+                          note: "每份 ¥\(NextMoney.text(position.costPerUnit, digits: 4))")
+            } else {
+                GPDataRow(title: "本机持仓", value: "未记录", note: "仅给出一般性观察")
+            }
+            GPDataRow(title: "账本体检", value: "\(healthCount) 项待处理", note: "名称/成本/报价/集中度缺口会写进提示")
+            GPDataRow(title: "投资目标", value: "\(model.goal.years) 年 · 月预算 ¥\(NextMoney.text(model.goal.monthlyBudget))",
+                      note: "集中度线 \(NextMoney.text(model.goal.concentrationLimit))%")
+        }
+    }
+}
+
+private struct GridLabScreen: View {
+    @EnvironmentObject private var model: NextAppModel
+    @Environment(\.gp) private var p
+    private func dec(_ s: String) -> Decimal? { Decimal(string: s, locale: Locale(identifier: "en_US_POSIX")) }
     var body: some View {
         GPPageBackground {
             VStack(alignment: .leading, spacing: 0) {
-                HStack { VStack(alignment: .leading, spacing: 4) { Text("数字孪生").font(.system(.title2, design: .serif).weight(.semibold)); Text("每个策略独立虚拟账户；真实账本无写入通道").font(.caption).foregroundStyle(p.muted) }; Spacer(); Image(systemName: "lock.shield").foregroundStyle(p.forest) }.padding(.top, 6)
-                EditorialSection(title: "策略组 · A–G + H") {
-                    ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 7) { ForEach(NextTwinStrategy.allCases) { strategy in Button { selected = strategy } label: { VStack(spacing: 3) { Text(strategy.rawValue).font(.system(.headline, design: .rounded).weight(.bold)); Text(shortTitle(strategy)).font(.system(size: 9)).lineLimit(1) }.frame(width: 65, height: 49).foregroundStyle(selected == strategy ? Color.white : p.ink).background(selected == strategy ? p.forestDeep : p.raised, in: RoundedRectangle(cornerRadius: 11)) }.buttonStyle(.plain).accessibilityLabel("\(strategy.rawValue) \(strategy.title)") } } }
-                    NavigationLink(value: GPRoute.twin(selected)) { Label("策略假设与运行记录", systemImage: "arrow.up.right").font(.caption.weight(.medium)) }.tint(p.forest)
-                    HStack(spacing: 8) {
-                        Button { message = model.seedTwinsFromRealBook() } label: {
-                            Label("以当前持仓为起点", systemImage: "arrow.triangle.branch")
-                                .font(.system(size: 11, weight: .semibold))
-                        }
-                        .buttonStyle(.bordered).tint(p.forest)
-                        .disabled(model.book.positions.isEmpty)
-                        Text("起点：\(model.simulationUniverse.count) 只标的 · 总资产 ¥\(NextMoney.text(model.realBookEquity))")
-                            .font(.system(size: 9.5)).foregroundStyle(p.muted).lineLimit(2)
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("网格实验室").font(.system(.title2, design: .serif).weight(.semibold)).foregroundStyle(p.ink)
+                        Text("网格不预测涨跌，只回答「若明天走到某价，该买／卖多少」").font(.caption).foregroundStyle(p.muted)
                     }
-                    Text("策略不再一律 1 万起步：标的是你真实持仓（没有持仓才用自选），回测起始资金是你真实总资产；点按钮可把份额与现金原样复制给还没跑过的策略账户。")
-                        .font(.system(size: 9.5)).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
-                }
+                    Spacer()
+                    Button { Task { await model.refreshGridStatus() } } label: { Image(systemName: "arrow.clockwise").font(.system(size: 18)).foregroundStyle(p.forest).frame(width: 42, height: 42).background(p.tint, in: Circle()) }
+                        .accessibilityLabel("刷新网格状态")
+                }.padding(.top, 6).padding(.bottom, 14)
                 GridCheckPanel()
-                EditorialSection(title: "A–H 历史成绩对照") {
-                    ForEach(NextTwinStrategy.allCases) { strategy in
-                        let cached = model.twinBacktests[strategy.rawValue]
+                EditorialSection(title: "明日挂单表 · NAS 网格引擎", trailing: model.gridStatus.map { "\($0.ladder.count) 只" }, accent: p.chartViolet) {
+                    Text(model.gridStatusMessage).font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                    if let status = model.gridStatus, status.initialized, let summary = status.summary {
                         HStack(spacing: 10) {
-                            Button { selected = strategy } label: {
-                                HStack(spacing: 10) {
-                                    Text(strategy.rawValue).font(.system(.headline, design: .rounded).weight(.bold)).foregroundStyle(p.forest).frame(width: 24)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(strategy.title).font(.caption.weight(.semibold)).foregroundStyle(p.ink)
-                                        Text(cached.map { "收益 \(NextMoney.text(Decimal(string: $0.totalReturn) ?? 0, digits: 2))% · 回撤 \(NextMoney.text(Decimal(string: $0.maxDrawdown) ?? 0, digits: 2))% · \($0.tradeCount) 笔" } ?? "尚无本地回测成绩")
-                                            .font(.caption2).foregroundStyle(p.muted).lineLimit(1)
-                                    }
-                                    Spacer(minLength: 2)
-                                }.contentShape(Rectangle())
-                            }.buttonStyle(.plain).accessibilityLabel("选择策略 \(strategy.rawValue) \(strategy.title)")
-                            Button { Task { await model.runTwinBacktest(strategy) } } label: {
-                                Image(systemName: "play.fill").font(.caption).frame(width: 38, height: 38).foregroundStyle(p.forest).contentShape(Rectangle())
-                            }.buttonStyle(.plain).accessibilityLabel("运行 \(strategy.rawValue) 历史回测")
-                        }.padding(.vertical, 4)
-                    }
-                    Text("成绩来自 NAS 日 K 确定性回放；G 会明确标注历史因子代理信号，并非事后生成的 DeepSeek 预测。")
-                        .font(.caption2).foregroundStyle(p.muted)
-                }
-                DataPanel(title: selected == .G ? "G · 本机轻量模拟状态" : "\(selected.rawValue) · \(selected.title)", caption: account?.isPaused == true ? "已暂停" : "等待行情") {
-                    Text(strategyDescription(selected)).font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 22) { GPValue(label: "模拟现金", value: "¥\(NextMoney.text(account?.simulation.cash ?? 0))"); GPValue(label: "虚拟可用", value: "¥\(NextMoney.text(account?.simulation.available ?? 0))"); GPValue(label: "持仓数", value: "\(account?.simulation.positions.count ?? 0)") }
-                    Text("此处是模拟运行账户当前状态；历史策略回测与盘口撮合分开记录，不能把日 K 收益当成实际排队成交结果。").font(.caption2).foregroundStyle(p.muted)
-                    Button(account?.isPaused == true ? (selected == .G ? "恢复本机模拟" : "恢复该策略") : (selected == .G ? "暂停本机模拟" : "暂停该策略")) { do { try model.twins.setPaused(!(account?.isPaused ?? false), strategy: selected) } catch { model.errorMessage = error.localizedDescription } }.font(.caption.weight(.semibold)).tint(p.forest)
-                }
-                if selected == .G {
-                    EditorialSection(title: "NAS · G AI 持续模拟账户") {
-                        HStack {
-                            Text("NAS 独立虚拟账户").font(.caption.weight(.semibold)).foregroundStyle(p.ink)
-                            Spacer()
-                            Button { Task { await model.refreshNASGAccount() } } label: { Label("刷新", systemImage: "arrow.clockwise").font(.caption) }
-                                .accessibilityIdentifier("laboratory.g.refresh")
+                            GPValue(label: "网格账户权益", value: "¥\(NextMoney.text(dec(summary.equity) ?? 0))")
+                            GPValue(label: "累计盈亏", value: "\((dec(summary.pnl) ?? 0) >= 0 ? "+" : "")\(NextMoney.text(dec(summary.pnl) ?? 0))", footnote: "相对建网本金", emphasis: p.changeTone(NextNum.double(dec(summary.pnl) ?? 0)))
                         }
-                        Text(model.nasGStatus).font(.caption2).foregroundStyle(p.muted).textSelection(.enabled)
-                        if let remote = model.nasGAccount {
-                            HStack(spacing: 18) {
-                                GPValue(label: "NAS 虚拟现金", value: "¥\(NextMoney.text(Decimal(string: remote.cash) ?? 0))")
-                                GPValue(label: "持仓证券", value: "\(remote.positions.values.filter { $0 > 0 }.count)")
-                                GPValue(label: "模拟成交", value: "\(remote.fills.count)")
-                            }
-                            if let latest = remote.curve.last {
-                                GPDataRow(title: "最近权益 · \(latest.date)", value: "¥\(latest.equity)", note: "NAV \(latest.nav ?? "—") · 回撤 \(latest.drawdown ?? "—")")
-                            }
-                            if let dataset = remote.equityChartDataset() {
-                                UnifiedChartView(dataset: dataset, interval: .constant(.day), costPerUnit: nil, selectedTime: $nasGCrosshair)
-                                    .accessibilityLabel("NAS G 独立模拟账户权益曲线")
-                            }
-                            GPDataRow(title: "已记录 AI 决策", value: "\(remote.decisions.count)", note: "AI 日运行记录 \(remote.aiRuns.count) 条")
-                            if let pending = remote.orders.last(where: { $0.status == "pending" || $0.status == "pending_partial" }) {
-                                GPDataRow(title: "待执行虚拟委托 · \(pending.code)", value: "\(pending.side == "buy" ? "买入" : "卖出") \(pending.remainingUnits ?? pending.units) 份", note: "日 K 开盘价代理模型")
-                            }
-                            Text("撮合依据 NAS 归档日 K 开盘价，不包含盘口队列证据。此账户不会连接券商；真实账本完全分开。")
-                                .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
-                            if remote.status == "reset" {
-                                compactField("重新启动虚拟本金（元）", text: $nasGInitialCash)
-                                Button("重新启动 NAS G") { pendingNASGAction = "start"; showNASGConfirmation = true }
-                                    .font(.caption.weight(.semibold)).tint(p.forest).accessibilityIdentifier("laboratory.g.start")
-                            } else {
-                                Button(remote.status == "paused" ? "恢复 NAS G" : "暂停 NAS G") {
-                                    pendingNASGAction = remote.status == "paused" ? "resume" : "pause"; showNASGConfirmation = true
-                                }.font(.caption.weight(.semibold)).tint(p.forest).accessibilityIdentifier("laboratory.g.toggle")
-                                compactField("虚拟资金变更（元）", text: $funding)
-                                HStack {
-                                    Button("追加") { pendingNASGAction = "fund"; showNASGConfirmation = true }
-                                    Button("撤回") { pendingNASGAction = "withdraw"; showNASGConfirmation = true }
-                                    Spacer()
-                                    Button("重置账户", role: .destructive) { pendingNASGAction = "reset"; showNASGConfirmation = true }
-                                }.font(.caption.weight(.semibold)).tint(p.forest)
-                            }
-                        } else {
-                            compactField("虚拟初始资金（元）", text: $nasGInitialCash)
-                            Text(model.aiProviderStatus?.configured == true ? "NAS DeepSeek 已配置（真实连通状态仍需 NAS 验证）。" : "NAS 尚未报告已配置 DeepSeek key；无 key 时会记录当日 AI 不可用，不会生成虚构策略。")
-                                .font(.caption2).foregroundStyle(p.muted)
-                            Text("启动会使用自选中交易单位与 ETF ¥0.10 费率均已核验的证券，按等权作为初始参考权重。启动后只影响 NAS G 虚拟账户。")
-                                .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
-                            GPActionButton(title: "确认启动 NAS G 模拟账户", secondary: true, systemImage: "play.fill") {
-                                pendingNASGAction = "start"; showNASGConfirmation = true
-                            }.accessibilityIdentifier("laboratory.g.start")
+                        HStack(spacing: 10) {
+                            GPValue(label: "运行天数", value: "\(summary.days) 天")
+                            GPValue(label: "买入／卖出", value: "\(summary.buys)/\(summary.sells) 笔")
+                            GPValue(label: "手续费", value: "¥\(NextMoney.text(dec(summary.fees) ?? 0))")
                         }
+                        Text("账户权益 ¥\(NextMoney.text(dec(summary.equity) ?? 0)) · 本金 ¥\(NextMoney.text(dec(summary.startEquity) ?? 0)) · 收益率 \(String(format: "%.2f", NextNum.double(dec(summary.pnlPercent) ?? 0)))%").font(.caption2).foregroundStyle(p.muted)
+                    } else if let status = model.gridStatus, !status.initialized {
+                        GPStatus(title: "NAS 网格尚未初始化", detail: "后台会按你的真实持仓自动建网格；首次连接后稍等片刻再刷新。", symbol: "grid")
                     }
-                }
-                EditorialSection(title: "资金流") {
-                    HStack { compactField("追加虚拟资金", text: $funding); compactField("用途", text: $reason) }
-                    Button("向 A–H 同步注资") { showFundingConfirm = true }.font(.caption.weight(.semibold)).tint(p.forest)
-                    if model.twins.funding.isEmpty { Text("尚无注资记录。仅明确确认的虚拟资金变动会同步到所有对照策略。").font(.caption).foregroundStyle(p.muted) }
-                    ForEach(model.twins.funding.suffix(4).reversed()) { flow in GPDataRow(title: flow.reason, value: "+¥\(NextMoney.text(flow.amount))", note: flow.date.formatted(date: .numeric, time: .shortened)) }
-                }
-                EditorialSection(title: "历史回测 · NAS 日 K") {
-                    Text("使用已归档真实日 K，按上一交易日收盘信号、下一交易日开盘执行；ETF 每次成交按 ¥0.10 计费。回测与 A–H 模拟运行账户、真实账本分离。")
-                        .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
-                    compactField("每月模拟追加资金", text: $backtestMonthlyContribution)
-                    if selected == .H {
-                        HStack(spacing: 10) { compactField("自定义快线", text: $customFastWindow); compactField("自定义慢线", text: $customSlowWindow) }
-                        Text("H 回测按你设定的均线窗口：2 ≤ 快线 < 慢线 ≤ 250。")
-                            .font(.caption2).foregroundStyle(p.muted)
-                    }
-                    GPActionButton(title: model.backtestStatus.hasPrefix("NAS 正在") ? "正在回放…" : "运行 \(selected.rawValue) 历史回测", secondary: true, systemImage: "arrow.trianglehead.2.clockwise.rotate.90") {
-                        do {
-                            let contribution = try NextMoney.parse(backtestMonthlyContribution)
-                            Task { await model.runTwinBacktest(selected, fastWindow: Int(customFastWindow) ?? 0, slowWindow: Int(customSlowWindow) ?? 0, monthlyContribution: contribution) }
-                        } catch { model.errorMessage = error.localizedDescription }
-                    }.disabled(model.backtestStatus.hasPrefix("NAS 正在"))
-                    Text(model.backtestStatus).font(.caption2).foregroundStyle(p.muted).textSelection(.enabled)
-                    if let run = model.twinBacktests[selected.rawValue] {
-                        HStack(spacing: 16) {
-                            GPValue(label: "区间收益", value: "\(NextMoney.text(Decimal(string: run.totalReturn) ?? 0, digits: 2))%")
-                            GPValue(label: "最大回撤", value: "\(NextMoney.text(Decimal(string: run.maxDrawdown) ?? 0, digits: 2))%")
-                            GPValue(label: "手续费", value: "¥\(NextMoney.text(Decimal(string: run.feesPaid) ?? 0, digits: 2))")
+                    if let status = model.gridStatus {
+                        if status.ladder.isEmpty {
+                            GPStatus(title: "暂无挂单档位", detail: "持仓为空或网格尚未建好；先录入持仓并连接 NAS。", symbol: "list.bullet")
                         }
-                        GPDataRow(title: "区间", value: "\(run.startDate) — \(run.endDate)", note: "\(run.sessions) 个交易日 · \(run.tradeCount) 笔模拟成交 · \(run.source)")
-                        if selected == .G { Text(run.aiSignalAccuracy).font(.caption2).foregroundStyle(p.terracotta) }
-                        if let dataset = run.equityChartDataset() {
-                            UnifiedChartView(dataset: dataset, interval: .constant(.day), costPerUnit: nil, selectedTime: $backtestCrosshair)
-                                .accessibilityLabel("\(selected.rawValue) 策略历史权益曲线")
-                        } else { GPStatus(title: "回测曲线校验失败", detail: "本机未使用不完整或无效的数据绘图。", symbol: "exclamationmark.triangle") }
-                        NavigationLink(value: GPRoute.twin(selected)) { IntentRow(icon: "list.bullet.rectangle", title: "查看策略假设与完整成交记录", detail: "费用、持仓、未成交订单和逐日曲线") }
-                    } else {
-                        GPStatus(title: "尚无该策略的可追溯历史回测", detail: "需要 NAS 连通、日 K 档案和该 ETF 可核验的交易单位。缺少交易规则时会停止回测，不推测手数。", symbol: "chart.xyaxis.line")
+                        ForEach(status.ladder) { row in ladderCard(row) }
                     }
                 }
-                EditorialSection(title: "盘口回放与费用") { GPStatus(title: "撮合规则待行情源验证", detail: "ETF 模拟交易固定每笔 ¥0.10；未验证的证券手数、结算和市场状态不会自动推断。未成交订单单独列示，不计入收益。", symbol: "list.bullet.rectangle") }
-                if !message.isEmpty { Text(message).font(.caption).foregroundStyle(p.muted) }
-            }
-        }.confirmationDialog("确认 NAS G 操作？", isPresented: $showNASGConfirmation, titleVisibility: .visible) {
-            Button(pendingNASGAction == "start" ? "启动独立虚拟账户" : pendingNASGAction == "pause" ? "暂停模拟" : pendingNASGAction == "resume" ? "恢复模拟" : pendingNASGAction == "fund" ? "追加虚拟资金" : pendingNASGAction == "withdraw" ? "撤回虚拟资金" : "确认重置", role: pendingNASGAction == "reset" ? .destructive : nil) {
-                if pendingNASGAction == "start" {
-                    do {
-                        let cash = try NextMoney.parse(nasGInitialCash)
-                        Task { await model.startNASGAccount(initialCash: cash) }
-                    }
-                    catch { model.nasGStatus = "启动失败 · \(error.localizedDescription)" }
-                } else if pendingNASGAction == "pause" || pendingNASGAction == "resume" || pendingNASGAction == "reset" {
-                    Task { await model.mutateNASG(pendingNASGAction) }
-                } else {
-                    do {
-                        let amount = try NextMoney.parse(funding)
-                        Task { await model.mutateNASG(pendingNASGAction, amount: amount) }
-                    } catch { model.nasGStatus = "资金调整失败 · \(error.localizedDescription)" }
+                EditorialSection(title: "怎么用这张表") {
+                    Text("每一行是某只标的的完整网格档位：卖档（红，价格高于现价）和买档（绿，价格低于现价）。「可挂」表示以当前现金／持仓足以挂出；不可达的档位先不挂，等价格触发或资金变化。这不是预测，是条件单——价格不到就不成交。").font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Button("取消", role: .cancel) { }
-        } message: { Text("此操作只修改 NAS G 数字孪生虚拟账户，绝不会提交真实交易。") }
-        .confirmationDialog("确认向所有数字孪生账户注资？", isPresented: $showFundingConfirm, titleVisibility: .visible) {
-            Button("确认同步注资", role: .destructive) { do { try model.addTwinFunding(try NextMoney.parse(funding), reason: reason); message = "已向 A–H 模拟账户记录相同金额与时点" } catch { model.errorMessage = error.localizedDescription } }
-            Button("取消", role: .cancel) { }
-        } message: { Text("仅改变 A–H 虚拟账户的资金流；不会读取或修改真实资产。") }
-        .task {
-            // G 账户的"虚拟初始资金"默认填真实总资产，而不是写死一万。
-            if nasGInitialCash.isEmpty, model.realBookEquity > 0 {
-                nasGInitialCash = NSDecimalNumber(decimal: model.realBookEquity).stringValue
+        }.safeAreaInset(edge: .bottom) { Color.clear.frame(height: 4) }
+        .task { await model.refreshGridStatus() }
+    }
+    @ViewBuilder private func ladderCard(_ row: NextNASGridLadderRow) -> some View {
+        let name = model.book.positions.first(where: { $0.code == row.code })?.name
+            ?? InstrumentCatalog.name(for: row.code) ?? row.code
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).font(.subheadline.weight(.semibold)).foregroundStyle(p.ink)
+                    Text(row.code).font(.caption2.monospaced()).foregroundStyle(p.muted)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("现价 ¥\(NextMoney.text(dec(row.price) ?? 0))").font(.subheadline.monospacedDigit().weight(.semibold)).foregroundStyle(p.ink)
+                    Text("步长 \(String(format: "%.2f", NextNum.double(dec(row.stepPercent) ?? 0)))% · 第 \(row.position) 档").font(.caption2).foregroundStyle(p.muted)
+                }
             }
-            if selected == .G { await model.refreshNASGAccount() }
+            HStack(spacing: 14) {
+                Label("可卖 \(row.sellsLeft) 档", systemImage: "arrow.up.circle.fill").font(.caption2).foregroundStyle(p.gpUp)
+                Label("可买 \(row.buysLeft) 档", systemImage: "arrow.down.circle.fill").font(.caption2).foregroundStyle(p.gpDown)
+            }
+            VStack(spacing: 3) {
+                ForEach(row.rungs) { rung in
+                    HStack {
+                        Text(rung.isBuy ? "买" : "卖").font(.system(size: 10, weight: .bold)).foregroundStyle(rung.isBuy ? p.gpDown : p.gpUp).frame(width: 22)
+                        Text("¥\(NextMoney.text(dec(rung.price) ?? 0))").font(.system(size: 11).monospacedDigit()).foregroundStyle(p.ink)
+                        Spacer()
+                        Text("\(rung.units) 份").font(.system(size: 11)).foregroundStyle(p.muted)
+                        Text(rung.reachable ? "可挂" : "暂不挂").font(.system(size: 10)).foregroundStyle(rung.reachable ? p.forest : p.muted)
+                    }
+                }
+            }.padding(8).background(p.tint, in: RoundedRectangle(cornerRadius: 10))
+            if !row.note.isEmpty { Text(row.note).font(.caption2).foregroundStyle(p.muted) }
         }
+        .padding(12)
+        .background(p.paper, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(p.line, lineWidth: 0.8))
     }
 }
 
@@ -1155,7 +1146,7 @@ private struct AssetsScreen: View {
                     HStack(spacing: 24) {
                         GPValue(label: "账本现金", value: "¥\(NextMoney.text(model.book.cash))")
                         GPValue(label: "持仓成本", value: "¥\(NextMoney.text(model.book.positions.reduce(0) { $0 + $1.bookCost }))")
-                        GPValue(label: "当日盈亏", value: valuation.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: valuation.dailyChangePercent.map { "昨收 \(NextMoney.text($0))%" } ?? "需新鲜报价", emphasis: valuation.dailyChange.map { $0 >= 0 ? p.risk : p.jade })
+                        GPValue(label: "当日盈亏", value: valuation.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: valuation.dailyChangePercent.map { "昨收 \(NextMoney.text($0))%" } ?? "需新鲜报价", emphasis: valuation.dailyChange.map { p.changeTone(NextNum.double($0)) })
                     }.padding(.top, 3)
                 }.padding(.top, 15)
                 HoldingsBreakdownPanel()
@@ -1228,7 +1219,7 @@ private struct AssetsScreen: View {
                     Button { assetsConfirm = .undo } label: { IntentRow(icon: "arrow.uturn.backward", title: "撤销最近账本变更", detail: "仅当账本仍匹配该审计版本时可撤销") }.buttonStyle(.plain)
                 }
             }
-        }.sheet(isPresented: $addPosition) { AddPositionSheet { code, name, units, cost in do { try model.addPosition(code: code, name: name, units: units, cost: cost) } catch { model.errorMessage = error.localizedDescription } } }
+        }.sheet(isPresented: $addPosition) { AddPositionSheet { code, name, units, cost, acquiredAt in do { try model.addPosition(code: code, name: name, units: units, cost: cost, acquiredAt: acquiredAt) } catch { model.errorMessage = error.localizedDescription } } }
         .sheet(isPresented: $addIncome) { IncomeRecordSheet { event in do { try model.addIncomeEvent(event) } catch { model.errorMessage = error.localizedDescription } } }
         .confirmationDialog(assetsConfirm?.title ?? "", isPresented: Binding(get: { assetsConfirm != nil }, set: { if !$0 { assetsConfirm = nil } }), titleVisibility: .visible) {
             if let action = assetsConfirm {
@@ -1355,6 +1346,9 @@ private struct AddPositionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.gp) private var p
     @State private var code = ""; @State private var name = ""; @State private var units = ""; @State private var cost = ""; @State private var confirm = false
+    /// 建仓日：你实际开始持有这只的日期。只把这一天才算数的派息登记为「待收」，
+    /// 之前发生的除息不算你的（录入一只早已分红过的票时不会凭空冒出历史分红）。默认今天。
+    @State private var acquiredAt = Date()
     /// 券商里「成本金额」往往比「成本价」精确：1.4715 会被券商显示成 1.472，
     /// 按每份价录入会差几分钱。允许直接录合计成本，误差就归零。
     @State private var costByTotal = false
@@ -1389,9 +1383,11 @@ private struct AddPositionSheet: View {
                                 .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    DatePicker("建仓日", selection: $acquiredAt, displayedComponents: .date)
+                    Text("只把建仓日及之后的派息算作你的「待收」；之前发生的除息不登记（你录入的持仓已是分红后的，不再回溯历史分红）。").font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 Section {
-                    Text("录入持仓只记录**当前事实**：份数 + 每份买入成本。它不产生买入流水，因此**不会计算摊薄成本**，也**不会动现金**（现金只由买入/卖出、以及「现金变动」改变）。").font(.caption).foregroundStyle(p.muted)
+                    Text("录入持仓只记录**当前事实**：份数 + 每份买入成本 + 建仓日。它不产生买入流水，因此**不会计算摊薄成本**，也**不会动现金**（现金只由买入/卖出、以及「现金变动」改变）。").font(.caption).foregroundStyle(p.muted)
                 }
             }
                 .navigationTitle("录入持仓").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
@@ -1408,10 +1404,13 @@ private struct AddPositionSheet: View {
                     }
                 }
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }; ToolbarItem(placement: .confirmationAction) { Button("核对并保存") { confirm = true }.disabled(code.count != 6 || name.isEmpty || Int(units) == nil || cost.isEmpty) } }
-                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let total = totalCostValue else { return }; onSave(code, name, u, total); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份，合计成本 ¥\(NextMoney.text(totalCostValue ?? 0))（每份 ¥\(NextMoney.text(perUnitCostValue ?? 0, digits: 4))）。保存后会产生可审计记录。") }
+                .confirmationDialog("确认录入真实账本？", isPresented: $confirm, titleVisibility: .visible) { Button("确认保存") { guard let u = Int(units), let total = totalCostValue else { return }; onSave(code, name, u, total, acquiredAt); dismiss() }; Button("取消", role: .cancel) { } } message: { Text("\(code) · \(name) · \(units) 份，合计成本 ¥\(NextMoney.text(totalCostValue ?? 0))（每份 ¥\(NextMoney.text(perUnitCostValue ?? 0, digits: 4))），建仓日 \(Self.dateText(acquiredAt))。保存后会产生可审计记录。") }
         }
     }
-    let onSave: (String, String, Int, Decimal) -> Void
+    static func dateText(_ date: Date) -> String {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(identifier: "Asia/Shanghai"); f.dateFormat = "yyyy-MM-dd"; return f.string(from: date)
+    }
+    let onSave: (String, String, Int, Decimal, Date) -> Void
 }
 
 struct GPTradeRequest: Identifiable {
@@ -1750,12 +1749,9 @@ private struct SearchSheet: View {
         for alert in model.preferences.notifications.alerts where !query.isEmpty && matches(alert.title, alert.detail, alert.level) {
             hits.append(GPSearchHit(id: "alert-\(alert.id)", category: "提醒", title: alert.title, detail: "\(alert.level) · \(alert.stamp.label(now: Date()))", symbol: "bell.badge", route: .alerts))
         }
-        for strategy in NextTwinStrategy.allCases where !query.isEmpty && matches(strategy.rawValue, strategy.title) {
-            hits.append(GPSearchHit(id: "strategy-\(strategy.rawValue)", category: "数字孪生", title: "\(strategy.rawValue) · \(strategy.title)", detail: strategyDescription(strategy), symbol: "waveform.path.ecg", route: .twin(strategy)))
-        }
         return Array(hits.prefix(250))
     }
-    private var categories: [String] { ["证券", "交易流水", "历史决策", "提醒", "数字孪生"] }
+    private var categories: [String] { ["证券", "交易流水", "历史决策", "提醒"] }
     private func results(in category: String) -> [GPSearchHit] { results.filter { $0.category == category } }
     @ViewBuilder private func hitRow(_ hit: GPSearchHit) -> some View {
         HStack(spacing: 8) {
@@ -1783,7 +1779,7 @@ private struct SearchSheet: View {
                             .accessibilityIdentifier("search.clear")
                     }
                 }.padding(.top, 8)
-                if results.isEmpty { GPStatus(title: query.isEmpty ? "搜索证券、流水、决策、提醒或策略" : "没有找到匹配内容", detail: query.isEmpty ? "输入代码或关键词；证券结果也可一键进入买入机会分析。" : "可搜索本机证券、交易流水、历史决策、通知记录和 A–H 数字孪生。", symbol: "magnifyingglass") }
+                if results.isEmpty { GPStatus(title: query.isEmpty ? "搜索证券、流水、决策或提醒" : "没有找到匹配内容", detail: query.isEmpty ? "输入代码或关键词；证券结果也可一键进入买入机会分析。" : "可搜索本机证券、交易流水、历史决策和通知记录。", symbol: "magnifyingglass") }
                 ForEach(categories, id: \.self) { category in
                     let rows = results(in: category)
                     if !rows.isEmpty {
@@ -1874,7 +1870,7 @@ private struct LedgerHistoryScreen: View {
                         GPDataRow(title: "\(model.name(for: fill.code)) · \(fill.code) · \(buy ? "买入" : "卖出")",
                                   value: "\(fill.units) 份 × ¥\(NextMoney.text(fill.price, digits: 4))",
                                   note: "手续费 ¥\(NextMoney.text(fill.fee))" + (buy ? "" : " · 已实现 \(fill.realized >= 0 ? "+" : "")¥\(NextMoney.text(fill.realized))") + " · \(fill.date.formatted(date: .numeric, time: .shortened))",
-                                  valueColor: buy ? p.risk : p.jade)
+                                  valueColor: buy ? p.gpUp : p.gpDown)
                         Button { pendingFillDelete = fill.id } label: {
                             Image(systemName: "trash").font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(p.risk.opacity(0.85)).frame(width: 30, height: 30)
@@ -2029,7 +2025,7 @@ private struct BackupRestoreScreen: View {
                     let url = try result.get(); let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
                     let envelope = try JSONDecoder().decode(NextArchiveEnvelope.self, from: Data(contentsOf: url))
                     let archive = try envelope.archive(); pending = envelope
-                    restoreSummary = "\(archive.book.positions.count) 只持仓 · \(archive.book.fills.count + archive.book.cashMovements.count + archive.book.incomeEvents.count) 条资产流水 · \(archive.twins.accounts.count) 个模拟账户 · \(archive.audits.count) 条审计记录"
+                    restoreSummary = "\(archive.book.positions.count) 只持仓 · \(archive.book.fills.count + archive.book.cashMovements.count + archive.book.incomeEvents.count) 条资产流水 · \(archive.audits.count) 条审计记录"
                     confirmRestore = true
                 } catch { model.errorMessage = "备份没有通过校验，未修改账本：\(error.localizedDescription)" }
             }
@@ -2044,77 +2040,6 @@ private struct BackupRestoreScreen: View {
     }
 }
 
-// 与 DividendEventRow 同理：ForEach 闭包里塞 GPDataRow + Divider 会让内容推断失败，
-// 编译器退到 TableRowBuilder 重载并报 generic parameter 'V' could not be inferred。
-private struct TwinBacktestFillRow: View {
-    @Environment(\.gp) private var p
-    let fill: NextTwinBacktest.Fill
-    private var sideText: String { fill.side == "buy" ? "买入" : "卖出" }
-    var body: some View {
-        VStack(spacing: 0) {
-            GPDataRow(
-                title: "\(fill.date) · \(fill.code)",
-                value: "\(sideText) \(fill.units) 份",
-                note: "¥\(fill.price) · 费用 ¥\(fill.fee) · 成交额 ¥\(fill.gross)"
-            )
-            Divider().overlay(p.line)
-        }
-    }
-}
-
-private struct TwinDetailScreen: View {
-    @EnvironmentObject private var model: NextAppModel
-    @Environment(\.gp) private var p
-    @State private var backtestCrosshair: Date?
-    let strategy: NextTwinStrategy
-    private var run: NextTwinBacktest? { model.twinBacktests[strategy.rawValue] }
-    var body: some View {
-        GPPageBackground {
-            DataPanel(title: "\(strategy.rawValue) · \(strategy.title)", caption: "独立模拟账户") {
-                Text(strategyDescription(strategy)).font(.subheadline).foregroundStyle(p.muted)
-                GPDataRow(title: "模拟现金", value: "¥\(NextMoney.text(model.twins.accounts[strategy.rawValue]?.simulation.cash ?? 0))")
-                GPDataRow(title: "可用资金", value: "¥\(NextMoney.text(model.twins.accounts[strategy.rawValue]?.simulation.available ?? 0))")
-                GPDataRow(title: "账户来源", value: model.twins.accounts[strategy.rawValue]?.seedSource ?? "空白模拟账户")
-                Text("历史回测、策略运行账户和真实账本分别保存。回测不会回写任何账户；日 K 模型不模拟盘口排队成交。")
-                    .font(.caption).foregroundStyle(p.muted)
-            }
-            if let run {
-                EditorialSection(title: "历史成绩 · \(run.startDate) — \(run.endDate)") {
-                    GPDataRow(title: "净值收益", value: "\(NextMoney.text(Decimal(string: run.totalReturn) ?? 0, digits: 2))%", note: "年化 \(NextMoney.text(Decimal(string: run.annualizedReturn) ?? 0, digits: 2))%")
-                    GPDataRow(title: "最大回撤", value: "\(NextMoney.text(Decimal(string: run.maxDrawdown) ?? 0, digits: 2))%", note: "年化波动 \(NextMoney.text(Decimal(string: run.annualizedVolatility) ?? 0, digits: 2))%")
-                    GPDataRow(title: "夏普 / 卡玛", value: "\(NextMoney.text(Decimal(string: run.sharpe) ?? 0, digits: 2)) / \(NextMoney.text(Decimal(string: run.calmar) ?? 0, digits: 2))")
-                    GPDataRow(title: "回测初始权重", value: run.codes.map { code in "\(code) \(NextMoney.text((Decimal(string: run.initialWeights[code] ?? "0") ?? 0) * 100, digits: 1))%" }.joined(separator: " · "), note: "按当前选定自选 ETF 等权初始化，不代表真实持仓回溯")
-                    GPDataRow(title: "模拟成交 / 手续费", value: "\(run.tradeCount) 笔 · ¥\(NextMoney.text(Decimal(string: run.feesPaid) ?? 0, digits: 2))", note: "固定 ¥0.10/笔 · 待成交订单不计入")
-                    GPDataRow(title: "期末虚拟权益", value: "¥\(NextMoney.text(Decimal(string: run.endingEquity) ?? 0))", note: "起始 ¥\(NextMoney.text(Decimal(string: run.initialCash) ?? 0)) · 追加 ¥\(NextMoney.text(Decimal(string: run.externalContributions) ?? 0))")
-                    Text("来源：\(run.source) · \(run.sessions) 个交易日 · 回测编号 \(run.runId.prefix(8))")
-                        .font(.caption2).foregroundStyle(p.muted).textSelection(.enabled)
-                    if strategy == .G { Text(run.aiSignalAccuracy).font(.caption).foregroundStyle(p.terracotta) }
-                    if let dataset = run.equityChartDataset() {
-                        UnifiedChartView(dataset: dataset, interval: .constant(.day), costPerUnit: nil, selectedTime: $backtestCrosshair)
-                    } else { GPStatus(title: "本机无法校验回测曲线", detail: "缓存数据保留，可重新连接 NAS 获取有效结果。", symbol: "exclamationmark.triangle") }
-                }
-                EditorialSection(title: "逐笔回放 · \(run.fills.count) 笔") {
-                    if run.fills.isEmpty { Text("该区间内策略没有成交；曲线仍包含现金余额和共同外部资金流。").font(.caption).foregroundStyle(p.muted) }
-                    else {
-                        LazyVStack(spacing: 0) {
-                            ForEach(run.fills) { fill in
-                                TwinBacktestFillRow(fill: fill)
-                            }
-                        }
-                    }
-                    Text("日 K 回测按次日开盘模拟成交，不能证明实际盘口成交或队列顺序；未成交/排队订单不在该回测模型中生成。")
-                        .font(.caption2).foregroundStyle(p.muted)
-                }
-            } else {
-                EditorialSection(title: "研究任务状态") {
-                    GPStatus(title: "没有该策略的本地回测结果", detail: model.backtestStatus, symbol: "externaldrive.badge.questionmark")
-                    GPActionButton(title: "连接 NAS 并运行回测", secondary: true, systemImage: "arrow.clockwise") { Task { await model.runTwinBacktest(strategy) } }
-                }
-            }
-        }.navigationTitle("策略详情").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
-    }
-}
-
 private struct IntentRow: View {
     @Environment(\.gp) private var p
     let icon: String; let title: String; let detail: String
@@ -2125,8 +2050,6 @@ private func compactField(_ title: String, text: Binding<String>) -> some View {
 /// 名称解析：名称簿（跨启动记录的真实名称）→ 内置目录 → 代码本身。
 /// 原来这里只有 4 条硬编码，其余一律返回「场内证券」，界面上就只剩代码可看。
 private func knownName(_ code: String) -> String { NextNameBook.resolve(code) }
-private func shortTitle(_ strategy: NextTwinStrategy) -> String { switch strategy { case .A: "基准"; case .B: "原权重"; case .C: "目标配"; case .D: "再平衡"; case .E: "价值"; case .F: "风控"; case .G: "AI 多因子"; case .H: "自定义" } }
-private func strategyDescription(_ strategy: NextTwinStrategy) -> String { switch strategy { case .A: "完全不操作的对照基准；接受同一注资与分红，不主动买卖。"; case .B: "按初始组合比例进行定投；记录每笔假设与费用。"; case .C: "按用户设定的目标配置模拟定投。"; case .D: "按预设周期检查偏离并模拟再平衡。"; case .E: "基于已验证估值和红利数据进行智能价值调仓研究。"; case .F: "用趋势与风险约束管理模拟仓位。"; case .G: "AI 多因子自主模拟交易，在独立虚拟账户中持续研究与回放。"; case .H: "可配置条件与参数的用户自定义策略，与 A–G 账户分开比较。" } }
 
 
 // MARK: - NAS 账本版本（可删除）

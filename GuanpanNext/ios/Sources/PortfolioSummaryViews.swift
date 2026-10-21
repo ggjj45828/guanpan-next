@@ -44,7 +44,7 @@ struct HoldingsBreakdownPanel: View {
             GPValue(label: "现金占比", value: String(format: "%.1f%%", cashRatio),
                     footnote: "可用 ¥\(NextMoney.text(data.cash))")
             GPValue(label: "盈利家数", value: "\(winners)/\(data.positions.count)",
-                    footnote: "按浮动盈亏计", emphasis: winners > 0 ? p.risk : p.jade)
+                    footnote: "按浮动盈亏计", emphasis: winners > 0 ? p.gpUp : p.gpDown)
         }
     }
 
@@ -70,10 +70,10 @@ struct HoldingsBreakdownPanel: View {
                             : (data.anomalies.isEmpty ? "部分持仓缺报价" : "\(data.anomalies.count) 只报价异常，已排除"))
                 GPValue(label: "今日盈亏", value: data.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—",
                         footnote: data.dailyChange == nil ? "需完整新鲜行情" : "昨仓按昨收、今买按买入价",
-                        emphasis: data.dailyChange.map { $0 >= 0 ? p.risk : p.jade })
+                        emphasis: data.dailyChange.map { p.changeTone(NextNum.double($0)) })
                 GPValue(label: "浮动盈亏", value: "\(data.floatingProfit >= 0 ? "+" : "")¥\(NextMoney.text(data.floatingProfit))",
                         footnote: "\(NextNum.signed(NextNum.double(data.floatingPercent)))% · \(mode.title)",
-                        emphasis: data.floatingProfit >= 0 ? p.risk : p.jade)
+                        emphasis: p.changeTone(NextNum.double(data.floatingProfit)))
             }
             if !data.anomalies.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -156,14 +156,14 @@ struct HoldingsBreakdownPanel: View {
                     HStack(spacing: 5) {
                         Text("今日贡献").font(.caption.weight(.medium)).foregroundStyle(p.ink)
                         Spacer(minLength: 0)
-                        Text("合计 \(daily >= 0 ? "+" : "")¥\(NextMoney.text(daily))").font(.system(size: 9.5)).foregroundStyle(daily >= 0 ? p.risk : p.jade)
+                        Text("合计 \(daily >= 0 ? "+" : "")¥\(NextMoney.text(daily))").font(.system(size: 9.5)).foregroundStyle(p.changeTone(NextNum.double(daily)))
                     }
                     ForEach(contributors) { item in
                         HStack(spacing: 6) {
                             Text(item.name).font(.system(size: 10.5)).foregroundStyle(p.ink).lineLimit(1)
                             Spacer(minLength: 6)
                             Text("\(item.dailyChange >= 0 ? "+" : "")¥\(NextMoney.text(item.dailyChange))")
-                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(item.dailyChange >= 0 ? p.risk : p.jade)
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(p.changeTone(NextNum.double(item.dailyChange)))
                         }.padding(.vertical, 1)
                     }
                 }
@@ -196,7 +196,7 @@ struct HoldingsBreakdownPanel: View {
                     GPDataRow(title: "\(row.name) 目标 \(NextNum.percent(row.targetPercent, digits: 1)) · 当前 \(NextNum.percent(row.currentPercent, digits: 1))",
                               value: "\(row.deltaAmount >= 0 ? "需买入" : "需卖出") ¥\(NextMoney.text(abs(row.deltaAmount)))",
                               note: "按总资产与目标比例折算；不含税费与最小交易单位",
-                              valueColor: row.deltaAmount >= 0 ? p.risk : p.jade)
+                              valueColor: p.changeTone(NextNum.double(row.deltaAmount)))
                 }
                 Text("目标仓位只在「设置 → 你的目标与资金」里设定；这里只算差额，不生成订单。")
                     .font(.caption2).foregroundStyle(p.muted)
@@ -207,17 +207,17 @@ struct HoldingsBreakdownPanel: View {
                 GPDataRow(title: "累计已实现盈亏",
                           value: "\(data.realizedTotal >= 0 ? "+" : "")¥\(NextMoney.text(data.realizedTotal))",
                           note: "按每笔卖出的成本还原，未计分红",
-                          valueColor: data.realizedTotal >= 0 ? p.risk : p.jade)
+                          valueColor: p.changeTone(NextNum.double(data.realizedTotal)))
                 ForEach(data.realizedByCode.prefix(3)) { item in
                     GPDataRow(title: "已实现 · \(item.name)",
                               value: "\(item.amount >= 0 ? "+" : "")¥\(NextMoney.text(item.amount))",
-                              valueColor: item.amount >= 0 ? p.risk : p.jade)
+                              valueColor: p.changeTone(NextNum.double(item.amount)))
                 }
                 ForEach(data.recentSells) { fill in
                     GPDataRow(title: "卖出 \(fill.code) · \(fill.date.formatted(date: .numeric, time: .omitted))",
                               value: "\(fill.units) 份 × ¥\(NextMoney.text(fill.price, digits: 4))",
                               note: "已实现 \(fill.realized >= 0 ? "+" : "")¥\(NextMoney.text(fill.realized)) · 手续费 ¥\(NextMoney.text(fill.fee))",
-                              valueColor: fill.realized >= 0 ? p.risk : p.jade)
+                              valueColor: p.changeTone(NextNum.double(fill.realized)))
                 }
             }
         }
@@ -228,8 +228,8 @@ private struct HoldingsSummaryRow: View {
     let item: NextPositionSummary
     let palette: GPPalette
     private var p: GPPalette { palette }
-    private var dailyTone: Color { item.dailyChange >= 0 ? p.risk : p.jade }
-    private var floatingTone: Color { item.floatingProfit >= 0 ? p.risk : p.jade }
+    private var dailyTone: Color { p.changeTone(NextNum.double(item.dailyChange)) }
+    private var floatingTone: Color { p.changeTone(NextNum.double(item.floatingProfit)) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -274,7 +274,7 @@ private struct PerformanceBlock: View {
                 HStack(alignment: .top, spacing: 14) {
                     GPValue(label: "区间收益", value: NextNum.signed(summary.cumulativePercent) + "%",
                             footnote: "\(summary.dayCount) 天 · 已剔除出入金",
-                            emphasis: summary.cumulativePercent >= 0 ? p.risk : p.jade)
+                            emphasis: p.changeTone(NextNum.double(summary.cumulativePercent)))
                     GPValue(label: "年化", value: summary.annualizedPercent.map { NextNum.signed($0) + "%" } ?? "不足 90 天",
                             footnote: summary.annualizedPercent == nil ? "样本太短不给年化" : "按区间折算")
                     GPValue(label: "最大回撤", value: "-" + NextNum.percent(summary.maxDrawdownPercent, digits: 1),
@@ -284,7 +284,7 @@ private struct PerformanceBlock: View {
                     GPDataRow(title: "\(benchmarkName) 同期",
                               value: NextNum.signed(benchmarkReturn) + "%",
                               note: "超额 " + NextNum.signed(summary.cumulativePercent - benchmarkReturn) + "%（组合 − 基准）",
-                              valueColor: summary.cumulativePercent >= benchmarkReturn ? p.risk : p.jade)
+                              valueColor: summary.cumulativePercent >= benchmarkReturn ? p.gpUp : p.gpDown)
                 } else {
                     Text("基准日 K 未归档，暂时无法比较「跑没跑赢」。可在行情页打开 \(benchmarkName) 的日 K 触发归档。")
                         .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)

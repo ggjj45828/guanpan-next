@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from market import symbol_for, fetch_tencent_daily, fetch_tencent_quotes, fetch_dividend_events
 from ai import generate_research, generate_g_twin_plan
 from simulations import execute_open_orders, close_g_session
+import grid as grid_engine
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 DEFAULT_CODES = ("159941", "563020", "159545", "159352")
@@ -206,5 +207,54 @@ def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fe
                 update("g-live-simulation", "idle", "G evaluates only after 15:20 China time on weekdays")
             time.sleep(900)
 
-    for name, target in (("daily-archive", daily_loop), ("minute-archive", minute_loop), ("dividend-research", dividend_loop), ("factor-research", research_loop), ("g-live-simulation", g_simulation_loop)):
+    def grid_loop():
+        """组合网格：按真实持仓每秒/每分钟推进一次，收盘记净值。
+
+        这是用户要的「NAS 后台自己跑、但按我的持仓来」。只写 grid_state，
+        不碰 real_books；参数由近 20 日振幅决定，不预测涨跌。
+        """
+        update("portfolio-grid", "starting", "worker starting")
+        while True:
+            try:
+                raw = database.get_real("main").get("bookJSON")
+                if not raw:
+                    update("portfolio-grid", "idle", "还没有真实账本；网格等账本出现后自动开始")
+                else:
+                    book = json.loads(raw)
+                    codes = [p["code"] for p in book.get("positions") or [] if int(p.get("units") or 0) > 0]
+                    if not codes:
+                        update("portfolio-grid", "idle", "账本里没有持仓")
+                    else:
+                        bars = {}
+                        for code in codes:
+                            stored = database.get_daily(code)
+                            if stored:
+                                bars[code] = stored["bars"]
+                        try:
+                            quotes = {row["code"]: row for row in quote_fetcher(codes)}
+                        except Exception:
+                            quotes = {}
+                        state = database.get_grid_state().get("state")
+                        if not state:
+                            state = grid_engine.build(book, quotes, bars)
+                        else:
+                            state = grid_engine.sync_with_book(state, book, quotes, bars)
+                        fills = []
+                        if quotes:
+                            state, fills = grid_engine.tick(state, quotes)
+                            local = datetime.now(SHANGHAI)
+                            if local.hour >= 15 or local.hour < 9:
+                                state = grid_engine.mark_day(state, quotes, local.date().isoformat())
+                        database.put_grid_state(state)
+                        info = grid_engine.summary(state, quotes)
+                        update("portfolio-grid", "ok",
+                               f"{len(codes)} 只 · 权益 ¥{info['equity']} · 买 {info['buys']} / 卖 {info['sells']}"
+                               + (f" · 本次 {len(fills)} 笔" if fills else ""))
+            except Exception as error:
+                update("portfolio-grid", "degraded", f"网格未推进：{error}")
+            local = datetime.now(SHANGHAI)
+            in_session = local.weekday() < 5 and ((9, 30) <= (local.hour, local.minute) <= (15, 0))
+            time.sleep(60 if in_session else 600)
+
+    for name, target in (("daily-archive", daily_loop), ("minute-archive", minute_loop), ("dividend-research", dividend_loop), ("factor-research", research_loop), ("g-live-simulation", g_simulation_loop), ("portfolio-grid", grid_loop)):
         threading.Thread(target=target, name=name, daemon=True).start()

@@ -5,7 +5,7 @@ struct LocalPreferences: Codable {
     var goal = NextGoal()
     var watch = ["159941", "563020", "159545", "159352"]
     var navigation = NextNavigationState()
-    var theme = GPTheme.system
+    var theme = GPTheme.light
     /// 字号档位 / 字体族 / 自定义文字·卡片·背景色。
     var appearance = GPAppearance()
     var notifications = NextNotificationCenter()
@@ -19,7 +19,7 @@ struct LocalPreferences: Codable {
     /// 自动上传本机账本（默认开）。关掉后只保留手动上传。
     var nasAutoUpload = true
     enum CodingKeys: String, CodingKey { case goal, watch, navigation, theme, appearance, notifications, nasBaseURL, legacyWebBaseURL, nasRevision, nasSyncedFingerprint, nasSyncedAt, nasAutoUpload }
-    init(goal: NextGoal = NextGoal(), watch: [String] = ["159941", "563020", "159545", "159352"], navigation: NextNavigationState = NextNavigationState(), theme: GPTheme = .system, appearance: GPAppearance = GPAppearance(), notifications: NextNotificationCenter = NextNotificationCenter(), nasBaseURL: String = "", legacyWebBaseURL: String = "", nasRevision: Int? = nil, nasSyncedFingerprint: String? = nil, nasSyncedAt: Date? = nil, nasAutoUpload: Bool = true) {
+    init(goal: NextGoal = NextGoal(), watch: [String] = ["159941", "563020", "159545", "159352"], navigation: NextNavigationState = NextNavigationState(), theme: GPTheme = .light, appearance: GPAppearance = GPAppearance(), notifications: NextNotificationCenter = NextNotificationCenter(), nasBaseURL: String = "", legacyWebBaseURL: String = "", nasRevision: Int? = nil, nasSyncedFingerprint: String? = nil, nasSyncedAt: Date? = nil, nasAutoUpload: Bool = true) {
         self.goal = goal; self.watch = watch; self.navigation = navigation; self.theme = theme; self.appearance = appearance; self.notifications = notifications
         self.nasBaseURL = nasBaseURL; self.legacyWebBaseURL = legacyWebBaseURL; self.nasRevision = nasRevision
         self.nasSyncedFingerprint = nasSyncedFingerprint; self.nasSyncedAt = nasSyncedAt; self.nasAutoUpload = nasAutoUpload
@@ -29,7 +29,7 @@ struct LocalPreferences: Codable {
         goal = try values.decodeIfPresent(NextGoal.self, forKey: .goal) ?? NextGoal()
         watch = try values.decodeIfPresent([String].self, forKey: .watch) ?? ["159941", "563020", "159545", "159352"]
         navigation = try values.decodeIfPresent(NextNavigationState.self, forKey: .navigation) ?? NextNavigationState()
-        theme = try values.decodeIfPresent(GPTheme.self, forKey: .theme) ?? .system
+        theme = try values.decodeIfPresent(GPTheme.self, forKey: .theme) ?? .light
         appearance = try values.decodeIfPresent(GPAppearance.self, forKey: .appearance) ?? GPAppearance()
         notifications = try values.decodeIfPresent(NextNotificationCenter.self, forKey: .notifications) ?? NextNotificationCenter()
         nasBaseURL = try values.decodeIfPresent(String.self, forKey: .nasBaseURL) ?? ""
@@ -102,7 +102,7 @@ struct LocalPreferences: Codable {
             ("real-ledger-v1.json", try encoder.encode(NextAuditedBook(current: archive.book, events: archive.audits))),
             ("simulation-ledger-v1.json", try encoder.encode(archive.experiment)),
             ("digital-twins-v1.json", try encoder.encode(archive.twins)),
-            ("preferences-v1.json", try encoder.encode(LocalPreferences(goal: archive.goal, watch: archive.watch, navigation: archive.navigation, theme: GPTheme(rawValue: archive.theme.rawValue) ?? .system, notifications: archive.notifications))),
+            ("preferences-v1.json", try encoder.encode(LocalPreferences(goal: archive.goal, watch: archive.watch, navigation: archive.navigation, theme: GPTheme(rawValue: archive.theme.rawValue) ?? .light, notifications: archive.notifications))),
             ("cached-quotes-v1.json", try encoder.encode(archive.cachedQuotes)),
             ("chart-history-v1.json", try encoder.encode(archive.chartData)),
             ("instrument-rules-v1.json", try encoder.encode(archive.instrumentRules)),
@@ -158,6 +158,8 @@ struct LocalPreferences: Codable {
     @Published var nasGAccount: NextNASGAccount?
     @Published var nasGRevision: Int?
     @Published var nasGStatus = "尚未读取 NAS G 模拟账户"
+    @Published var gridStatus: NextNASGridStatus?
+    @Published var gridStatusMessage = "尚未读取 NAS 网格状态"
     @Published var status = "行情尚未刷新 · 缓存可离线查看"
     @Published var syncStatus = "NAS 未连接"
     @Published var aiProviderStatus: NextAIProviderStatus?
@@ -283,10 +285,12 @@ struct LocalPreferences: Codable {
         ledger = copy
         scheduleAutoUpload()
     }
-    func addPosition(code: String, name: String, units: Int, cost: Decimal) throws {
+    /// 录入持仓。`acquiredAt` 是建仓日：只把建仓日及之后的派息算作你的，之前发生的除息不算
+    /// （你刚录入一只已经持有很久、且早已分红过的票时，不会凭空冒出历史分红待确认）。不传则按录入当天处理。
+    func addPosition(code: String, name: String, units: Int, cost: Decimal, acquiredAt: Date? = nil) throws {
         guard !book.positions.contains(where: { $0.code == code }), units > 0, cost > 0 else { throw NextError.invalid("代码、份额或持仓成本无效，或该证券已经存在") }
         var updated = book
-        updated.positions.append(NextPosition(code: code, name: name, units: units, bookCost: cost))
+        updated.positions.append(NextPosition(code: code, name: name, units: units, bookCost: cost, acquiredAt: acquiredAt ?? Date()))
         NextNameBook.remember(name, code: code)
         try commitRealLedger(updated, action: "录入场内持仓", reason: "用户确认保存")
         if !preferences.nasBaseURL.isEmpty { Task { await registerNASArchive(code) } }
@@ -380,7 +384,7 @@ struct LocalPreferences: Codable {
                 updated.positions[positionIndex].units += units
                 updated.positions[positionIndex].bookCost += gross + fee
             } else {
-                updated.positions.append(NextPosition(code: code, name: name, units: units, bookCost: gross + fee))
+                updated.positions.append(NextPosition(code: code, name: name, units: units, bookCost: gross + fee, acquiredAt: Date()))
             }
         } else {
             guard let positionIndex, updated.positions[positionIndex].units >= units else { throw NextError.invalid("卖出份额超过真实账本持有份额") }
@@ -813,6 +817,24 @@ struct LocalPreferences: Codable {
             nasGStatus = result.account.map { "NAS G · 修订 \(result.revision) · \($0.status)" } ?? "NAS G 尚未启动；真实账本未受影响"
         } catch { nasGStatus = "NAS G 读取失败 · \(error.localizedDescription)" }
     }
+    /// 拉取 NAS 网格引擎状态与「明日挂单表」。网格不预测涨跌，只给出现价附近的买卖档位与可达成数量。
+    func refreshGridStatus() async {
+        guard !preferences.nasBaseURL.isEmpty else { gridStatusMessage = "请先在「我的」里连接 NAS"; return }
+        let baseURL = preferences.nasBaseURL
+        gridStatusMessage = "正在读取 NAS 网格状态…"
+        do {
+            let result = try await NextNASService.fetchGridStatus(baseURL: baseURL)
+            guard preferences.nasBaseURL == baseURL else { throw NextError.invalid("NAS 地址已变化；未采用旧连接结果") }
+            gridStatus = result
+            if !result.initialized {
+                gridStatusMessage = "NAS 网格尚未初始化；首次启动后由后台按持仓自动建网格"
+            } else if let summary = result.summary {
+                gridStatusMessage = "网格运行中 · 账户权益 ¥\(NextMoney.text(Decimal(string: summary.equity) ?? 0)) · 已运行 \(summary.days) 天 · 待办挂单 \(result.ladder.reduce(0) { $0 + $1.rungs.count }) 档"
+            } else {
+                gridStatusMessage = "NAS 网格已连接，但无汇总数据"
+            }
+        } catch { gridStatusMessage = "NAS 网格读取失败 · \(error.localizedDescription)" }
+    }
     func startNASGAccount(initialCash: Decimal) async {
         guard !preferences.nasBaseURL.isEmpty else { nasGStatus = "启动失败 · 请先连接 NAS"; return }
         guard initialCash > 0 else { nasGStatus = "启动失败 · 虚拟初始资金必须大于零"; return }
@@ -999,6 +1021,10 @@ struct LocalPreferences: Codable {
         registerAutomaticDividendDrafts()
     }
 
+    /// 自动按持仓份额登记「派息待收」。
+    /// 关键规则：只登记**建仓日（acquiredAt）及之后**的派息。建仓日之前的除息不算你的——
+    /// 你录入一只早已分红过的票时，不该凭空冒出历史分红待确认。没有建仓日的老持仓会先用
+    /// 「最早流水日 / 迁移日」兜底一次（幂等、结果稳定，不会每天重写）。
     func registerAutomaticDividendDrafts() {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -1008,12 +1034,45 @@ struct LocalPreferences: Codable {
         let todayText = formatter.string(from: today)
         guard let cutoff = Calendar(identifier: .gregorian).date(byAdding: .day, value: -400, to: today) else { return }
         let cutoffText = formatter.string(from: cutoff)
+
         var updated = book
+
+        // 1) 一次性迁移：没有建仓日的持仓，用「最早流水日」或「迁移日」兜底。
+        var migratedCount = 0
+        for idx in updated.positions.indices where updated.positions[idx].units > 0 && updated.positions[idx].acquiredAt == nil {
+            let code = updated.positions[idx].code
+            let earliestFill = updated.fills.filter { $0.code == code }.map { $0.date }.min()
+            if let anchor = earliestFill ?? book.importedAt {
+                updated.positions[idx].acquiredAt = anchor
+                migratedCount += 1
+            }
+        }
+
+        // 2) 每只持仓的分红门槛：建仓日；没有则用今天（只看未来，符合「以后的只是以后的」）。
+        var thresholdByCode: [String: String] = [:]
+        for p in updated.positions where p.units > 0 {
+            thresholdByCode[p.code] = p.acquiredAt.map { formatter.string(from: $0) } ?? todayText
+        }
+
+        // 3) 清理门槛之前的自动登记草稿，避免历史分红伪待收。
+        var removed: [String] = []
+        updated.incomeEvents.removeAll { ev in
+            guard ev.status == .expected, ev.note.hasPrefix("自动登记|"), let code = ev.code,
+                  let threshold = thresholdByCode[code] else { return false }
+            let parts = ev.note.split(separator: "|")
+            guard parts.count >= 3 else { return false }
+            let evDate = String(parts[2])
+            if evDate < threshold { removed.append("\(ev.name) \(evDate)"); return true }
+            return false
+        }
+
+        // 4) 登记门槛之后、cutoff 之前已实施的派息。
         var added: [String] = []
-        for position in book.positions where position.units > 0 {
+        for position in updated.positions where position.units > 0 {
+            guard let threshold = thresholdByCode[position.code] else { continue }
             let events = NextDividendAnalytics.merged(book.dividendEvents + (dividendEvents[position.code] ?? []))
             for event in events where event.code == position.code && event.isEstimated != true
-                && event.date <= todayText && event.date >= cutoffText {
+                && event.date <= todayText && event.date >= cutoffText && event.date >= threshold {
                 let marker = "自动登记|\(event.code)|\(event.date)"
                 if updated.incomeEvents.contains(where: { $0.note.hasPrefix(marker) }) { continue }
                 let gross = event.amountPerShare * Decimal(position.units)
@@ -1029,10 +1088,12 @@ struct LocalPreferences: Codable {
                 added.append("\(position.name) \(event.date) ¥\(NextMoney.text(gross))")
             }
         }
-        guard !added.isEmpty else { return }
+        guard !added.isEmpty || migratedCount > 0 || !removed.isEmpty else { return }
+        var reason = "按持仓份额与已实施派息自动登记 \(added.count) 笔"
+        if migratedCount > 0 { reason += "；补全 \(migratedCount) 只持仓建仓日" }
+        if !removed.isEmpty { reason += "；清理 \(removed.count) 笔历史分红伪待收" }
         do {
-            try commitRealLedger(updated, action: "自动登记派息待收",
-                                 reason: "按持仓份额与已实施派息自动登记 \(added.count) 笔：\(added.prefix(3).joined(separator: "、"))")
+            try commitRealLedger(updated, action: "自动登记派息待收", reason: reason)
             notice = "已按持仓自动登记 \(added.count) 笔派息待收；确认到账后再计入现金。"
         } catch {
             notice = "派息自动登记未写入：\(error.localizedDescription)"
@@ -1105,7 +1166,7 @@ struct LocalPreferences: Codable {
         ledger = NextAuditedBook(current: incoming.book, events: incoming.audits)
         experiment = incoming.experiment
         twins = incoming.twins
-        preferences = LocalPreferences(goal: incoming.goal, watch: incoming.watch, navigation: incoming.navigation, theme: GPTheme(rawValue: incoming.theme.rawValue) ?? .system, appearance: preferences.appearance, notifications: incoming.notifications, nasBaseURL: preferences.nasBaseURL, legacyWebBaseURL: preferences.legacyWebBaseURL, nasRevision: nil)
+        preferences = LocalPreferences(goal: incoming.goal, watch: incoming.watch, navigation: incoming.navigation, theme: GPTheme(rawValue: incoming.theme.rawValue) ?? .light, appearance: preferences.appearance, notifications: incoming.notifications, nasBaseURL: preferences.nasBaseURL, legacyWebBaseURL: preferences.legacyWebBaseURL, nasRevision: nil)
         quotes = incoming.cachedQuotes; chartData = incoming.chartData; rules = incoming.instrumentRules; orderBooks = incoming.orderBooks
         decisions = incoming.decisionHistory
         nasResearch = incoming.nasResearch
@@ -1146,7 +1207,7 @@ struct LocalPreferences: Codable {
         archive.dividendEvents = dividendEvents
         archive.patientLimitPlans = patientLimitPlans
         archive.twinBacktests = twinBacktests
-        archive.theme = NextTheme(rawValue: theme.rawValue) ?? .system
+        archive.theme = NextTheme(rawValue: theme.rawValue) ?? .light
         return archive
     }
 }

@@ -383,7 +383,7 @@ struct UnifiedChartView: View {
                     let snapped = (x(point.timestamp) + 0.5).rounded() - 0.5
                     let yHigh = priceY(high), yLow = priceY(low)
                     let rising = point.close >= open
-                    let color = rising ? p.terracotta : p.jade
+                    let color = rising ? p.gpUp : p.gpDown
                     var wick = Path()
                     wick.move(to: CGPoint(x: snapped, y: yHigh))
                     wick.addLine(to: CGPoint(x: snapped, y: yLow))
@@ -396,7 +396,7 @@ struct UnifiedChartView: View {
                     context.fill(Path(rect), with: .color(color))
                 }
             } else {
-                context.stroke(pricePath, with: .color(p.chartBlue), style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
+                context.stroke(pricePath, with: .color(p.ink), style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
             }
         }
         if visibleLayers.contains("iopv") {
@@ -463,7 +463,7 @@ struct UnifiedChartView: View {
                       fill.price >= domain.lowerBound, fill.price <= domain.upperBound else { continue }
                 let center = CGPoint(x: x(stamp), y: priceY(fill.price))
                 let buy = fill.side == "buy"
-                let color = buy ? p.jade : p.terracotta
+                let color = buy ? p.gpUp : p.gpDown
                 context.fill(Path(ellipseIn: CGRect(x: center.x - 7, y: center.y - 7, width: 14, height: 14)), with: .color(color))
                 context.draw(Text(buy ? "B" : "S").font(.system(size: 9, weight: .bold)).foregroundColor(.white), at: center)
             }
@@ -530,7 +530,7 @@ struct UnifiedChartView: View {
         let first = securityCode.flatMap { model.quotes[$0]?.quote.previousClose }
         return closes.enumerated().map { index, close in
             let baseline = index > 0 ? closes[index - 1] : (first ?? close)
-            return close >= baseline ? p.terracotta : p.jade
+            return close >= baseline ? p.gpUp : p.gpDown
         }
     }
 
@@ -613,7 +613,7 @@ struct UnifiedChartView: View {
             let centerX = xOf(sample.timestamp)
             let top = min(y(0), y(point.histogram))
             let height = max(0.8, abs(y(point.histogram) - y(0)))
-            let color = point.histogram >= 0 ? p.terracotta : p.jade
+            let color = point.histogram >= 0 ? p.gpUp : p.gpDown
             context.fill(Path(roundedRect: CGRect(x: centerX - barWidth / 2, y: top, width: barWidth, height: height), cornerRadius: 0.5),
                          with: .color(color.opacity(0.8)))
         }

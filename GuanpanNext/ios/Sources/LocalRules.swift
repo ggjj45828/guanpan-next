@@ -270,6 +270,17 @@ struct NextScoreLine: Identifiable, Equatable {
     let points: Int
 }
 
+/// 雷达图的一个维度。`value` 归一化到 0–100，口径统一为「买入友好度」：越高越适合买入。
+/// `detail` 是人话依据，`isEstimated` 为 true 表示数据不足、按中性 50 处理（界面上要标出来）。
+struct NextScoreDimension: Identifiable, Equatable {
+    var id: String { key }
+    let key: String
+    let title: String
+    let value: Double
+    let detail: String
+    var isEstimated = false
+}
+
 /// 一只标的的本机打分结果。`base` 是技术面分数，`lines` 是每一笔加减分的依据，
 /// 两者相加就是 `score` —— 用户可以逐条核对，不需要信任黑箱。
 struct NextWorthBuyAssessment: Equatable {
@@ -286,8 +297,15 @@ struct NextWorthBuyAssessment: Equatable {
     var isIncomePlay: Bool
     var barCount: Int
     var notes: [String]
+    /// 六维雷达：趋势 / 位置 / 估值 / 股息 / 仓位 / 流动性，全部归一化到 0–100。
+    var dimensions: [NextScoreDimension]
 
     var totalAdjustment: Int { lines.reduce(0) { $0 + $1.points } }
+    /// 六维均值，与 `score`（技术面基准 ± 修正）口径不同，只用来横向比较同一只标的的短板。
+    var dimensionAverage: Double {
+        guard !dimensions.isEmpty else { return 0 }
+        return dimensions.reduce(0) { $0 + $1.value } / Double(dimensions.count)
+    }
 }
 
 enum NextWorthBuyEngine {
@@ -303,6 +321,9 @@ enum NextWorthBuyEngine {
     ///
     /// 红利标的（股息率 ≥3%）的当日涨跌权重除以 3：对攒股息的人来说，
     /// 跌下去是股息率被抬高、更划算，不做这个修正会「越跌越不推荐」，正好反了。
+    ///
+    /// 除了总分，还产出 `dimensions` 六维雷达（趋势 / 位置 / 估值 / 股息 / 仓位 / 流动性），
+    /// 全部归一化到 0–100、方向统一为「买入友好度」；数据不足的维度给中性 50 并标记 estimated。
     static func evaluate(code: String, price: Decimal, previousClose: Decimal,
                          samples: [NextChartSample], dividendPerShare: Decimal,
                          iopv: Decimal?, costPerUnit: Decimal?,
@@ -406,11 +427,83 @@ enum NextWorthBuyEngine {
             notes.append("当前场内价格明显高于净值，买入即承担这部分溢价回落的可能。")
         }
 
+        // 7) 雷达六维。每一项都归一化到 0–100，方向统一为「买入友好度」，
+        //    数据不足的一律给中性 50 并把 isEstimated 置 true —— 不拿默认值冒充真实结论。
+        var dimensions: [NextScoreDimension] = []
+
+        dimensions.append(NextScoreDimension(
+            key: "trend", title: "趋势",
+            value: Double(base),
+            detail: "技术面基准 \(base) 分：均线排列 / 动量 / RSI / MACD / 量能 / KDJ"))
+
+        let positionValue = pricePosition.map { 100 - $0 } ?? 50
+        dimensions.append(NextScoreDimension(
+            key: "position", title: "位置",
+            value: positionValue,
+            detail: pricePosition.map { "现价处于近 60 日区间下 \(Int($0.rounded()))%，越靠下越接近买入区" }
+                    ?? "日 K 不足 20 根，价格位置按中性处理",
+            isEstimated: pricePosition == nil))
+
+        var valuationValue = 50.0
+        var valuationDetail = "无 IOPV 数据，估值维度按中性处理"
+        var valuationEstimated = true
+        if let premium {
+            valuationValue = NextNum.clamp(70 - premium * 10, 0, 100)
+            valuationDetail = premium >= 0
+                ? "场内溢价 \(NextNum.signed(premium))%，溢价越高买入越不划算"
+                : "场内折价 \(NextNum.signed(premium))%，折价买入相对有安全垫"
+            valuationEstimated = false
+        }
+        dimensions.append(NextScoreDimension(
+            key: "valuation", title: "估值",
+            value: valuationValue, detail: valuationDetail, isEstimated: valuationEstimated))
+
+        var dividendValue = 50.0
+        var dividendDetail = "没有可核实的近 12 个月派息记录，按中性处理（不代表标的好坏）"
+        var dividendEstimated = true
+        if let dividendYield {
+            dividendValue = NextNum.clamp(dividendYield / 6 * 100, 0, 100)
+            dividendDetail = "股息率 \(NextNum.percent(dividendYield))，近 12 个月每份 ¥\(NextMoney.text(perShare, digits: 4))；6% 记满分"
+            dividendEstimated = false
+        }
+        dimensions.append(NextScoreDimension(
+            key: "dividend", title: "股息",
+            value: dividendValue, detail: dividendDetail, isEstimated: dividendEstimated))
+
+        var roomValue = 100.0
+        var roomDetail = "未持有或未设单标的上限，仓位空间不打折"
+        var roomEstimated = false
+        if let weightPercent, let positionLimitPercent, positionLimitPercent > 0 {
+            roomValue = NextNum.clamp(100 - weightPercent / positionLimitPercent * 100, 0, 100)
+            roomDetail = "已占 \(NextNum.percent(weightPercent, digits: 1))，单标的上限 \(NextNum.percent(positionLimitPercent, digits: 0))，占得越满越不该加"
+        }
+        dimensions.append(NextScoreDimension(
+            key: "room", title: "仓位",
+            value: roomValue, detail: roomDetail, isEstimated: roomEstimated))
+
+        var liquidityValue = 50.0
+        var liquidityDetail = "成交量样本不足，流动性按中性处理"
+        var liquidityEstimated = true
+        if let ratio = signal.volumeRatio {
+            switch ratio {
+            case 2...: liquidityValue = 95
+            case 1.2..<2: liquidityValue = 80
+            case 0.8..<1.2: liquidityValue = 60
+            default: liquidityValue = 30
+            }
+            liquidityDetail = "量比 \(String(format: "%.2f", ratio))（最近一日成交量 ÷ 前 20 日均量），越低越难按理想价格成交"
+            liquidityEstimated = false
+        }
+        dimensions.append(NextScoreDimension(
+            key: "liquidity", title: "流动性",
+            value: liquidityValue, detail: liquidityDetail, isEstimated: liquidityEstimated))
+
         return NextWorthBuyAssessment(
             score: score, action: action, base: base, lines: lines,
             dividendYieldPercent: dividendYield, dividendPerShare: perShare > 0 ? perShare : nil,
             pricePositionPercent: pricePosition, premiumPercent: premium, costGapPercent: costGap,
-            isIncomePlay: isIncomePlay, barCount: ordered.count, notes: notes)
+            isIncomePlay: isIncomePlay, barCount: ordered.count, notes: notes,
+            dimensions: dimensions)
     }
 }
 

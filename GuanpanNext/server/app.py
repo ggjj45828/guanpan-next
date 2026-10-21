@@ -7,6 +7,7 @@ explicit and revision-checked.
 import json
 import os
 import uuid
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from domain import Conflict, InvalidData, NextDatabase, convert_legacy_web_book
 from market import (fetch_indices, fetch_tencent_quotes, fetch_tencent_daily, fetch_dividend_events, fetch_kline,
                     symbol_for, DIVIDEND_RULES_VERSION as dividend_rules_version)
 from workers import start_workers
+import grid
 from backtest import run_backtest
 from simulations import apply_action, create_account
 
@@ -35,6 +37,47 @@ def code_version():
 
 
 def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fetch_tencent_daily, dividend_fetcher=fetch_dividend_events):
+    def grid_bars(codes):
+        """网格参数只需要近 20 个交易日的振幅，用 NAS 已归档的日 K，够了。"""
+        bars = {}
+        for code in codes:
+            try:
+                stored = database.get_daily(code)
+                if stored:
+                    bars[code] = stored["bars"]
+            except Exception:
+                pass
+        return bars
+
+    def grid_quotes(codes):
+        """批量取报价；批量里缺哪只就单独补一次。
+
+        腾讯的批量接口偶发只返回一部分（之前 563020 还被串成过别的品种），
+        网格如果拿不到价就会用成本价当锚点，档位全是错的 —— 所以这里宁可慢一点。
+        """
+        if not codes:
+            return {}
+        result = {}
+        try:
+            result = {row["code"]: row for row in market_fetcher(codes)}
+        except Exception:
+            result = {}
+        missing = [code for code in codes if code not in result]
+        for code in missing:
+            try:
+                for row in market_fetcher([code]):
+                    result[row["code"]] = row
+            except Exception:
+                pass
+        return result
+
+    def grid_book():
+        remote = database.get_real("main")
+        raw = remote.get("bookJSON")
+        if not raw:
+            return None
+        return json.loads(raw)
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "GuanpanNext/1"
 
@@ -89,6 +132,31 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                 # 旧版网页的整包数据（localStorage 的替代品）。只读，不会动真实账本。
                 try: return self.reply(200, {"ok": True, **database.get_web_snapshot("classic")})
                 except InvalidData as error: return self.reply(400, {"error": str(error)})
+            if path == "/v1/grid/status":
+                try:
+                    stored = database.get_grid_state()
+                    state = stored.get("state")
+                    if not state:
+                        return self.reply(200, {"ok": True, "initialized": False, "summary": None,
+                                                "daily": [], "fills": []})
+                    codes = list((state.get("plans") or {}).keys())
+                    quotes = grid_quotes(codes)
+                    return self.reply(200, {"ok": True, "initialized": True, "updatedAt": stored.get("updatedAt"),
+                                            "summary": grid.summary(state, quotes),
+                                            # 明天的挂单表：网格真正的"未来指导"，不是预测涨跌
+                                            "ladder": grid.ladder(state, quotes),
+                                            "daily": (state.get("daily") or [])[-90:],
+                                            "fills": (state.get("fills") or [])[-20:]})
+                except (InvalidData, ValueError) as error:
+                    return self.reply(400, {"error": str(error)})
+            if path == "/v1/grid/history":
+                try:
+                    stored = database.get_grid_state()
+                    state = stored.get("state") or {}
+                    return self.reply(200, {"ok": True, "daily": state.get("daily") or [],
+                                            "fills": (state.get("fills") or [])[-100:]})
+                except (InvalidData, ValueError) as error:
+                    return self.reply(400, {"error": str(error)})
             if path == "/v1/legacy/books/main":
                 try:
                     legacy = database.get_legacy_inbox("main")
@@ -283,6 +351,39 @@ def make_handler(database, market_fetcher=fetch_tencent_quotes, daily_fetcher=fe
                     revision = database.put_web_snapshot("classic", payload,
                                                          int(expected) if isinstance(expected, int) else None)
                     return self.reply(200, {"ok": True, "revision": revision})
+                if path == "/v1/grid/reset":
+                    # 按当前真实持仓重建网格账户。只影响模拟，不动账本。
+                    if value.get("mode") != "grid-reset-confirmed":
+                        raise InvalidData("grid reset requires explicit confirmation")
+                    book = grid_book()
+                    if not book:
+                        raise InvalidData("NAS 上还没有真实账本")
+                    codes = [p["code"] for p in book.get("positions") or []]
+                    quotes = grid_quotes(codes)
+                    state = grid.build(book, quotes, grid_bars(codes))
+                    database.put_grid_state(state)
+                    return self.reply(200, {"ok": True, "summary": grid.summary(state, quotes)})
+                if path == "/v1/grid/advance":
+                    # 手动推进一次（自动推进由后台线程做）。用来立刻看到结果。
+                    if value.get("mode") != "grid-advance-confirmed":
+                        raise InvalidData("grid advance requires explicit confirmation")
+                    book = grid_book()
+                    if not book:
+                        raise InvalidData("NAS 上还没有真实账本")
+                    stored = database.get_grid_state()
+                    state = stored.get("state")
+                    codes = [p["code"] for p in book.get("positions") or []]
+                    quotes = grid_quotes(codes)
+                    if not state:
+                        state = grid.build(book, quotes, grid_bars(codes))
+                    else:
+                        state = grid.sync_with_book(state, book, quotes, grid_bars(codes))
+                    state, fills = grid.tick(state, quotes)
+                    if datetime.now(ZoneInfo("Asia/Shanghai")).hour >= 15:
+                        state = grid.mark_day(state, quotes)
+                    database.put_grid_state(state)
+                    return self.reply(200, {"ok": True, "fills": len(fills),
+                                            "summary": grid.summary(state, quotes)})
                 if path.startswith("/v1/backtests/"):
                     strategy = path.rsplit("/", 1)[-1]
                     if value.get("strategy") != strategy:

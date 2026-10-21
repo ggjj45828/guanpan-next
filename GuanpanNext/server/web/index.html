@@ -124,6 +124,14 @@ a{color:var(--forest)}
   </section>
 
   <section class="card">
+    <h2><span class="dot"></span>DeepSeek 连接<span class="tag" id="aiTag">—</span></h2>
+    <div class="note">这里测的是 <b>NAS 通道</b>，请求路径是「手机 → NAS → DeepSeek」，用的是 NAS 上 <code>.env</code> 里的 key。手机端<b>另有一条直连 DeepSeek 的通道</b>（key 存在手机本地钥匙串，在手机设置里单独存、单独测），没有 NAS 也能分析；两条路 key 分开管理、互不影响。本卡只测 NAS 这条路：点按钮向 DeepSeek 发一句 "OK" 探针（<b>不含任何持仓</b>）。验证失败会显示真实原因：密钥未配置 / 模型 400 / 网络不可达。</div>
+    <div class="row"><button class="primary small" onclick="testAI()">测试 DeepSeek 连接</button>
+      <span class="hint">手机端详情页「授权并通过 NAS 分析」走的就是这条路</span></div>
+    <div class="stat" id="aiState" hidden></div>
+  </section>
+
+  <section class="card">
     <h2><span class="dot"></span>行情档案核对</h2>
     <div class="note">读取 NAS 已归档的日 K 或某交易日分时；空结果表示尚未采集，不会伪造曲线。</div>
     <div class="row">
@@ -422,7 +430,21 @@ async function loadWorkers(){
     $('workers').textContent = '服务版本 ' + (j.codeVersion || '未知') +
       '\nAI 提供方 ' + (ai.state || '未知') + (ai.model ? '（' + ai.model + '）' : '') +
       (lines.length ? '\n' + lines.join('\n') : '\n（没有后台线程状态）');
+    if ($('aiTag')) $('aiTag').textContent = (ai.state || '未知') + (ai.model ? ' · ' + ai.model : '');
   } catch (e) { $('workers').textContent = '读取失败：' + e.message; }
+}
+
+async function testAI(){
+  setState('aiState', '正在向 DeepSeek 发送探针（只发一句 OK，不含持仓）…');
+  try {
+    var res = await fetch('/v1/ai/verify', { method: 'GET', cache: 'no-store' });
+    var data = {}; try { data = await res.json(); } catch(e){}
+    if (res.ok){
+      setState('aiState', '验证成功 · state=' + (data.state || '') + ' · 模型 ' + (data.model || '未知') + '\n' + (data.message || ''), 'ok');
+    } else {
+      setState('aiState', '验证失败 · state=' + (data.state || '') + '\n' + (data.error || data.message || ('HTTP ' + res.status)), 'err');
+    }
+  } catch (e){ setState('aiState', '请求异常：' + e.message, 'err'); }
 }
 
 function showMarket(obj){ var el = $('market'); el.hidden = false; el.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); }
