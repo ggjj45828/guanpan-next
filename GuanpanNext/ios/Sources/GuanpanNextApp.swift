@@ -1209,7 +1209,7 @@ private struct GridLabScreen: View {
         return (minP, maxP, span, (cur - minP) / span)
     }
     @ViewBuilder private func gridAxisView(_ row: NextNASGridLadderRow) -> some View {
-        guard let m = gridAxisMetrics(row) else { return EmptyView() }
+        if let m = gridAxisMetrics(row) {
         GeometryReader { geo in
             let w = geo.size.width
             ZStack(alignment: .leading) {
@@ -1227,6 +1227,7 @@ private struct GridLabScreen: View {
                     .position(x: CGFloat(m.curFrac) * w, y: 33)
             }.frame(height: 40)
         }.frame(height: 40)
+        }
     }
 }
 
