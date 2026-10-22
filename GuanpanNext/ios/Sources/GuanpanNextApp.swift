@@ -577,12 +577,12 @@ private struct DecisionScreen: View {
         let targetYield = Decimal(string: UserDefaults.standard.string(forKey: "guanpan.targetYield") ?? "4") ?? 4
         let positions = model.book.positions
         let totalMV = positions.reduce(Decimal.zero) { acc, pos in
-            guard let price = model.quotes[pos.code]?.quote?.price else { return acc }
+            guard let price = model.quotes[pos.code]?.quote.price else { return acc }
             return acc + price * Decimal(pos.units)
         }
         var results: [InspectHolding] = []
         for pos in positions {
-            let price = model.quotes[pos.code]?.quote?.price
+            let price = model.quotes[pos.code]?.quote.price
             let mv = price.map { $0 * Decimal(pos.units) } ?? 0
             let weight = totalMV > 0 ? NSDecimalNumber(decimal: mv).doubleValue / NSDecimalNumber(decimal: totalMV).doubleValue : 0
             let cost = pos.bookCost
@@ -643,11 +643,11 @@ private struct DecisionScreen: View {
                 Text(code.map { "围绕 \(knownName($0))，把已知信息整理成下一步" } ?? "先说你想完成什么").font(.system(.title2, design: .serif).weight(.semibold)).foregroundStyle(p.ink).padding(.top, 10)
                 // 账户体检：按报告方法论，先看账户（集中度、现金覆盖），再看单只资产，最后看执行。
                 EditorialSection(title: "账户体检 · 一键扫描", trailing: inspecting ? "扫描中" : "本机规则", accent: p.forest) {
-                    GPActionButton(title: inspecting ? "扫描中…" : "一键体检全部持仓", systemImage: "stethoscope", secondary: true) { runInspection() }
+                    GPActionButton(title: inspecting ? "扫描中…" : "一键体检全部持仓", secondary: true, systemImage: "stethoscope") { runInspection() }
                     if let inspectSummary { Text(inspectSummary).font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true) }
                     if !inspectResults.isEmpty {
                         let totalMV = inspectResults.reduce(Decimal.zero) { acc, r in
-                            guard let price = model.quotes[r.code]?.quote?.price else { return acc }
+                            guard let price = model.quotes[r.code]?.quote.price else { return acc }
                             let units = model.book.positions.first(where: { $0.code == r.code })?.units ?? 0
                             return acc + price * Decimal(units)
                         }
@@ -1292,7 +1292,7 @@ private struct AssetsScreen: View {
     @ViewBuilder private var overviewStatGrid: some View {
         let holdingsValue = (valuation.total ?? 0) - model.book.cash
         HStack(spacing: 10) {
-            overviewStat(title: "持仓市值", value: valuation.total.map { "¥\(NextMoney.text(holdingsValue))" } ?? "—", color: p.chartBlue)
+            overviewStat(title: "持仓市值", value: valuation.total.map { _ in "¥\(NextMoney.text(holdingsValue))" } ?? "—", color: p.chartBlue)
             overviewStat(title: "现金", value: "¥\(NextMoney.text(model.book.cash))", color: p.jade)
             overviewStat(title: "当日盈亏", value: valuation.dailyChange.map { "\($0 >= 0 ? "+" : "")\(NextMoney.text($0))" } ?? "—", color: valuation.dailyChange.map { p.changeTone(NextNum.double($0)) } ?? p.muted)
             overviewStat(title: "预计年股息", value: "¥\(NextMoney.text(annualDividend))", color: p.chartGold)

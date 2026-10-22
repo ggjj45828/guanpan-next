@@ -478,7 +478,7 @@ struct PositionRow: View {
     }
     /// 持仓行下方小标签：实时浮动盈亏 + 股息率（有数据才显示）。
     @ViewBuilder private var tagRow: some View {
-        let price = quote?.quote?.price
+        let price = quote?.quote.price
         let marketValue = price.map { $0 * Decimal(position.units) }
         let pnl = (marketValue ?? 0) - position.bookCost
         HStack(spacing: 8) {
@@ -493,7 +493,7 @@ struct PositionRow: View {
     }
     /// 该持仓近 12 个月已核实每份派息 ÷ 现价 得到的股息率。
     private var dividendYieldPercent: Decimal? {
-        guard let price = quote?.quote?.price, price > 0 else { return nil }
+        guard let price = quote?.quote.price, price > 0 else { return nil }
         let events = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[position.code] ?? []))
         let per = NextDividendAnalytics.recentVerifiedPerShare(code: position.code, events: events, today: dividendTodayString())
         guard per > 0 else { return nil }
