@@ -117,6 +117,9 @@ details.exlist .body{padding:6px 10px}
         <input id="tradeFee" type="number" step="0.01" placeholder="手续费" style="width:90px" value="0.10">
         <button class="act mini" onclick="submitTrade('buy')">买入</button>
         <button class="act mini ghost" onclick="submitTrade('sell')">卖出</button>
+        <!-- 交收规则：跨境/黄金 ETF 是 T+0，境内股票 ETF 是 T+1。**不按名称或代码前缀瞎猜**，
+             由你按自己券商的实际规则标注一次，之后按标注执行；未标注一律按 T+1 保守处理。 -->
+        <label class="sm mut" style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="tradeT0" onchange="toggleSettlement()"> T+0（当日可卖）</label>
       </div>
       <div id="tradeHint" class="sm mut" style="margin-top:4px"></div>
       <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
@@ -464,7 +467,21 @@ function shanghaiDay(ms){
   try{ return new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(ms)); }
   catch(e){ return new Date(ms).toDateString(); }
 }
+/* 交收规则 T+0 / T+1：存在本地，按代码标注。
+   跨境（纳指/日经/恒生/标普…）、黄金、债券、货币 ETF 通常是 T+0，境内股票 ETF 是 T+1。
+   但代码前缀和名称都不可靠，所以**不自动推断**——未标注的一律按 T+1 保守处理，
+   你确认是 T+0 的勾一下即可，之后这台浏览器都按标注执行。 */
+function settleMap(){ try{ return JSON.parse(localStorage.getItem("gp_settle")||"{}"); }catch(e){ return {}; } }
+function isT0(code){ return settleMap()[code]===true; }
+function toggleSettlement(){
+  const code=($("tradeCode").value||"").trim(); if(!isSix(code)){ toast("先选标的"); return; }
+  const m=settleMap(); m[code]=!!($("tradeT0")&&$("tradeT0").checked);
+  localStorage.setItem("gp_settle", JSON.stringify(m));
+  toast(code+(m[code]?" 已标注 T+0（当日可卖）":" 恢复 T+1"));
+  renderTradeHint();
+}
 function lockedUnits(code){
+  if(isT0(code)) return 0;              // T+0：今天买的今天就能卖
   const fills=(BOOK&&BOOK.fills)||[]; const today=shanghaiDay(Date.now());
   return fills.filter(f=>f&&f.code===code&&f.side==="buy"&&shanghaiDay((Number(f.date)+COCOA)*1000)===today)
               .reduce((s,f)=>s+(Number(f.units)||0),0);
@@ -476,10 +493,14 @@ function renderTradeHint(){
   const p=tradePosition(code);
   const q=QUOTES[code]; const isETF=q&&String(q.providerInstrumentType||"").toUpperCase()==="ETF";
   if(isETF&&$("tradeFee")) $("tradeFee").value="0.10";   // 与手机端一致：已核实 ETF 自动 0.10
+  if($("tradeT0")) $("tradeT0").checked=isT0(code);
+  const t0=isT0(code);
   if(!p){ el.textContent="当前没有这只的持仓，可先买入建仓。"+(q&&q.price?"当前价 ¥"+fmt(q.price,3):""); return; }
-  const locked=lockedUnits(code); const avail=Math.max(0,(Number(p.units)||0)-locked);
-  el.textContent=`持有 ${p.units} 份 · 今日买入锁定 ${locked} 份 · 可卖 ${avail} 份（T+1）· 成本 ¥${fmt(p.bookCost,2)}`
-    + (q&&q.price?` · 现价 ¥${fmt(q.price,3)}`:"");
+  const locked=lockedUnits(code); const avail=t0?(Number(p.units)||0):Math.max(0,(Number(p.units)||0)-locked);
+  el.textContent=(t0?`${code} 已标注 T+0 · 当日买入可卖`:`${code} 按 T+1 · 今日买入锁定 ${locked} 份`)
+    + ` · 持有 ${p.units} 份 · 可卖 ${avail} 份 · 成本 ¥${fmt(p.bookCost,2)}`
+    + (q&&q.price?` · 现价 ¥${fmt(q.price,3)}`:"")
+    + (t0?"":" · 若是跨境/黄金 ETF 可勾选 T+0");
 }
 async function submitTrade(side){
   if(!BOOK){ toast("账本还没读取"); return; }
@@ -512,8 +533,8 @@ async function submitTrade(side){
     if(idx<0){ toast("没有这只的持仓，无法卖出"); return; }
     const pos=BOOK.positions[idx]; const held=Number(pos.units)||0;
     if(units>held){ toast("卖出份额超过持有份额（持有 "+held+" 份）"); return; }
-    const avail=Math.max(0,held-lockedUnits(code));
-    if(units>avail){ toast("可卖份额不足：持有 "+held+" 份，其中今日买入锁定 "+(held-avail)+" 份，当前可卖 "+avail+" 份（T+1）"); return; }
+    const avail=isT0(code)?held:Math.max(0,held-lockedUnits(code));
+    if(units>avail){ toast(isT0(code)?"卖出份额超过持有份额（持有 "+held+" 份）":"可卖份额不足：持有 "+held+" 份，其中今日买入锁定 "+(held-avail)+" 份，当前可卖 "+avail+" 份（T+1；若这只可当日回转，勾上方 T+0）"); return; }
     const cost=r2(Number(pos.bookCost)*units/held);
     realized=r2(gross-fee2-cost);
     pos.units=held-units; pos.bookCost=r2(Number(pos.bookCost)-cost);
