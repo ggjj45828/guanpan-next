@@ -1,5 +1,7 @@
 import json
+import os
 import unittest
+from unittest.mock import patch
 from datetime import date, timedelta
 from io import BytesIO
 from urllib.error import HTTPError
@@ -107,3 +109,56 @@ class DeepSeekEmptyContentTests(unittest.TestCase):
         for bad in ({"choices": []}, {}, {"choices": [{"message": None}]}):
             with self.assertRaises(AIProviderError):
                 _message_content(bad)
+
+
+class DeepSeekThinkingModeTests(unittest.TestCase):
+    """V4 默认思考模式会吃掉正文额度，结构化任务必须能关掉它。
+
+    实测：一次单证券分析写出近万字思考过程，4096 额度被吃光、正文为空
+    （finish_reason=length），从外面看就是"AI 分析失败"。
+    """
+
+    def _ok(self):
+        class R:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *_): return None
+            def read(self, _limit): return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+        return R()
+
+    def test_thinking_disabled_by_default(self):
+        from ai import _thinking_disabled
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("GUANPAN_AI_THINKING", None)
+            self.assertTrue(_thinking_disabled())
+        with patch.dict("os.environ", {"GUANPAN_AI_THINKING": "on"}):
+            self.assertFalse(_thinking_disabled())
+
+    def test_request_carries_thinking_flag_and_falls_back_on_400(self):
+        """服务端不认 thinking 参数（400）时要自动去掉重试，不能因此失败。"""
+        from urllib.error import HTTPError
+        from ai import _chat_request
+        seen = []
+        def opener(request, **_kw):
+            body = json.loads(request.data.decode())
+            seen.append("thinking" in body)
+            if "thinking" in body:
+                raise HTTPError("https://api.deepseek.com/chat/completions", 400, "Bad Request", None, None)
+            return self._ok()
+        payload = {"model": "deepseek-v4-flash", "stream": False, "max_tokens": 8,
+                   "messages": [{"role": "user", "content": "hi"}], "thinking": {"type": "disabled"}}
+        result = _chat_request({"base": "https://api.deepseek.com"}, payload, "k", 5, opener)
+        self.assertEqual(seen, [True, False], "应先带 thinking 请求，400 后去掉重试")
+        self.assertEqual(result["choices"][0]["message"]["content"], "ok")
+
+    def test_non_400_errors_are_not_retried(self):
+        from urllib.error import HTTPError
+        from ai import _chat_request
+        calls = []
+        def opener(_request, **_kw):
+            calls.append(1)
+            raise HTTPError("https://api.deepseek.com/chat/completions", 401, "Unauthorized", None, None)
+        payload = {"model": "m", "stream": False, "max_tokens": 8, "messages": [], "thinking": {"type": "disabled"}}
+        with self.assertRaises(HTTPError):
+            _chat_request({"base": "https://api.deepseek.com"}, payload, "k", 5, opener)
+        self.assertEqual(len(calls), 1, "401 不该重试")
