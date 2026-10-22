@@ -5,7 +5,7 @@ services:
   guanpan-next:
     build: ./server
     ports:
-      - "30001:8786"
+      - "${GUANPAN_PORT:-30001}:${GUANPAN_PORT:-30001}"
     environment:
       GUANPAN_NEXT_DATA: /data
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -26,7 +26,7 @@ services:
       - guanpan_next_data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8786/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${GUANPAN_PORT:-30001}/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3

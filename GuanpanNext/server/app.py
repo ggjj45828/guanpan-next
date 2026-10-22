@@ -487,4 +487,9 @@ if __name__ == "__main__":
     root = Path(os.environ.get("GUANPAN_NEXT_DATA", "/data")); root.mkdir(parents=True, exist_ok=True)
     database = NextDatabase(root / "guanpan-next.sqlite3")
     start_workers(database)
-    ThreadingHTTPServer(("0.0.0.0", 8786), make_handler(database)).serve_forever()
+    # 容器内监听端口 = 宿主机端口（默认 30001），不再做 30001→8786 的改写：
+    # 少一层映射就少一处"改了外面没改里面"的坑。要换端口用 GUANPAN_PORT，
+    # compose 的映射也跟着同一个变量走。
+    try: port = int(os.environ.get("GUANPAN_PORT", "30001"))
+    except ValueError: port = 30001
+    ThreadingHTTPServer(("0.0.0.0", port), make_handler(database)).serve_forever()

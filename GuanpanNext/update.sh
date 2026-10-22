@@ -44,7 +44,7 @@ docker compose -p "$PROJECT" up -d --force-recreate
 sleep 15
 
 # 5) 自检：codeVersion 必须变成包里的版本
-PORT=$(grep -oE '^\s*-\s*"[0-9]+:8786"' compose.yml 2>/dev/null | grep -oE '[0-9]+:' | tr -d ':' | head -1 || true)
+PORT=$(grep -oE '"[0-9]+:[0-9]+"' compose.yml 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || true)
 [ -n "$PORT" ] || PORT=30001
 HEALTH=$(curl -s --max-time 5 "http://127.0.0.1:$PORT/health" 2>/dev/null || true)
 echo "--- /health ---"
