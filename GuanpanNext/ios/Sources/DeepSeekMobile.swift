@@ -87,7 +87,7 @@ enum DeepSeekMobile {
             "model": model,
             "stream": false,
             "thinking": ["type": "disabled"],
-            "max_tokens": 900,
+            "max_tokens": 4096,
             "messages": [
                 ["role": "system", "content": "你是谨慎的 ETF 投资研究助手。只依据用户提供的数据，明确区分事实、推断、风险与未知；数据不足时说明缺口，不编造盘口、IOPV、费率或交易规则，不承诺收益，不建议自动下单。用中文简洁回答，并说明结论依据和失效条件。"],
                 ["role": "user", "content": prompt]

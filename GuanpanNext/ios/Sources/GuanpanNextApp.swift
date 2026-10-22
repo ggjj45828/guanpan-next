@@ -811,7 +811,16 @@ private struct DecisionScreen: View {
 private struct AIAnswerView: View {
     @Environment(\.gp) private var p
     let text: String
-    private static let headers = ["结论", "证据", "风险", "等待条件", "失效条件", "后续跟踪"]
+    /// 模型可能写成同义小节（事实依据 / 推断 / 观察 / 跟踪……），这里统一折叠到六个规范标题。
+    /// 服务端 prompt 与手机端解析必须对得上——对不上就会退化成一大段没有结构的文字。
+    private static let headerMap: [(match: String, title: String)] = [
+        ("结论", "结论"),
+        ("证据", "证据"), ("事实依据", "证据"), ("推断", "推断"),
+        ("风险", "风险"),
+        ("等待条件", "等待条件"), ("等待", "等待条件"), ("观察", "等待条件"),
+        ("失效条件", "失效条件"),
+        ("后续跟踪", "后续跟踪"), ("跟踪", "后续跟踪")
+    ]
 
     private var confidence: String? {
         guard let r = text.range(of: "置信度") else { return nil }
@@ -834,11 +843,12 @@ private struct AIAnswerView: View {
         }
         for raw in text.components(separatedBy: "\n") {
             let probe = Self.stripped(raw.trimmingCharacters(in: .whitespaces))
-            if let header = Self.headers.first(where: { probe.hasPrefix($0) }) {
+            if let hit = Self.headerMap.first(where: { probe.hasPrefix($0.match) }) {
                 flush()
-                currentTitle = header
-                var rest = String(probe.dropFirst(header.count)).trimmingCharacters(in: .whitespaces)
+                currentTitle = hit.title
+                var rest = String(probe.dropFirst(hit.match.count)).trimmingCharacters(in: .whitespaces)
                 if rest.hasPrefix(":") || rest.hasPrefix("：") { rest = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces) }
+                while rest.hasPrefix("*") { rest = String(rest.dropFirst()).trimmingCharacters(in: .whitespaces) }
                 if !rest.isEmpty { buffer.append(rest) }
             } else if currentTitle != nil {
                 buffer.append(raw)
@@ -846,6 +856,16 @@ private struct AIAnswerView: View {
         }
         flush()
         return out
+    }
+    private static func lines(_ body: String) -> [String] {
+        body.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+    private static func isBullet(_ line: String) -> Bool {
+        guard let first = line.first else { return false }
+        return "·•-*".contains(first)
+    }
+    private static func bulletText(_ line: String) -> String {
+        String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
     }
     private static func stripped(_ s: String) -> String {
         var r = s
@@ -874,7 +894,22 @@ private struct AIAnswerView: View {
                             Image(systemName: caution ? "exclamationmark.triangle.fill" : "circle.fill").font(.system(size: 7)).foregroundStyle(caution ? p.terracotta : p.forest)
                             Text(sec.title).font(.caption.weight(.semibold)).foregroundStyle(caution ? p.terracotta : p.forest)
                         }
-                        Text(sec.body).font(.subheadline).foregroundStyle(p.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        VStack(alignment: .leading, spacing: 3) {
+                            let lines = Self.lines(sec.body)
+                            ForEach(lines.indices, id: \.self) { j in
+                                let line = lines[j]
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    if Self.isBullet(line) {
+                                        Text("·").foregroundStyle(p.muted)
+                                        Text(Self.bulletText(line)).font(.subheadline).foregroundStyle(p.ink)
+                                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                                    } else {
+                                        Text(line).font(.subheadline).foregroundStyle(p.ink)
+                                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

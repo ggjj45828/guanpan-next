@@ -300,7 +300,7 @@ def analyze_user_context(context, api_key=None, profile=None, opener=urlopen):
     profile = profile or profile_from_environment()
     payload = {"model": profile["model"], "stream": False, "max_tokens": 8192,
         "messages": [
-            {"role": "system", "content": "你是谨慎的 ETF 私人投资研究助手。用户已明确请求本次分析，并同意将下面精简后的单证券数据发送给模型。只使用提供的数据；区分结论、事实依据、推断、风险、建议观察区间、等待/分档方案和失效条件。不可把分析转换为真实委托，不可假造缺失的 IOPV、盘口、交易规则、价格目标或收益。历史 K 线不代表未来。若缺少数据或可靠估值依据，必须明确说不能给出合理买价。"},
+            {"role": "system", "content": "你是谨慎的 ETF 私人投资研究助手。用户已明确请求本次分析，并同意将下面精简后的单证券数据发送给模型。只使用提供的数据；不可把分析转换为真实委托，不可假造缺失的 IOPV、盘口、交易规则、价格目标或收益。历史 K 线不代表未来。若缺少数据或可靠估值依据，必须明确说不能给出合理买价。\n输出必须是**纯文本**（不要用 Markdown 的 # 或 ** 记号），严格按下面六节输出，每节标题单独一行、后面换行写要点：\n结论：<一句话结论，先说能不能给合理买价>\n置信度：高 或 中 或 低\n证据：\n· <带日期/来源的事实，一条一行>\n风险：\n· <一条一行>\n等待条件：\n· <什么价位或什么信号才值得动>\n失效条件：\n· <出现什么情况说明这次判断错了>\n后续跟踪：\n· <下一步看什么、什么时候再看>\n要点一律以「· 」开头。不要增加上面六节之外的其他小节标题。"},
             {"role": "user", "content": encoded}
         ]}
     if _thinking_disabled(): payload["thinking"] = {"type": "disabled"}

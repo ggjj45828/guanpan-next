@@ -878,6 +878,56 @@ async function loadResearch(){
       ${ai.text?`<div style="margin-top:8px;white-space:pre-wrap;font-size:12px;background:#f4f5f1;padding:10px;border-radius:8px">${escapeHtml(ai.text)}</div>`:'<div class="sm mut" style="margin-top:8px">暂无 AI 分析缓存，点“跑 AI 分析”。</div>'}`;
   }catch(e){ body.className="sm mut"; body.textContent="读取失败："+e.message; }
 }
+/* ---------- AI 结果排版 ----------
+   服务端 prompt 已固定输出「结论 / 置信度 / 证据 / 风险 / 等待条件 / 失效条件 / 后续跟踪」六节，
+   这里按小节渲染成卡片，和手机端 AIAnswerView 的解析保持一致；
+   万一模型没按格式来（解析不到小节），退回整段原文，不至于变得不可读。 */
+const AI_SECTIONS=[["结论","结论"],["证据","证据"],["事实依据","证据"],["推断","推断"],
+  ["风险","风险"],["等待条件","等待条件"],["等待","等待条件"],["观察","等待条件"],
+  ["失效条件","失效条件"],["后续跟踪","后续跟踪"],["跟踪","后续跟踪"]];
+function aiConfidence(text){
+  const at=String(text||"").indexOf("置信度"); if(at<0) return null;
+  const tail=String(text).slice(at, at+12);
+  if(tail.includes("高")) return "高"; if(tail.includes("中")) return "中"; if(tail.includes("低")) return "低"; return null;
+}
+function aiSections(text){
+  const out=[]; let cur=null, buf=[];
+  const flush=()=>{ if(cur){ const b=buf.join("\n").trim(); if(b) out.push({title:cur, body:b}); } cur=null; buf=[]; };
+  String(text||"").split("\n").forEach(raw=>{
+    const probe=raw.trim().replace(/^[\s*#>•\-\d.、]+/,"");
+    const hit=AI_SECTIONS.find(([m])=>probe.startsWith(m));
+    if(hit){ flush(); cur=hit[1]; const rest=probe.slice(hit[0].length).trim().replace(/^[:：]\s*/,""); if(rest) buf.push(rest); }
+    else if(cur) buf.push(raw.trim());
+  });
+  flush(); return out;
+}
+function aiHtml(text){
+  const secs=aiSections(text);
+  if(!secs.length) return `<div style="white-space:pre-wrap;font-size:12px;line-height:1.7;background:#f4f5f1;padding:10px;border-radius:8px">${escapeHtml(text||"")}</div>`;
+  const conf=aiConfidence(text);
+  let h="";
+  if(conf){
+    const color = conf==="高" ? "#315d58" : conf==="中" ? "#b46b58" : "#c24e58";
+    h+=`<div style="margin-top:8px"><span style="display:inline-block;font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;background:${color}22;color:${color}">置信度 ${conf}</span></div>`;
+  }
+  secs.forEach(sec=>{
+    const caution = sec.title==="风险"||sec.title==="失效条件";
+    const accent = caution ? "#c24e58" : "#315d58";
+    const lines = sec.body.split("\n").map(l=>l.trim()).filter(Boolean);
+    h+=`<div style="margin-top:8px;border-left:3px solid ${accent};padding:7px 11px;background:#f7f8f5;border-radius:0 8px 8px 0">`
+      +`<div style="font-size:11px;font-weight:600;color:${accent};letter-spacing:.3px">${escapeHtml(sec.title)}</div>`
+      +`<div style="margin-top:4px;font-size:12px;line-height:1.75;color:#252a3b">`;
+    lines.forEach(l=>{
+      const bullet=/^[·•\-\*]\s?/.test(l);
+      const txt=escapeHtml(l.replace(/^[·•\-\*]\s?/,""));
+      h += bullet
+        ? `<div style="display:flex;gap:6px"><span style="color:#94a3b8">·</span><span style="flex:1">${txt}</span></div>`
+        : `<div>${txt}</div>`;
+    });
+    h+=`</div></div>`;
+  });
+  return h;
+}
 async function runAI(){
   const sel=$("aiCode"); const code=sel?(sel.value||"").trim():"";
   if(!isSix(code)){ toast("先在下拉里选一个标的（持仓或自选）"); return; }
@@ -885,7 +935,9 @@ async function runAI(){
   try{
     const v=await api("/v1/ai/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userConfirmed:true,code})});
     body.className="";
-    body.innerHTML=`<div class="status ok">分析完成（${v.provider||'deepseek'}${v.model?" · "+v.model:""}）</div><div style="margin-top:8px;white-space:pre-wrap;font-size:12px;background:#f4f5f1;padding:10px;border-radius:8px">${escapeHtml(v.text||JSON.stringify(v,null,2))}</div>`;
+    // 服务端返回的是 content（不是 text）——原来取 v.text 会退化成整段 JSON，很难看。
+    const raw=v.content||v.text||"";
+    body.innerHTML=`<div class="status ok">分析完成（${v.provider||'deepseek'}${v.model?" · "+v.model:""}）</div>`+aiHtml(raw);
   }catch(e){
     // 失败必须说清是哪一类，否则只会看到一句"分析失败"，无从下手。
     const st=e.status||"", raw=e.serverError||e.message||"";
