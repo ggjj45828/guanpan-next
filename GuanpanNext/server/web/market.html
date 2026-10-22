@@ -108,6 +108,17 @@ details.exlist .body{padding:6px 10px}
         <button class="act mini" onclick="adjustCash('in')">入金 +</button>
         <button class="act mini ghost" onclick="adjustCash('out')">出金 −</button>
       </div>
+      <!-- 买入 / 卖出：口径与手机端 recordTrade 完全一致（含手续费计入成本、T+1 可卖、卖出算已实现盈亏） -->
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">
+        <span class="sm mut">买入 / 卖出</span>
+        <select id="tradeCode" style="width:150px" onchange="renderTradeHint()"></select>
+        <input id="tradeUnits" type="number" step="100" min="100" placeholder="份数" style="width:100px">
+        <input id="tradePrice" type="number" step="0.001" placeholder="价格" style="width:100px">
+        <input id="tradeFee" type="number" step="0.01" placeholder="手续费" style="width:90px" value="0.10">
+        <button class="act mini" onclick="submitTrade('buy')">买入</button>
+        <button class="act mini ghost" onclick="submitTrade('sell')">卖出</button>
+      </div>
+      <div id="tradeHint" class="sm mut" style="margin-top:4px"></div>
       <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
         <button class="act mini" onclick="addPosition()">加持仓</button>
         <button class="act mini" onclick="saveBook()">保存到 NAS</button>
@@ -245,7 +256,7 @@ async function loadIndices(){
 
 // ---------- 自选 ----------
 function getWatch(){ if(!WATCH.length) WATCH=JSON.parse(localStorage.getItem("gp_watch")||"[]"); return WATCH; }
-function setWatch(){ localStorage.setItem("gp_watch", JSON.stringify(WATCH)); renderWatchChips(); renderChartCodeOptions(); renderAICode(); }
+function setWatch(){ localStorage.setItem("gp_watch", JSON.stringify(WATCH)); renderWatchChips(); renderChartCodeOptions(); renderAICode(); renderTradeCode(); }
 function renderWatchChips(){
   const c=$("watchChips"); c.innerHTML="";
   getWatch().forEach(code=>{
@@ -333,7 +344,7 @@ async function loadBook(){
     REVISION=v.revision||0;
     BOOK = v.bookJSON? JSON.parse(v.bookJSON) : null;
     BOOK = normalizeBook();
-    renderHold(); renderEditor(); renderAICode(); renderChartCodeOptions();
+    renderHold(); renderEditor(); renderAICode(); renderChartCodeOptions(); renderTradeCode();
     loadWorth();
   }catch(e){ toast("账本读取失败："+e.message); }
 }
@@ -420,6 +431,101 @@ async function adjustCash(mode){
   $("cashInput").value="";
   await saveBook();
   renderHold();
+}
+
+/* ---------- 买入 / 卖出 ----------
+   与手机端 NextAppModel.recordTrade 同一套口径：
+   · 手续费计入买入成本（bookCost += 成交金额 + 手续费）
+   · T+1：今天买入的份额当天不可卖（券商显示的"持仓 / 可用"就是这个差）
+   · 卖出按加权平均成本结转，算已实现盈亏 realized = 成交额 − 手续费 − 成本
+   · 已核实 ETF 的手续费严格 ¥0.10/笔
+   · fill 字段必须恰好是 {id,date,code,side,units,price,fee,realized}，多一个键服务端就拒 */
+const COCOA=978307200;
+function r2(x){ return Math.round((Number(x)||0)*100)/100; }
+function fillDate(d){ return Math.floor((d?d.getTime():Date.now())/1000-COCOA); }
+function tradeCandidates(){
+  const list=[]; const seen=new Set();
+  ((BOOK&&BOOK.positions)||[]).forEach(p=>{ if(p&&p.code&&!seen.has(p.code)){ seen.add(p.code); list.push({code:String(p.code),name:p.name||""}); } });
+  getWatch().filter(isSix).forEach(c=>{ if(!seen.has(c)){ seen.add(c); list.push({code:c,name:(QUOTES[c]&&QUOTES[c].name)||""}); } });
+  return list;
+}
+function renderTradeCode(){
+  const sel=$("tradeCode"); if(!sel) return;
+  const keep=sel.value; const list=tradeCandidates();
+  if(!list.length){ sel.innerHTML='<option value="">（先加自选或持仓）</option>'; $("tradeHint").textContent=""; return; }
+  sel.innerHTML=list.map(p=>`<option value="${p.code}">${p.code} ${p.name||""}</option>`).join("");
+  if(keep&&list.some(p=>p.code===keep)) sel.value=keep;
+  renderTradeHint();
+}
+function tradePosition(code){ return ((BOOK&&BOOK.positions)||[]).find(p=>p.code===code)||null; }
+/* T+1：今天买入的份额当天不能卖。"今天"按**北京时间**算，与手机端
+   NextCore.lockedUnits 的 Asia/Shanghai 日历一致，否则跨时区会差一天。 */
+function shanghaiDay(ms){
+  try{ return new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(ms)); }
+  catch(e){ return new Date(ms).toDateString(); }
+}
+function lockedUnits(code){
+  const fills=(BOOK&&BOOK.fills)||[]; const today=shanghaiDay(Date.now());
+  return fills.filter(f=>f&&f.code===code&&f.side==="buy"&&shanghaiDay((Number(f.date)+COCOA)*1000)===today)
+              .reduce((s,f)=>s+(Number(f.units)||0),0);
+}
+function renderTradeHint(){
+  const el=$("tradeHint"); if(!el) return;
+  const sel=$("tradeCode"); const code=sel?(sel.value||"").trim():"";
+  if(!code){ el.textContent=""; return; }
+  const p=tradePosition(code);
+  const q=QUOTES[code]; const isETF=q&&String(q.providerInstrumentType||"").toUpperCase()==="ETF";
+  if(isETF&&$("tradeFee")) $("tradeFee").value="0.10";   // 与手机端一致：已核实 ETF 自动 0.10
+  if(!p){ el.textContent="当前没有这只的持仓，可先买入建仓。"+(q&&q.price?"当前价 ¥"+fmt(q.price,3):""); return; }
+  const locked=lockedUnits(code); const avail=Math.max(0,(Number(p.units)||0)-locked);
+  el.textContent=`持有 ${p.units} 份 · 今日买入锁定 ${locked} 份 · 可卖 ${avail} 份（T+1）· 成本 ¥${fmt(p.bookCost,2)}`
+    + (q&&q.price?` · 现价 ¥${fmt(q.price,3)}`:"");
+}
+async function submitTrade(side){
+  if(!BOOK){ toast("账本还没读取"); return; }
+  const code=($("tradeCode").value||"").trim();
+  const units=Math.floor(Number($("tradeUnits").value));
+  const price=Number($("tradePrice").value);
+  const feeRaw=($("tradeFee").value||"").trim(); const fee=feeRaw===""?0:Number(feeRaw);
+  if(!isSix(code)){ toast("请选择或输入 6 位代码"); return; }
+  if(!isFinite(units)||units<=0){ toast("份数要是大于 0 的整数"); return; }
+  if(!isFinite(price)||price<=0){ toast("价格要大于 0"); return; }
+  if(!isFinite(fee)||fee<0){ toast("手续费无效"); return; }
+  const q=QUOTES[code]; const isETF=q&&String(q.providerInstrumentType||"").toUpperCase()==="ETF";
+  if(isETF&&Math.abs(fee-0.10)>1e-9){ toast("已核实 ETF 的手续费按每笔 ¥0.10 记录"); return; }
+  const gross=r2(price*units); const fee2=r2(fee);
+  const name=(q&&q.name)||(tradePosition(code)&&tradePosition(code).name)||code;
+  const idx=(BOOK.positions||[]).findIndex(p=>p.code===code);
+  let realized=0, text="";
+  if(side==="buy"){
+    const need=r2(gross+fee2);
+    if(r2(bookCash())<need){ toast("现金不足：本笔需 ¥"+fmt(need,2)+"（含手续费 ¥"+fmt(fee2,2)+"），可用 ¥"+fmt(bookCash(),2)+"，还差 ¥"+fmt(r2(need-bookCash()),2)); return; }
+    if(idx>=0){
+      BOOK.positions[idx].units=Number(BOOK.positions[idx].units)+units;
+      BOOK.positions[idx].bookCost=r2(Number(BOOK.positions[idx].bookCost)+need);
+    }else{
+      BOOK.positions.push({code:code,name:name,units:units,bookCost:need,acquiredAt:fillDate(new Date())});
+    }
+    BOOK.cash=r2(Number(BOOK.cash)-need);
+    text=`买入 ${name} ${units} 份 @ ¥${fmt(price,3)}，金额 ¥${fmt(gross,2)} + 手续费 ¥${fmt(fee2,2)}`;
+  }else{
+    if(idx<0){ toast("没有这只的持仓，无法卖出"); return; }
+    const pos=BOOK.positions[idx]; const held=Number(pos.units)||0;
+    if(units>held){ toast("卖出份额超过持有份额（持有 "+held+" 份）"); return; }
+    const avail=Math.max(0,held-lockedUnits(code));
+    if(units>avail){ toast("可卖份额不足：持有 "+held+" 份，其中今日买入锁定 "+(held-avail)+" 份，当前可卖 "+avail+" 份（T+1）"); return; }
+    const cost=r2(Number(pos.bookCost)*units/held);
+    realized=r2(gross-fee2-cost);
+    pos.units=held-units; pos.bookCost=r2(Number(pos.bookCost)-cost);
+    if(pos.units===0) BOOK.positions.splice(idx,1);
+    BOOK.cash=r2(Number(BOOK.cash)+r2(gross-fee2));
+    text=`卖出 ${name} ${units} 份 @ ¥${fmt(price,3)}，金额 ¥${fmt(gross,2)} − 手续费 ¥${fmt(fee2,2)}，已实现 ${realized>=0?"+":""}¥${fmt(realized,2)}`;
+  }
+  if(!confirm("确认"+text+"？\n会写入 NAS 真实账本（修订号保护）。")) return;
+  BOOK.fills.push({id:uuid(),date:fillDate(new Date()),code:code,side:side,units:units,price:price,fee:fee2,realized:realized});
+  await saveBook();
+  $("tradeUnits").value=""; $("tradePrice").value="";
+  renderHold(); renderTradeCode(); renderChartCodeOptions(); renderAICode();
 }
 function renderHold(){
   const summary=$("holdSummary");
@@ -813,7 +919,7 @@ async function saveBookFromEditor(){
 function downloadBook(){ if(!BOOK) return; const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([JSON.stringify(BOOK,null,2)],{type:"application/json"})); a.download="guanpan-next-book-r"+REVISION+".json"; a.click(); URL.revokeObjectURL(a.href); }
 
 // ---------- 启动 ----------
-getWatch(); renderWatchChips(); getAlerts();
+getWatch(); renderWatchChips(); getAlerts(); renderTradeCode();
 loadIndices(); loadQuotes(getWatch()); loadWorth();
 setInterval(()=>{ loadIndices(); if($("watch").classList.contains("on")) loadQuotes(getWatch()); renderAlerts(); }, 30000);
 </script>
