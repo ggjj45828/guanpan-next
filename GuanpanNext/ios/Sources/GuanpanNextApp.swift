@@ -544,6 +544,9 @@ private struct DecisionScreen: View {
     @State private var patientLimitPrice = ""
     @State private var patientLimitUnits = "100"
     @State private var patientLimitExpiry = Calendar.current.date(byAdding: .day, value: 30, to: Date()) ?? Date().addingTimeInterval(30 * 86400)
+    @State private var inspectResults: [InspectHolding] = []
+    @State private var inspectSummary: String?
+    @State private var inspecting = false
     private var hasRecordedMobileAI: Bool {
         guard let code, let result else { return false }
         return result.evidence.contains { $0.id == "deepseek-mobile-\(code)" }
@@ -557,6 +560,76 @@ private struct DecisionScreen: View {
               let researchDate = formatter.date(from: aiDate), latestDate > researchDate else { return nil }
         return "研究截至 \(aiDate)；本机已有更新日 K 至 \(formatter.string(from: latestBar.timestamp))"
     }
+    /// 账户体检的逐持仓结论（本机规则扫描，非 AI 预测）。
+    private struct InspectHolding: Identifiable, Equatable {
+        var id: String { code }
+        let code: String
+        let name: String
+        let weight: Double
+        let pnlPercent: Double
+        let yieldPercent: Double?
+        let suggestion: String
+    }
+    /// 账户体检：按报告方法论，先看账户（集中度、现金覆盖），再看单只资产，最后看执行。
+    private func runInspection() {
+        inspecting = true
+        defer { inspecting = false }
+        let targetYield = Decimal(string: UserDefaults.standard.string(forKey: "guanpan.targetYield") ?? "4") ?? 4
+        let positions = model.book.positions
+        let totalMV = positions.reduce(Decimal.zero) { acc, pos in
+            guard let price = model.quotes[pos.code]?.quote?.price else { return acc }
+            return acc + price * Decimal(pos.units)
+        }
+        var results: [InspectHolding] = []
+        for pos in positions {
+            let price = model.quotes[pos.code]?.quote?.price
+            let mv = price.map { $0 * Decimal(pos.units) } ?? 0
+            let weight = totalMV > 0 ? NSDecimalNumber(decimal: mv).doubleValue / NSDecimalNumber(decimal: totalMV).doubleValue : 0
+            let cost = pos.bookCost
+            let pnlPct = cost != 0 ? NSDecimalNumber(decimal: (mv - cost) / cost).doubleValue * 100 : 0
+            let events = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[pos.code] ?? []))
+            let per = NextDividendAnalytics.recentVerifiedPerShare(code: pos.code, events: events, today: dividendTodayString())
+            let yld = price.map { $0 > 0 ? NSDecimalNumber(decimal: per / $0 * 100).doubleValue : 0 } ?? 0
+            let suggestion: String
+            if weight > 0.4 { suggestion = "仓位偏重 · 暂停加仓" }
+            else if yld >= NSDecimalNumber(decimal: targetYield).doubleValue && yld > 0 { suggestion = "股息达标 · 可关注" }
+            else if pnlPct < -10 { suggestion = "深跌 · 观察不补仓" }
+            else { suggestion = "持有 · 观察" }
+            results.append(InspectHolding(code: pos.code, name: pos.name, weight: weight, pnlPercent: pnlPct, yieldPercent: yld > 0 ? yld : nil, suggestion: suggestion))
+        }
+        results.sort { $0.weight > $1.weight }
+        inspectResults = results
+        let over = results.filter { $0.weight > 0.4 }.count
+        inspectSummary = over > 0
+            ? "有 \(over) 只持仓占比超过 40%，注意组合集中度（账户级风险优先于单只机会）。本机扫描仅供参考，不构成交易指令。"
+            : "持仓集中度在正常范围。本机扫描按「先看账户、再看资产、最后看执行」的思路给出，仅供参考，不构成交易指令。"
+    }
+    @ViewBuilder private func inspectStat(title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(p.muted)
+            Text(value).font(.system(size: 13, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.7)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    @ViewBuilder private func inspectRow(_ r: InspectHolding) -> some View {
+        let yldText = r.yieldPercent.map { "股息率 \(NextMoney.text(Decimal($0), digits: 2))%" } ?? "股息率 —"
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(r.name) · \(r.code)").font(.subheadline.weight(.medium)).foregroundStyle(p.ink)
+                Text("占比 \(NextMoney.text(Decimal(r.weight * 100), digits: 0))% · 浮动 \(r.pnlPercent >= 0 ? "+" : "")\(NextMoney.text(Decimal(r.pnlPercent), digits: 1))% · \(yldText)")
+                    .font(.caption2).foregroundStyle(p.muted)
+            }
+            Spacer(minLength: 4)
+            Text(r.suggestion).font(.system(size: 10, weight: .semibold)).foregroundStyle(suggestionColor(r.suggestion))
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(suggestionColor(r.suggestion).opacity(0.12), in: Capsule())
+        }.padding(.vertical, 6).overlay(alignment: .bottom) { Rectangle().fill(p.line.opacity(0.6)).frame(height: 0.5) }
+    }
+    private func suggestionColor(_ s: String) -> Color {
+        if s.contains("偏重") { return p.risk }
+        if s.contains("达标") { return p.jade }
+        if s.contains("深跌") { return p.chartGold }
+        return p.muted
+    }
     var body: some View {
         GPPageBackground {
             VStack(alignment: .leading, spacing: 0) {
@@ -568,6 +641,32 @@ private struct DecisionScreen: View {
                         .font(.caption2).foregroundStyle(p.muted).lineLimit(2).multilineTextAlignment(.trailing)
                 }.padding(.top, 7)
                 Text(code.map { "围绕 \(knownName($0))，把已知信息整理成下一步" } ?? "先说你想完成什么").font(.system(.title2, design: .serif).weight(.semibold)).foregroundStyle(p.ink).padding(.top, 10)
+                // 账户体检：按报告方法论，先看账户（集中度、现金覆盖），再看单只资产，最后看执行。
+                EditorialSection(title: "账户体检 · 一键扫描", trailing: inspecting ? "扫描中" : "本机规则", accent: p.forest) {
+                    GPActionButton(title: inspecting ? "扫描中…" : "一键体检全部持仓", systemImage: "stethoscope", secondary: true) { runInspection() }
+                    if let inspectSummary { Text(inspectSummary).font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true) }
+                    if !inspectResults.isEmpty {
+                        let totalMV = inspectResults.reduce(Decimal.zero) { acc, r in
+                            guard let price = model.quotes[r.code]?.quote?.price else { return acc }
+                            let units = model.book.positions.first(where: { $0.code == r.code })?.units ?? 0
+                            return acc + price * Decimal(units)
+                        }
+                        let annual = model.book.positions.reduce(Decimal.zero) { acc, pos in
+                            let events = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[pos.code] ?? []))
+                            let per = NextDividendAnalytics.recentVerifiedPerShare(code: pos.code, events: events, today: dividendTodayString())
+                            return acc + per * Decimal(pos.units)
+                        }
+                        let maxW = inspectResults.map(\.weight).max() ?? 0
+                        HStack(spacing: 10) {
+                            inspectStat(title: "持仓市值", value: "¥\(NextMoney.text(totalMV))", color: p.chartBlue)
+                            inspectStat(title: "现金", value: "¥\(NextMoney.text(model.book.cash))", color: p.jade)
+                            inspectStat(title: "最高占比", value: "\(NextMoney.text(Decimal(maxW * 100), digits: 0))%", color: maxW > 0.4 ? p.risk : p.terracotta)
+                            inspectStat(title: "预计年股息", value: "¥\(NextMoney.text(annual))", color: p.chartGold)
+                        }
+                        Text("逐持仓结论（按仓位占比排序）").font(.caption.weight(.medium)).foregroundStyle(p.ink).padding(.top, 6)
+                        ForEach(inspectResults) { r in inspectRow(r) }
+                    }
+                }
                 Text("分析会结合本机账本、有效行情、预算和风险限制。没有来源的数据会明确标为缺口。").font(.subheadline).foregroundStyle(p.muted).padding(.top, 5)
                 EditorialSection(title: "你的目标与资金") {
                     HStack(spacing: 10) { compactField("期限（年）", text: $years); compactField("每月新增预算", text: $budget); compactField("集中度线 %", text: $limit) }
@@ -1081,6 +1180,7 @@ private struct GridLabScreen: View {
                 Label("可卖 \(row.sellsLeft) 档", systemImage: "arrow.up.circle.fill").font(.caption2).foregroundStyle(p.gpUp)
                 Label("可买 \(row.buysLeft) 档", systemImage: "arrow.down.circle.fill").font(.caption2).foregroundStyle(p.gpDown)
             }
+            gridAxisView(row).padding(.vertical, 4)
             VStack(spacing: 3) {
                 ForEach(row.rungs) { rung in
                     HStack {
@@ -1097,6 +1197,36 @@ private struct GridLabScreen: View {
         .padding(12)
         .background(p.paper, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(p.line, lineWidth: 0.8))
+    }
+    /// 价格档位条：把买档（绿，现价下方）和卖档（红，现价上方）画成一根价格轴上的圆点，
+    /// 中间用「现价」竖线标出当前位置——一眼看出价格离各网格档位还有多远。
+    private func gridAxisMetrics(_ row: NextNASGridLadderRow) -> (minP: Double, maxP: Double, span: Double, curFrac: Double)? {
+        let decRow: (String) -> Double? = { s in guard let d = Decimal(string: s, locale: Locale(identifier: "en_US_POSIX")) else { return nil }; return NSDecimalNumber(decimal: d).doubleValue }
+        let prices = ([row.price] + row.rungs.map { $0.price }).compactMap(decRow)
+        guard let minP = prices.min(), let maxP = prices.max(), maxP > minP else { return nil }
+        let span = maxP - minP
+        let cur = decRow(row.price) ?? minP
+        return (minP, maxP, span, (cur - minP) / span)
+    }
+    @ViewBuilder private func gridAxisView(_ row: NextNASGridLadderRow) -> some View {
+        guard let m = gridAxisMetrics(row) else { return EmptyView() }
+        GeometryReader { geo in
+            let w = geo.size.width
+            ZStack(alignment: .leading) {
+                Capsule().fill(p.line).frame(height: 4)
+                ForEach(Array(row.rungs.enumerated()), id: \.offset) { _, rung in
+                    if let rp = Decimal(string: rung.price, locale: Locale(identifier: "en_US_POSIX")) {
+                        let f = (NSDecimalNumber(decimal: rp).doubleValue - m.minP) / m.span
+                        Circle().fill(rung.isBuy ? p.gpDown : p.gpUp).frame(width: 9, height: 9)
+                            .position(x: CGFloat(f) * w, y: 14)
+                    }
+                }
+                Rectangle().fill(p.forestDeep).frame(width: 2.5, height: 24)
+                    .position(x: CGFloat(m.curFrac) * w, y: 14)
+                Text("现价").font(.system(size: 8, weight: .medium)).foregroundStyle(p.forestDeep)
+                    .position(x: CGFloat(m.curFrac) * w, y: 33)
+            }.frame(height: 40)
+        }.frame(height: 40)
     }
 }
 
@@ -1150,6 +1280,33 @@ private struct AssetsScreen: View {
                 let units = model.book.positions.first(where: { $0.code == event.code })?.units ?? 0
                 return total + event.amountPerShare * Decimal(units)
             }
+        }
+    /// 预计年股息：按各持仓近 12 个月已核实每份派息 × 账面份额 求和。
+    private var annualDividend: Decimal {
+        model.book.positions.reduce(Decimal.zero) { total, pos in
+            let events = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[pos.code] ?? []))
+            let per = NextDividendAnalytics.recentVerifiedPerShare(code: pos.code, events: events, today: dividendTodayString())
+            return total + per * Decimal(pos.units)
+        }
+    }
+    @ViewBuilder private var overviewStatGrid: some View {
+        let holdingsValue = (valuation.total ?? 0) - model.book.cash
+        HStack(spacing: 10) {
+            overviewStat(title: "持仓市值", value: valuation.total.map { "¥\(NextMoney.text(holdingsValue))" } ?? "—", color: p.chartBlue)
+            overviewStat(title: "现金", value: "¥\(NextMoney.text(model.book.cash))", color: p.jade)
+            overviewStat(title: "当日盈亏", value: valuation.dailyChange.map { "\($0 >= 0 ? "+" : "")\(NextMoney.text($0))" } ?? "—", color: valuation.dailyChange.map { p.changeTone(NextNum.double($0)) } ?? p.muted)
+            overviewStat(title: "预计年股息", value: "¥\(NextMoney.text(annualDividend))", color: p.chartGold)
+        }
+    }
+    @ViewBuilder private func overviewStat(title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(p.muted)
+            Text(value).font(.system(size: 13, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(color.opacity(0.28), lineWidth: 0.8))
     }
     var body: some View {
         GPPageBackground {
@@ -1164,6 +1321,7 @@ private struct AssetsScreen: View {
                         GPValue(label: "当日盈亏", value: valuation.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: valuation.dailyChangePercent.map { "昨收 \(NextMoney.text($0))%" } ?? "需新鲜报价", emphasis: valuation.dailyChange.map { p.changeTone(NextNum.double($0)) })
                     }.padding(.top, 3)
                 }.padding(.top, 15)
+                overviewStatGrid.padding(.top, 4)
                 HoldingsBreakdownPanel()
                 EditorialSection(title: "持仓明细", trailing: "\(model.book.positions.count) 项", accent: p.jade) {
                     HStack { Button { addPosition = true } label: { Label("录入已确认持仓", systemImage: "plus") }.font(.caption.weight(.semibold)); Spacer(); NavigationLink(value: GPRoute.fills) { Label("资产流水", systemImage: "list.bullet.rectangle") }.font(.caption) }.tint(p.forest)
@@ -1227,6 +1385,10 @@ private struct AssetsScreen: View {
                 Button("取消", role: .cancel) { assetsConfirm = nil }
             }
         } message: { Text(assetsConfirm?.message ?? "") }
+        .task {
+            guard !model.book.positions.isEmpty else { return }
+            for pos in model.book.positions { await model.refreshDividendHistory(pos.code) }
+        }
     }
 }
 
@@ -1527,6 +1689,9 @@ private struct SettingsScreen: View {
     @State private var mobileAIStatus = DeepSeekMobile.loadKey() == nil ? "未保存 API key" : "本机钥匙串已保存 API key"
     @State private var mobileAIKeyAvailable = DeepSeekMobile.loadKey() != nil
     // MARK: 外观（字号 / 字体 / 自定义颜色）
+    @State private var targetYieldInput: String = UserDefaults.standard.string(forKey: "guanpan.targetYield") ?? "4"
+    @State private var inspectEnabled = UserDefaults.standard.bool(forKey: "guanpan.inspect.enabled")
+    @State private var inspectHourText = "9"
     private var appearance: GPAppearance { model.preferences.appearance }
     private func updateAppearance(_ mutate: (inout GPAppearance) -> Void) {
         var next = model.preferences.appearance
@@ -1658,6 +1823,45 @@ private struct SettingsScreen: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     GPActionButton(title: "检查 NAS 连接与 AI 配置状态", secondary: true, systemImage: "arrow.clockwise") { Task { await model.probeNAS() } }
+                }
+                EditorialSection(title: "股息策略", accent: p.chartGold) {
+                    HStack(spacing: 8) {
+                        Text("目标股息率").font(.subheadline.weight(.medium)).foregroundStyle(p.ink)
+                        Spacer()
+                        TextField("4", text: $targetYieldInput).keyboardType(.decimalPad).textFieldStyle(.roundedBorder).frame(width: 72).multilineTextAlignment(.trailing)
+                        Text("%").font(.subheadline).foregroundStyle(p.muted)
+                        Button("保存") {
+                            let v = Decimal(string: targetYieldInput.trimmingCharacters(in: .whitespaces)) ?? 0
+                            UserDefaults.standard.set(NextMoney.text(v, digits: 1), forKey: "guanpan.targetYield")
+                            model.notice = "目标股息率已设为 \(NextMoney.text(v, digits: 1))%；股息买入参考与持仓标签会按此计算目标价。"
+                        }.font(.caption.weight(.semibold)).tint(p.forest)
+                    }
+                    Text("用于「收息 → 股息买入参考」的默认目标股息率，也作为持仓股息率标签的对照基准；只影响参考价计算，不构成买入建议。").font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                }
+                EditorialSection(title: "AI 巡检提醒", accent: p.forest) {
+                    Toggle("每日本机提醒", isOn: Binding(get: { inspectEnabled }, set: { value in
+                        inspectEnabled = value
+                        if value {
+                            let h = min(max(Int(inspectHourText) ?? 9, 0), 23)
+                            model.notice = NextLocalNotificationService.enableDailyInspection(hour: h, minute: 0)
+                        } else {
+                            NextLocalNotificationService.disableDailyInspection()
+                            model.notice = "已关闭每日巡检提醒"
+                        }
+                        UserDefaults.standard.set(value, forKey: "guanpan.inspect.enabled")
+                    })).font(.caption)
+                    HStack(spacing: 8) {
+                        Text("提醒时间").font(.subheadline.weight(.medium)).foregroundStyle(p.ink)
+                        Spacer()
+                        TextField("9", text: $inspectHourText).keyboardType(.numberPad).textFieldStyle(.roundedBorder).frame(width: 64).multilineTextAlignment(.trailing)
+                        Text("点（0–23）").font(.caption).foregroundStyle(p.muted)
+                        Button("保存时间") {
+                            let h = min(max(Int(inspectHourText) ?? 9, 0), 23)
+                            inspectHourText = "\(h)"
+                            if inspectEnabled { model.notice = NextLocalNotificationService.enableDailyInspection(hour: h, minute: 0) }
+                        }.font(.caption.weight(.semibold)).tint(p.forest)
+                    }
+                    Text("这是设备本机定时提醒（非远端推送，不需要苹果证书）；到点打开 App，到「AI 引擎」点「一键巡检持仓」即可扫描全部持仓的盈亏、股息率与机会。").font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 EditorialSection(title: "新 NAS 连接") {
                     TextField("NAS 地址，例如 http://192.168.1.10:30001", text: $nasURL).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL).textFieldStyle(.roundedBorder).accessibilityIdentifier("settings.nas.address")
@@ -1954,7 +2158,7 @@ private struct DividendAdviceCard: View {
     @Environment(\.gp) private var p
     @State private var entry = ""
     @State private var code: String?
-    @State private var targetYieldText = "4"
+    @State private var targetYieldText: String = UserDefaults.standard.string(forKey: "guanpan.targetYield") ?? "4"
     @State private var loading = false
     @State private var note: String?
 
@@ -2057,7 +2261,7 @@ private struct DividendAdviceCard: View {
     }
 }
 
-private func dividendTodayString() -> String {
+func dividendTodayString() -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")

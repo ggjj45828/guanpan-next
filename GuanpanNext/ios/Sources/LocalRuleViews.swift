@@ -448,7 +448,10 @@ struct PositionRow: View {
     var body: some View {
         HStack(spacing: 4) {
             NavigationLink(value: GPRoute.instrument(position.code)) {
-                InstrumentRow(code: position.code, name: position.name, units: position.units, quote: quote)
+                VStack(alignment: .leading, spacing: 5) {
+                    InstrumentRow(code: position.code, name: position.name, units: position.units, quote: quote)
+                    tagRow
+                }
             }.buttonStyle(.plain)
             Menu {
                 Button("记录买入", systemImage: "arrow.down.circle") { sheet = .trade(GPTradeRequest(code: position.code, side: "buy")) }
@@ -472,6 +475,29 @@ struct PositionRow: View {
             }
             Button("取消", role: .cancel) { }
         } message: { Text("会写入账本审计记录，可在「资产流水 → 撤销最近账本变更」回退。") }
+    }
+    /// 持仓行下方小标签：实时浮动盈亏 + 股息率（有数据才显示）。
+    @ViewBuilder private var tagRow: some View {
+        let price = quote?.quote?.price
+        let marketValue = price.map { $0 * Decimal(position.units) }
+        let pnl = (marketValue ?? 0) - position.bookCost
+        HStack(spacing: 8) {
+            if let price, let marketValue, marketValue != 0 {
+                Text("浮动 \(pnl >= 0 ? "+" : "")\(NextMoney.text(pnl))").font(.system(size: 10, weight: .medium)).monospacedDigit().foregroundStyle(p.changeTone(NextNum.double(pnl)))
+            }
+            if let yieldPct = dividendYieldPercent, yieldPct > 0 {
+                Text("股息率 \(NextMoney.text(yieldPct, digits: 2))%").font(.system(size: 10, weight: .medium)).monospacedDigit().foregroundStyle(p.chartGold)
+            }
+            Spacer(minLength: 0)
+        }.padding(.leading, 2)
+    }
+    /// 该持仓近 12 个月已核实每份派息 ÷ 现价 得到的股息率。
+    private var dividendYieldPercent: Decimal? {
+        guard let price = quote?.quote?.price, price > 0 else { return nil }
+        let events = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[position.code] ?? []))
+        let per = NextDividendAnalytics.recentVerifiedPerShare(code: position.code, events: events, today: dividendTodayString())
+        guard per > 0 else { return nil }
+        return per / price * 100
     }
 }
 
