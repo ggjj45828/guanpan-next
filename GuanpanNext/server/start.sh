@@ -11,6 +11,11 @@
 set -e
 SRC="${GUANPAN_SRC:-/opt/guanpan-src}"
 APP="${GUANPAN_APP:-/app}"
+# 顺手剥掉 CR：Windows 上 core.autocrlf=true 会把本文件 checkout 成 CRLF，
+# 那样 SRC 会带上一个看不见的 \r，[ -f "$SRC/app.py" ] 永远为假，
+# 于是一次又一次静默退回镜像内置旧代码——症状就是"部署了但功能没变"。
+SRC=$(printf '%s' "$SRC" | tr -d '\r')
+APP=$(printf '%s' "$APP" | tr -d '\r')
 
 if [ -f "$SRC/app.py" ]; then
   for f in "$SRC"/*.py "$SRC"/VERSION; do

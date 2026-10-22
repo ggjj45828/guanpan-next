@@ -1,0 +1,14 @@
+# 观盘 Next：脚本与 Python 源码一律按 LF 检出。
+#
+# Windows 上 core.autocrlf=true 会把 start.sh 写成 CRLF。Shell 里行尾那个看不见的 \r
+# 会变成变量的一部分（SRC="/opt/guanpan-src\r"），于是 [ -f "$SRC/app.py" ] 永远为假，
+# start.sh 就静默退回镜像内置旧代码：服务照常起来、心跳正常，但部署等于没做
+# （表现：/health 没有 codeVersion、模型名还是旧的、新功能不出现）。
+# 这里强制 LF，从源头掐掉这一类"看起来部署成功其实没生效"的坑。
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+VERSION text eol=lf
+.env.example text eol=lf
