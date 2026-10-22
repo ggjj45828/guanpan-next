@@ -86,14 +86,25 @@ def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fe
     def update(name, state, detail):
         database.put_worker_status(name, datetime.now(timezone.utc).isoformat(), state, detail[:500])
 
+    def missing_note(failed):
+        """把失败代码与异常类型写进 detail。
+
+        只报 "6/7 codes archived" 时无从下手：不知道是哪一只、也不知道是抓不到
+        还是解析失败。这里点名到代码（最多 8 只），排查直接省掉一轮翻日志。
+        """
+        if not failed:
+            return ""
+        return "; missing " + ", ".join(failed[:8]) + ("…" if len(failed) > 8 else "")
+
     def daily_loop():
         update("daily-archive", "starting", "worker starting")
         while True:
-            codes = tracked(); failures = 0
+            codes = tracked(); failures = []
             for code in codes:
                 try: database.put_daily(code, daily_fetcher(code), datetime.now(timezone.utc).isoformat())
-                except Exception: failures += 1  # Last verified archive stays available.
-            update("daily-archive", "ok" if failures == 0 else "degraded", f"{len(codes) - failures}/{len(codes)} codes archived; next run in 30m")
+                except Exception as error: failures.append(f"{code}:{type(error).__name__}")  # Last verified archive stays available.
+            update("daily-archive", "ok" if not failures else "degraded",
+                   f"{len(codes) - len(failures)}/{len(codes)} codes archived; next run in 30m{missing_note(failures)}")
             time.sleep(1800)
 
     def minute_loop():
@@ -101,15 +112,16 @@ def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fe
         while True:
             local = datetime.now(SHANGHAI)
             if local.weekday() < 5 and ((9, 15) <= (local.hour, local.minute) <= (11, 35) or (13, 0) <= (local.hour, local.minute) <= (15, 5)):
-                codes = tracked(); failures = 0
+                codes = tracked(); failures = []
                 for code in codes:
                     try:
                         rows = minute_fetcher(code)
                         quote = next(iter(quote_fetcher([code])), None)
                         attach_quote_iopv(rows, quote)
                         database.put_minute(code, rows, datetime.now(timezone.utc).isoformat())
-                    except Exception: failures += 1
-                update("minute-archive", "ok" if failures == 0 else "degraded", f"{len(codes) - failures}/{len(codes)} codes collected; next attempt in 1m")
+                    except Exception as error: failures.append(f"{code}:{type(error).__name__}")
+                update("minute-archive", "ok" if not failures else "degraded",
+                       f"{len(codes) - len(failures)}/{len(codes)} codes collected; next attempt in 1m{missing_note(failures)}")
             else:
                 update("minute-archive", "idle", "outside mainland market collection window; historical archive remains available")
             time.sleep(60)
@@ -117,20 +129,21 @@ def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fe
     def dividend_loop():
         update("dividend-research", "starting", "dividend collector starting")
         while True:
-            codes = tracked(); failures = 0; collected = 0
+            codes = tracked(); failures = []; collected = 0
             for code in codes:
                 try:
                     events = fetch_dividend_events(code)
                     database.put_dividend_events(code, events, datetime.now(timezone.utc).isoformat())
                     collected += 1
-                except Exception: failures += 1
-            update("dividend-research", "ok" if failures == 0 else "degraded", f"{collected}/{len(codes)} codes checked; ETF F10 events separated from qfq/raw estimates; history retained")
+                except Exception as error: failures.append(f"{code}:{type(error).__name__}")
+            update("dividend-research", "ok" if not failures else "degraded",
+                   f"{collected}/{len(codes)} codes checked; ETF F10 events separated from qfq/raw estimates; history retained{missing_note(failures)}")
             time.sleep(86400)
 
     def research_loop():
         update("factor-research", "starting", "worker starting")
         while True:
-            codes = tracked(); failures = 0; researched = 0
+            codes = tracked(); failures = []; researched = 0
             for code in codes:
                 try:
                     data = database.get_daily(code)
@@ -143,8 +156,9 @@ def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fe
                             narrative = generate_research(result)
                             if narrative: database.put_research("deepseek-" + code, narrative)
                         researched += 1
-                except Exception: failures += 1
-            update("factor-research", "ok" if failures == 0 else "degraded", f"{researched}/{len(codes)} codes have usable 250-day research; next run in 15m")
+                except Exception as error: failures.append(f"{code}:{type(error).__name__}")
+            update("factor-research", "ok" if not failures else "degraded",
+                   f"{researched}/{len(codes)} codes have usable 250-day research; next run in 15m{missing_note(failures)}")
             time.sleep(900)
 
     def g_simulation_loop():
