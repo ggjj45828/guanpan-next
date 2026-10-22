@@ -1270,6 +1270,86 @@ private struct GridLabScreen: View {
     }
 }
 
+/// 跑赢基准：每天自动记一次快照，和上证指数比，累积出胜率与超额。
+/// 用「净买入校正」后的组合日收益，避免「今天加仓」被算成「今天赚钱」。
+private struct BenchmarkCard: View {
+    @EnvironmentObject private var model: NextAppModel
+    @Environment(\.gp) private var p
+    @State private var summary = BenchmarkTracker.Summary()
+    @State private var note: String?
+    @State private var busy = false
+
+    private var holdingsValue: Decimal {
+        model.book.positions.reduce(Decimal.zero) { $0 + Decimal($1.units) * (model.quotes[$1.code]?.quote.price ?? 0) }
+    }
+
+    /// 当日净买入：买入（含费）加、卖出（扣费）减。算收益时扣掉它，
+    /// 否则加仓带来的市值增加会被误当成盈利。
+    private var todayNetBuy: Decimal {
+        let today = dividendTodayString()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return model.book.fills.reduce(Decimal.zero) { acc, fill in
+            guard formatter.string(from: fill.date) == today else { return acc }
+            let gross = Decimal(fill.units) * fill.price
+            return fill.side == "buy" ? acc + gross + fill.fee : acc - (gross - fill.fee)
+        }
+    }
+
+    private func signed(_ value: Double) -> String {
+        "\(value >= 0 ? "+" : "")\(String(format: "%.2f", value))"
+    }
+
+    var body: some View {
+        EditorialSection(title: "跑赢基准", trailing: "每日对比", accent: p.chartBlue) {
+            Text("每天记一次持仓市值与\(BenchmarkTracker.benchmarkName)点位，用「净买入校正」后的组合日收益和基准比——加仓不会被算成赚钱。累积下来给胜率与超额，用来总结经验、指导后续节奏，不预测涨跌。")
+                .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                GPValue(label: "今日组合", value: summary.latest.map { "\(signed($0.portfolio))%" } ?? "—", emphasis: summary.latest.map { p.changeTone($0.portfolio) })
+                GPValue(label: BenchmarkTracker.benchmarkName, value: summary.latest.map { "\(signed($0.benchmarkReturn))%" } ?? "—", emphasis: summary.latest.map { p.changeTone($0.benchmarkReturn) })
+                GPValue(label: "超额", value: summary.latest.map { "\(signed($0.excess)) pt" } ?? "—", emphasis: summary.latest.map { p.changeTone($0.excess) })
+            }
+            if summary.days > 0 {
+                HStack(spacing: 10) {
+                    GPValue(label: "对比天数", value: "\(summary.days) 天")
+                    GPValue(label: "跑赢天数", value: "\(summary.winDays) 天", footnote: "胜率 \(String(format: "%.0f", summary.winRate))%")
+                    GPValue(label: "累计超额", value: "\(signed(summary.cumulativeExcess)) pt", emphasis: p.changeTone(summary.cumulativeExcess))
+                }
+                Text(BenchmarkTracker.guidance(summary)).font(.caption).foregroundStyle(p.ink).fixedSize(horizontal: false, vertical: true)
+                if let best = summary.best { GPDataRow(title: "最好单日", value: "\(best.date) \(signed(best.excess)) pt") }
+                if let worst = summary.worst { GPDataRow(title: "最差单日", value: "\(worst.date) \(signed(worst.excess)) pt") }
+            } else {
+                GPStatus(title: "还没有可比的数据", detail: "需要两个交易日的快照才能算出第一次对比。保持每天打开一次，或点下方按钮立即记录今天。", symbol: "chart.line.uptrend.xyaxis")
+            }
+            if let note { Text(note).font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true) }
+            HStack(spacing: 10) {
+                GPActionButton(title: busy ? "记录中…" : "记录今日快照", secondary: true, systemImage: "arrow.clockwise") { Task { await record() } }
+                Button("清空对比记录") { BenchmarkTracker.reset(); summary = BenchmarkTracker.Summary(); note = "已清空历史对比记录" }.font(.caption).foregroundStyle(p.risk)
+            }
+        }
+        .task {
+            summary = BenchmarkTracker.summary()
+            await record()
+        }
+    }
+
+    private func record() async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            let quote = try await GlobalIndexFeed.fetchQuote(symbol: BenchmarkTracker.symbol)
+            BenchmarkTracker.record(marketValue: holdingsValue, netBuy: todayNetBuy, benchmark: quote.price)
+            note = "已记录 \(dividendTodayString())：持仓市值 ¥\(NextMoney.text(holdingsValue))，\(BenchmarkTracker.benchmarkName) \(String(format: "%.2f", quote.price))"
+        } catch {
+            note = "基准行情拉取失败，本次只刷新了已有记录：\(error.localizedDescription)"
+        }
+        summary = BenchmarkTracker.summary()
+    }
+}
+
 private struct AssetsScreen: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
@@ -1365,6 +1445,7 @@ private struct AssetsScreen: View {
                     }.padding(.top, 3)
                 }.padding(.top, 15)
                 overviewStatGrid.padding(.top, 4)
+                BenchmarkCard()
                 HoldingsBreakdownPanel()
                 EditorialSection(title: "持仓明细", trailing: "\(model.book.positions.count) 项", accent: p.jade) {
                     HStack { Button { addPosition = true } label: { Label("录入已确认持仓", systemImage: "plus") }.font(.caption.weight(.semibold)); Spacer(); NavigationLink(value: GPRoute.fills) { Label("资产流水", systemImage: "list.bullet.rectangle") }.font(.caption) }.tint(p.forest)
@@ -2207,10 +2288,34 @@ private struct DividendScreenCard: View {
     @State private var loading = false
     @State private var selected: String?
     @State private var customCode = ""
-    @State private var extra: [String] = []
+    @State private var extra: [String] = DividendScreenCard.loadPool()
+    @State private var hidden: Set<String> = DividendScreenCard.loadHidden()
+    @State private var editingPool = false
     @State private var customNote: String?
-    /// 自动筛选的分红型 ETF 与高股息个股候选池（场内）。
-    private let universe: [String] = ["515180","512890","515080","510880","159905","515890","561580","512530","601088","600900","601225","600188","601006","601328","600377","000895"]
+    /// 默认候选池：分红型 ETF + 高股息个股（场内）。可增删，增删结果跨启动保留。
+    private static let defaultUniverse: [String] = ["515180","512890","515080","510880","159905","515890","561580","512530","601088","600900","601225","600188","601006","601328","600377","000895"]
+    private static let poolKey = "guanpan.dividend.pool.v1"
+    private static let hiddenKey = "guanpan.dividend.hidden.v1"
+    /// 默认池里被用户移出的不再参与筛选；自己加的存在 extra 里。
+    private var universe: [String] { Self.defaultUniverse.filter { !hidden.contains($0) } }
+
+    private static func loadPool() -> [String] {
+        (UserDefaults.standard.array(forKey: poolKey) as? [String]) ?? []
+    }
+    private static func loadHidden() -> Set<String> {
+        Set((UserDefaults.standard.array(forKey: hiddenKey) as? [String]) ?? [])
+    }
+    private func savePool() { UserDefaults.standard.set(extra, forKey: Self.poolKey) }
+    private func saveHidden() { UserDefaults.standard.set(Array(hidden), forKey: Self.hiddenKey) }
+    /// 移出候选池：自己加的直接删，默认的记进 hidden（可用「恢复默认」找回）。
+    private func removeFromPool(_ code: String) {
+        if extra.contains(code) { extra.removeAll { $0 == code }; savePool(); customNote = "已移出 \(code)" }
+        else if Self.defaultUniverse.contains(code) { hidden.insert(code); saveHidden(); customNote = "已移出 \(code)，可用「恢复默认」找回" }
+    }
+    private func restoreDefaults() {
+        hidden = []; extra = []; saveHidden(); savePool()
+        customNote = "已恢复默认候选池（\(Self.defaultUniverse.count) 只）"
+    }
 
     private var targetYield: Decimal {
         Decimal(string: (UserDefaults.standard.string(forKey: "guanpan.targetYield") ?? "4").trimmingCharacters(in: .whitespaces)) ?? 4
@@ -2286,6 +2391,22 @@ private struct DividendScreenCard: View {
                 }
             }
             if let customNote { Text(customNote).font(.caption2).foregroundStyle(p.muted) }
+            Button { editingPool.toggle() } label: {
+                Label(editingPool ? "收起候选池编辑" : "编辑候选池（\(Set(universe + extra).count) 只）", systemImage: "slider.horizontal.3")
+            }.font(.caption.weight(.semibold)).tint(p.forest)
+            if editingPool {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("点 × 移出候选池；默认标的移出后可用「恢复默认」找回。增删跨启动保留。").font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(Set(universe + extra)).sorted(), id: \.self) { code in
+                        HStack(spacing: 8) {
+                            Text("\(model.name(for: code)) · \(code)").font(.caption).foregroundStyle(p.ink).lineLimit(1)
+                            Spacer()
+                            Button { removeFromPool(code) } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(p.muted) }.buttonStyle(.plain)
+                        }
+                    }
+                    Button("恢复默认候选池") { restoreDefaults() }.font(.caption).tint(p.forest)
+                }
+            }
             ForEach(rows) { row in
                 Button { selected = selected == row.code ? nil : row.code } label: { dividendRow(row) }
                     .buttonStyle(.plain)
@@ -2345,9 +2466,9 @@ private struct DividendScreenCard: View {
     }
     private func addCustom() {
         let v = customCode.trimmingCharacters(in: .whitespaces)
-        guard v.count == 6, v.allSatisfies(\.isNumber) else { customNote = "请输入 6 位场内证券代码"; return }
+        guard v.count == 6, v.allSatisfy(\.isNumber) else { customNote = "请输入 6 位场内证券代码"; return }
         customNote = nil
-        if !extra.contains(v) { extra.append(v) }
+        if !extra.contains(v) { extra.append(v); savePool(); customNote = "已加入 \(v)，后续会自动参与打分" }
         customCode = ""
         Task { await model.refreshInstrument(v) }
     }
