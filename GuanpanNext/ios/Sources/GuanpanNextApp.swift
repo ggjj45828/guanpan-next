@@ -44,6 +44,54 @@ private extension GPRoute {
         }
     }
 }
+private struct GPTabItem {
+    let tab: NextTab
+    let title: String
+    let icon: String
+}
+
+/// 自绘底部导航：iOS 的 TabView 最多平铺 5 个位置，6 个页签会被折叠进「More」，
+/// 所以这里不用系统 TabView，六个入口全部平铺、永不被折叠。
+/// 网格图标用 iOS 14 起就有的 `square.grid.2x2.fill`，避免旧符号 `grid.cornersections.fill` 在某些系统上渲染成空白。
+private struct GPTabBar: View {
+    @Binding var selection: NextTab
+    @Environment(\.gp) private var p
+    private let items: [GPTabItem] = [
+        GPTabItem(tab: .market, title: "行情", icon: "chart.xyaxis.line"),
+        GPTabItem(tab: .assets, title: "持仓", icon: "square.stack.3d.up.fill"),
+        GPTabItem(tab: .laboratory, title: "网格", icon: "square.grid.2x2.fill"),
+        GPTabItem(tab: .income, title: "收息", icon: "yensign.circle.fill"),
+        GPTabItem(tab: .decision, title: "AI 引擎", icon: "sparkles"),
+        GPTabItem(tab: .mine, title: "我的", icon: "person.crop.circle.fill")
+    ]
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(items, id: \.tab) { item in
+                let selected = selection == item.tab
+                Button {
+                    selection = item.tab
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: item.icon).font(.system(size: 19, weight: .medium))
+                        Text(item.title).font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundStyle(selected ? p.forest : p.muted)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(item.title)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+            }
+        }
+        .padding(.top, 5)
+        .padding(.bottom, 2)
+        .background(p.paper)
+        .overlay(alignment: .top) { Rectangle().fill(p.line).frame(height: 0.7) }
+    }
+}
+
 enum GPMainTab: String, CaseIterable, Identifiable {
     case overview, market, decision, laboratory, assets
     var id: String { rawValue }
@@ -58,23 +106,42 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     private var tabSelection: Binding<NextTab> { Binding(get: { model.preferences.navigation.selectedTab }, set: { model.preferences.navigation.selectedTab = $0; model.preferences = model.preferences }) }
     var body: some View {
-        TabView(selection: tabSelection) {
-            PrimaryNavigation(title: "行情", tab: .market) { MarketScreen() }.tabItem { Label("行情", systemImage: "chart.xyaxis.line") }.tag(NextTab.market)
-            PrimaryNavigation(title: "持仓", tab: .assets) { AssetsScreen() }.tabItem { Label("持仓", systemImage: "square.stack.3d.up.fill") }.tag(NextTab.assets)
-            PrimaryNavigation(title: "网格", tab: .laboratory) { GridLabScreen() }.tabItem { Label("网格", systemImage: "grid.cornersections.fill") }.tag(NextTab.laboratory)
-            PrimaryNavigation(title: "收息", tab: .income) { DividendHistoryScreen(code: nil) }.tabItem { Label("收息", systemImage: "yensign.circle.fill") }.tag(NextTab.income)
-            PrimaryNavigation(title: "AI 引擎", tab: .decision) { DecisionScreen(code: nil) }.tabItem { Label("AI 引擎", systemImage: "sparkles") }.tag(NextTab.decision)
-            PrimaryNavigation(title: "我的", tab: .mine) { SettingsScreen() }.tabItem { Label("我的", systemImage: "person.crop.circle.fill") }.tag(NextTab.mine)
+        // iOS 的 TabView 最多平铺 5 个位置：6 个 tab 会自动把多余的折叠进「More」，
+        // 这就是底栏一直显示 4 个 + More 的根因。六个页签要全部平铺，
+        // 必须自绘底栏（GPTabBar）。隐藏页用透明度切换，状态和 TabView 一样保留。
+        ZStack {
+            PrimaryNavigation(title: "行情", tab: .market) { MarketScreen() }
+                .opacity(tabSelection.wrappedValue == .market ? 1 : 0)
+                .allowsHitTesting(tabSelection.wrappedValue == .market)
+                .accessibilityHidden(tabSelection.wrappedValue != .market)
+            PrimaryNavigation(title: "持仓", tab: .assets) { AssetsScreen() }
+                .opacity(tabSelection.wrappedValue == .assets ? 1 : 0)
+                .allowsHitTesting(tabSelection.wrappedValue == .assets)
+                .accessibilityHidden(tabSelection.wrappedValue != .assets)
+            PrimaryNavigation(title: "网格", tab: .laboratory) { GridLabScreen() }
+                .opacity(tabSelection.wrappedValue == .laboratory ? 1 : 0)
+                .allowsHitTesting(tabSelection.wrappedValue == .laboratory)
+                .accessibilityHidden(tabSelection.wrappedValue != .laboratory)
+            PrimaryNavigation(title: "收息", tab: .income) { DividendHistoryScreen(code: nil) }
+                .opacity(tabSelection.wrappedValue == .income ? 1 : 0)
+                .allowsHitTesting(tabSelection.wrappedValue == .income)
+                .accessibilityHidden(tabSelection.wrappedValue != .income)
+            PrimaryNavigation(title: "AI 引擎", tab: .decision) { DecisionScreen(code: nil) }
+                .opacity(tabSelection.wrappedValue == .decision ? 1 : 0)
+                .allowsHitTesting(tabSelection.wrappedValue == .decision)
+                .accessibilityHidden(tabSelection.wrappedValue != .decision)
+            PrimaryNavigation(title: "我的", tab: .mine) { SettingsScreen() }
+                .opacity(tabSelection.wrappedValue == .mine ? 1 : 0)
+                .allowsHitTesting(tabSelection.wrappedValue == .mine)
+                .accessibilityHidden(tabSelection.wrappedValue != .mine)
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) { GPTabBar(selection: tabSelection) }
         .tint(GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort, appearance: model.preferences.appearance).forest)
         .environment(\.gp, GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort, appearance: model.preferences.appearance))
         .environment(\.gpAppearance, model.preferences.appearance)
         .dynamicTypeSize(model.preferences.appearance.dynamicTypeSize)
         .preferredColorScheme(model.theme.colorScheme)
         .sheet(isPresented: $model.showSearch) { SearchSheet() }
-        .alert("观盘 Pro", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-            Button("好", role: .cancel) { model.errorMessage = nil }
-        } message: { Text(model.errorMessage ?? "") }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             // 派息不再需要手工一条条录：每次回到前台先同步派息历史，
@@ -1106,35 +1173,8 @@ private struct AssetsScreen: View {
                     }
                 }
                 AccountReviewPanel()
-                EditorialSection(title: "分红与收息", trailing: "真实账本", accent: p.chartGold) {
-                    NavigationLink(value: GPRoute.dividends(nil)) { IntentRow(icon: "calendar", title: "完整 ETF 派息历史", detail: "按证券查看全部已采集事件") }.buttonStyle(.plain)
-                    let received = model.book.incomeEvents.filter { $0.status == .received }.reduce(Decimal.zero) { $0 + $1.netAmount }
-                    let expected = model.book.incomeEvents.filter { $0.status == .expected }.reduce(Decimal.zero) { $0 + $1.netAmount }
-                    HStack(spacing: 20) {
-                        GPValue(label: "已到账净收入", value: "¥\(NextMoney.text(received))", emphasis: p.jade)
-                        GPValue(label: "待到账计划", value: "¥\(NextMoney.text(expected))", footnote: "不计入账本现金")
-                    }
-                    HStack {
-                        Text("历史派息按当前持仓折算").font(.caption).foregroundStyle(p.muted)
-                        Spacer()
-                        Text("¥\(NextMoney.text(confirmedDividendPerShare))").font(.caption.weight(.semibold)).monospacedDigit().foregroundStyle(p.ink)
-                    }
-                    Text("历史事件金额按当前持仓份额折算，仅作参考；真实到账需单独记录并确认后才计入现金。推算数据不代表确认派息或未来承诺。")
-                        .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
-                    GPActionButton(title: "记录预期分红 / 收息", secondary: true, systemImage: "yensign.circle") { addIncome = true }
-                    ForEach(model.book.incomeEvents.sorted { $0.payDate > $1.payDate }) { event in
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("\(event.kind.title) · \(event.name)").font(.subheadline.weight(.medium))
-                                Text("\(event.status.title) · \(event.payDate.formatted(date: .numeric, time: .omitted)) · 税后 ¥\(NextMoney.text(event.netAmount))")
-                                    .font(.caption).foregroundStyle(p.muted)
-                            }
-                            Spacer()
-                            if event.status == .expected { Button("确认到账") { assetsConfirm = .income(event.id) }.font(.caption.weight(.semibold)).tint(p.forest) }
-                        }
-                    }
-                    Text("完整派息历史已归入「收息」页，这里只保留真实到账的收息记录，避免同一份数据两处重复。")
-                }
+                // 分红与收息已整体并入「收息」页（收息总览）：同一份数据只在一处出现，
+                // 持仓页只保留持仓与现金，不再重复展示派息，避免两处口径打架。
                 EditorialSection(title: "现金变动", trailing: "可用 ¥\(NextMoney.text(model.book.cash))") {
                     HStack { Button("转入") { cashDirection = 1 }; Button("转出") { cashDirection = -1 }.foregroundStyle(p.risk) }.buttonStyle(.bordered)
                     compactField("金额", text: $cashAmount); compactField("用途/备注", text: $cashReason)
@@ -2042,10 +2082,56 @@ private struct DividendHistoryScreen: View {
     // 让编译器类型检查超时（error: unable to type-check this expression in reasonable time）。
     private var sectionTitle: String { code.map { "\($0) 派息记录" } ?? "全部 ETF 派息记录" }
     private var sectionTrailing: String { "\(events.count) 条" }
+    @State private var addIncome = false
+    @State private var incomeConfirm: UUID?
+    @State private var recordsExpanded = false
+    @State private var adviceExpanded = false
+    private var receivedTotal: Decimal {
+        model.book.incomeEvents.filter { $0.status == .received }.reduce(Decimal.zero) { $0 + $1.netAmount }
+    }
+    private var expectedTotal: Decimal {
+        model.book.incomeEvents.filter { $0.status == .expected }.reduce(Decimal.zero) { $0 + $1.netAmount }
+    }
     var body: some View {
         GPPageBackground {
-            DividendAdviceCard()
-            EditorialSection(title: sectionTitle, trailing: sectionTrailing) {
+            // 收息总览：真实到账与待到账的核心数字，始终展开。
+            EditorialSection(title: "收息总览", trailing: "真实账本", accent: p.chartGold) {
+                HStack(spacing: 20) {
+                    GPValue(label: "已到账净收入", value: "¥\(NextMoney.text(receivedTotal))", emphasis: p.jade)
+                    GPValue(label: "待到账计划", value: "¥\(NextMoney.text(expectedTotal))", footnote: "不计入账本现金")
+                }
+                GPActionButton(title: "记录预期分红 / 收息", secondary: true, systemImage: "yensign.circle") { addIncome = true }
+                ForEach(model.book.incomeEvents.sorted { $0.payDate > $1.payDate }) { event in
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(event.kind.title) · \(event.name)").font(.subheadline.weight(.medium))
+                            Text("\(event.status.title) · \(event.payDate.formatted(date: .numeric, time: .omitted)) · 税后 ¥\(NextMoney.text(event.netAmount))")
+                                .font(.caption).foregroundStyle(p.muted)
+                        }
+                        Spacer()
+                        if event.status == .expected {
+                            Button("确认到账") { incomeConfirm = event.id }.font(.caption.weight(.semibold)).tint(p.forest)
+                        }
+                    }
+                }
+                if model.book.incomeEvents.isEmpty {
+                    GPStatus(title: "还没有收息记录", detail: "点上方「记录预期分红 / 收息」登记待收计划；券商实际到账后再确认，税后净额会计入真实现金。", symbol: "yensign.circle")
+                }
+            }
+            // 股息买入参考（按 IMG_5912 的口径：股息率 / 目标买入价 / 收盘价 / 下次分红），默认折叠。
+            DisclosureGroup(isExpanded: $adviceExpanded) {
+                DividendAdviceCard()
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Capsule().fill(p.chartGold.opacity(0.85)).frame(width: 3, height: 15).offset(y: 1)
+                    Text("股息买入参考").font(.system(.headline, design: .serif).weight(.semibold)).foregroundStyle(p.ink)
+                    Spacer(minLength: 8)
+                    Text("推荐方法").font(.caption).foregroundStyle(p.chartGold.opacity(0.85))
+                }.padding(.vertical, 14)
+            }
+            .accentColor(p.forest)
+            // 派息记录：没数据或暂时不用时折叠起来，不占篇幅。
+            DisclosureGroup(isExpanded: $recordsExpanded) {
                 Text("这里记录基金公告或历史数据源中的派息事件，不等于你在除息日实际持有的份额，也不代表现金已到账。已到账金额请以券商流水核对后录入资产账本。")
                     .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 if events.isEmpty {
@@ -2055,12 +2141,31 @@ private struct DividendHistoryScreen: View {
                     DividendEventRow(event: event)
                     if event.id != events.last?.id { Divider().overlay(p.line) }
                 }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Capsule().fill(p.chartGold.opacity(0.85)).frame(width: 3, height: 15).offset(y: 1)
+                    Text("派息记录").font(.system(.headline, design: .serif).weight(.semibold)).foregroundStyle(p.ink)
+                    Spacer(minLength: 8)
+                    Text("\(events.count) 条").font(.caption).foregroundStyle(p.chartGold.opacity(0.85))
+                }.padding(.vertical, 14)
             }
+            .accentColor(p.forest)
         }
         .navigationTitle("派息历史").navigationBarTitleDisplayMode(.inline).gpKeyboardDismiss()
         .task {
-            for security in securities { await model.refreshDividendHistory(security) }
+            for security in securities {
+                await model.refreshInstrument(security)
+                await model.refreshDividendHistory(security)
+            }
         }
+        .sheet(isPresented: $addIncome) { IncomeRecordSheet(initialCode: code) { event in do { try model.addIncomeEvent(event) } catch { model.errorMessage = error.localizedDescription } } }
+        .confirmationDialog("确认这笔收益已实际到账？", isPresented: Binding(get: { incomeConfirm != nil }, set: { if !$0 { incomeConfirm = nil } }), titleVisibility: .visible) {
+            Button("确认到账并计入现金", role: .destructive) {
+                if let id = incomeConfirm { do { try model.receiveIncomeEvent(id) } catch { model.errorMessage = error.localizedDescription } }
+                incomeConfirm = nil
+            }
+            Button("取消", role: .cancel) { incomeConfirm = nil }
+        } message: { Text("只有收到券商或银行实际到账后才确认。本操作会把税后净额写入真实现金和审计流水，不会下单。") }
     }
 }
 

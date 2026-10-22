@@ -85,25 +85,24 @@ struct GPPalette {
     let scheme: ColorScheme
     let comfort: Bool
     var appearance = GPAppearance()
-    // The pale blue-lilac paper tint borrows the calm color layering the user
-    // liked in the reference, while typography and editorial grouping remain A.
-    var canvas: Color { appearance.canvasHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0xF1F0E5) : scheme == .dark ? Color(hex: 0x131824) : Color(hex: 0xF1F2F9)) }
-    var paper: Color { appearance.paperHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0xFAF9F1) : scheme == .dark ? Color(hex: 0x1B2130) : Color(hex: 0xFCFCFF)) }
-    var raised: Color { comfort ? Color(hex: 0xE8E7DA) : scheme == .dark ? Color(hex: 0x252C3C) : Color(hex: 0xE9EBF4) }
-    var ink: Color { appearance.inkHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0x263329) : scheme == .dark ? Color(hex: 0xEEF0F8) : Color(hex: 0x252A3B)) }
-    var muted: Color { comfort ? Color(hex: 0x707568) : scheme == .dark ? Color(hex: 0xA6AEC0) : Color(hex: 0x73798C) }
-    var line: Color { comfort ? Color(hex: 0xD8D7CA) : scheme == .dark ? Color(hex: 0x353D50) : Color(hex: 0xDFE2EC) }
-    var forest: Color { comfort ? Color(hex: 0x42634E) : scheme == .dark ? Color(hex: 0x9CC8BD) : Color(hex: 0x315D58) }
-    var forestDeep: Color { Color(hex: 0x244638) }
-    var terracotta: Color { comfort ? Color(hex: 0xA66642) : scheme == .dark ? Color(hex: 0xE2A475) : Color(hex: 0xB46B58) }
-    var jade: Color { comfort ? Color(hex: 0x3D765D) : scheme == .dark ? Color(hex: 0x83C4A0) : Color(hex: 0x347E63) }
-    var risk: Color { comfort ? Color(hex: 0xAA574C) : scheme == .dark ? Color(hex: 0xEF9587) : Color(hex: 0xC24E58) }
-    var tint: Color { comfort ? Color(hex: 0xE4E9DC) : scheme == .dark ? Color(hex: 0x263342) : Color(hex: 0xE5E8F3) }
-    var heroSurface: Color { comfort ? Color(hex: 0xF0EFE2) : scheme == .dark ? Color(hex: 0x20283A) : Color(hex: 0xE8EAF7) }
-    var chartBlue: Color { comfort ? Color(hex: 0x547D91) : scheme == .dark ? Color(hex: 0x8CA9E8) : Color(hex: 0x607EC5) }
-    var chartViolet: Color { comfort ? Color(hex: 0x806C96) : scheme == .dark ? Color(hex: 0xC0A4E8) : Color(hex: 0x8872B7) }
-    var chartGold: Color { comfort ? Color(hex: 0x9B7D42) : scheme == .dark ? Color(hex: 0xE2C178) : Color(hex: 0xB08A3C) }
-    var chartCost: Color { comfort ? Color(hex: 0xA45F6C) : scheme == .dark ? Color(hex: 0xE38FA3) : Color(hex: 0xB85C78) }
+    // 配色改版：对齐「观盘Next 五页界面预览」设计稿——鲜亮蓝/紫/青/金，告别墨绿闷色调。
+    var canvas: Color { appearance.canvasHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0xF3F1E6) : scheme == .dark ? Color(hex: 0x121826) : Color(hex: 0xF5F7FB)) }
+    var paper: Color { appearance.paperHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0xFBFAF2) : scheme == .dark ? Color(hex: 0x1A2233) : Color(hex: 0xFFFFFF)) }
+    var raised: Color { comfort ? Color(hex: 0xEAE8DA) : scheme == .dark ? Color(hex: 0x222B3D) : Color(hex: 0xE8EDF4) }
+    var ink: Color { appearance.inkHex.map { Color(hex: $0) } ?? (comfort ? Color(hex: 0x2A2F24) : scheme == .dark ? Color(hex: 0xF0F2FA) : Color(hex: 0x17263A)) }
+    var muted: Color { comfort ? Color(hex: 0x736B55) : scheme == .dark ? Color(hex: 0xAEB6C8) : Color(hex: 0x708095) }
+    var line: Color { comfort ? Color(hex: 0xDAD8CB) : scheme == .dark ? Color(hex: 0x33405A) : Color(hex: 0xE5EAF1) }
+    var forest: Color { comfort ? Color(hex: 0x2F5CC4) : scheme == .dark ? Color(hex: 0x7FA6F5) : Color(hex: 0x3268E8) }
+    var forestDeep: Color { comfort ? Color(hex: 0x24479C) : scheme == .dark ? Color(hex: 0x1E49A8) : Color(hex: 0x1F4FBE) }
+    var terracotta: Color { comfort ? Color(hex: 0x6A4FC8) : scheme == .dark ? Color(hex: 0xB3A0F2) : Color(hex: 0x795CE0) }
+    var jade: Color { comfort ? Color(hex: 0x0B8F85) : scheme == .dark ? Color(hex: 0x45C8BC) : Color(hex: 0x0DA69A) }
+    var risk: Color { comfort ? Color(hex: 0xC9524C) : scheme == .dark ? Color(hex: 0xF2857E) : Color(hex: 0xED665E) }
+    var tint: Color { comfort ? Color(hex: 0xE6E9F2) : scheme == .dark ? Color(hex: 0x26324A) : Color(hex: 0xE4EBFB) }
+    var heroSurface: Color { comfort ? Color(hex: 0xEDEBF8) : scheme == .dark ? Color(hex: 0x1E2C48) : Color(hex: 0xE9F0FC) }
+    var chartBlue: Color { comfort ? Color(hex: 0x2F5CC4) : scheme == .dark ? Color(hex: 0x7FA6F5) : Color(hex: 0x386DEF) }
+    var chartViolet: Color { comfort ? Color(hex: 0x6A4FC8) : scheme == .dark ? Color(hex: 0xB3A0F2) : Color(hex: 0x795CE0) }
+    var chartGold: Color { comfort ? Color(hex: 0xB8842A) : scheme == .dark ? Color(hex: 0xE8B45A) : Color(hex: 0xD99528) }
+    var chartCost: Color { comfort ? Color(hex: 0x9B5660) : scheme == .dark ? Color(hex: 0xE38FA3) : Color(hex: 0xB85C78) }
     /// 涨跌语义色（全局唯一来源）：国内口径「红涨绿跌」。
     /// 任何价格变动的着色都必须走 `changeTone(_:)` 或这两个属性；
     /// 不要再拿 risk / jade / terracotta 当涨跌色用（它们是「警示 / 建议 / 均线」语义）。
