@@ -533,6 +533,7 @@ private struct DecisionScreen: View {
     @State private var budget: String = "1000"
     @State private var limit: String = "40"
     @State private var targetWeightsText: [String: String] = [:]
+    @State private var targetCashText: String = ""
     @State private var analyzed = false
     @State private var result: NextDecision?
     @State private var mobileAIResult: String?
@@ -544,6 +545,7 @@ private struct DecisionScreen: View {
     @State private var patientLimitPrice = ""
     @State private var patientLimitUnits = "100"
     @State private var patientLimitExpiry = Calendar.current.date(byAdding: .day, value: 30, to: Date()) ?? Date().addingTimeInterval(30 * 86400)
+    @State private var patientLimitCode: String? = nil
     @State private var inspectResults: [InspectHolding] = []
     @State private var inspectSummary: String?
     @State private var inspecting = false
@@ -670,8 +672,8 @@ private struct DecisionScreen: View {
                 Text("分析会结合本机账本、有效行情、预算和风险限制。没有来源的数据会明确标为缺口。").font(.subheadline).foregroundStyle(p.muted).padding(.top, 5)
                 EditorialSection(title: "你的目标与资金") {
                     HStack(spacing: 10) { compactField("期限（年）", text: $years); compactField("每月新增预算", text: $budget); compactField("集中度线 %", text: $limit) }
-                    Text("目标仓位（可留空；填写后合计须为 100%）").font(.caption2).foregroundStyle(p.muted)
-                    ForEach(model.preferences.watch, id: \.self) { targetCode in
+                    Text("目标仓位（可留空；填写后持仓目标与现金目标合计须为 100%）").font(.caption2).foregroundStyle(p.muted)
+                    ForEach(Array(Set(model.preferences.watch + model.book.positions.map(\.code))).sorted(), id: \.self) { targetCode in
                         HStack(spacing: 8) {
                             Text("\(knownName(targetCode)) · \(targetCode)").font(.caption).lineLimit(1)
                             Spacer(minLength: 4)
@@ -679,13 +681,24 @@ private struct DecisionScreen: View {
                                 .keyboardType(.decimalPad).textFieldStyle(.roundedBorder).frame(width: 86).accessibilityLabel("\(targetCode) 目标仓位百分比")
                         }
                     }
+                    Divider().padding(.vertical, 4)
+                    HStack(spacing: 8) {
+                        Text("现金 · 保留比例").font(.caption).lineLimit(1)
+                        Spacer(minLength: 4)
+                        TextField("目标 %", text: $targetCashText)
+                            .keyboardType(.decimalPad).textFieldStyle(.roundedBorder).frame(width: 86).accessibilityLabel("现金目标仓位百分比")
+                    }
                     Button("保存目标") {
                         do {
                             var weights: [String: Decimal] = [:]
                             for (targetCode, text) in targetWeightsText where !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { weights[targetCode] = try NextMoney.parse(text) }
-                            try model.saveGoal(years: Int(years) ?? 0, monthlyBudget: try NextMoney.parse(budget), concentration: try NextMoney.parse(limit), targetWeights: weights)
+                            let cashW: Decimal? = targetCashText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : try NextMoney.parse(targetCashText)
+                            try model.saveGoal(years: Int(years) ?? 0, monthlyBudget: try NextMoney.parse(budget), concentration: try NextMoney.parse(limit), targetWeights: weights, targetCashWeight: cashW)
                         } catch { model.errorMessage = error.localizedDescription }
                     }.font(.caption.weight(.semibold)).tint(p.forest)
+                    if !targetCashText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("已设现金目标 \(targetCashText)%；持仓目标与现金目标合计须为 100%。").font(.caption2).foregroundStyle(p.muted)
+                    }
                     GPDataRow(title: "资金边界", value: "不动用真实现金", note: "计划和真实账本分开")
                 }
                 GPActionButton(title: "分析买入机会", systemImage: "sparkles") {
@@ -753,6 +766,17 @@ private struct DecisionScreen: View {
                     EditorialSection(title: "耐心限价计划") {
                         Text("设置你愿意观察的价格与份额。达到条件时通知你；这不是券商订单，不占用现金，也不会自动买入。")
                             .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                        if code == nil {
+                            let pCodes = Array(Set(model.book.positions.map(\.code) + model.preferences.watch)).sorted()
+                            if pCodes.isEmpty {
+                                Text("先在持仓或自选里添加证券，才能设置观察计划。").font(.caption2).foregroundStyle(p.muted)
+                            } else {
+                                Picker("标的证券", selection: $patientLimitCode) {
+                                    Text("请选择标的").tag(String?.none)
+                                    ForEach(pCodes, id: \.self) { c in Text("\(model.name(for: c)) · \(c)").tag(c as String?) }
+                                }.pickerStyle(.menu).tint(p.forest)
+                            }
+                        }
                         HStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("观察限价（¥）").font(.caption2).foregroundStyle(p.muted)
@@ -766,13 +790,18 @@ private struct DecisionScreen: View {
                         DatePicker("提醒有效至", selection: $patientLimitExpiry, in: Date()..., displayedComponents: .date)
                             .font(.caption).tint(p.forest)
                         GPActionButton(title: "保存观察计划", secondary: true, systemImage: "bell.badge") {
-                            guard let code else { return }
+                            guard let c = patientLimitCode ?? code,
+                                  let price = try? NextMoney.parse(patientLimitPrice), price > 0,
+                                  let units = Int(patientLimitUnits), units > 0 else {
+                                model.errorMessage = "请先选择标的，并填写有效的观察价（>0）与份额（>0）"
+                                return
+                            }
                             do {
-                                try model.createPatientLimitPlan(code: code, price: NextMoney.parse(patientLimitPrice), units: Int(patientLimitUnits) ?? 0, expiresAt: patientLimitExpiry)
+                                try model.createPatientLimitPlan(code: c, price: price, units: units, expiresAt: patientLimitExpiry)
                                 patientLimitPrice = ""
                             } catch { model.errorMessage = error.localizedDescription }
                         }
-                        let plans = model.patientLimitPlans.filter { $0.code == code }
+                        let plans = model.patientLimitPlans.filter { $0.code == (patientLimitCode ?? code) }
                         if plans.isEmpty {
                             Text("尚无此证券的观察计划。目标价由你决定，不会用未经验证的 AI 价格替你填入。")
                                 .font(.caption2).foregroundStyle(p.muted)
@@ -824,6 +853,7 @@ private struct DecisionScreen: View {
             budget = NSDecimalNumber(decimal: model.goal.monthlyBudget).stringValue
             limit = NSDecimalNumber(decimal: model.goal.concentrationLimit).stringValue
             targetWeightsText = model.goal.targetWeights.mapValues { NSDecimalNumber(decimal: $0).stringValue }
+            targetCashText = model.goal.targetCashWeight.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
             mobileAIKeyAvailable = DeepSeekMobile.loadKey() != nil
             if let code { Task { await model.refreshNASResearch(code) } }
         }.confirmationDialog("授权发送本次 ETF 研究数据？", isPresented: $showNASAIConsent, titleVisibility: .visible) {

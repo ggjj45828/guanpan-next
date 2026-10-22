@@ -455,8 +455,8 @@ struct LocalPreferences: Codable {
         try copy.undo(id, at: Date())
         ledger = copy
     }
-    func saveGoal(years: Int, monthlyBudget: Decimal, concentration: Decimal, targetWeights: [String: Decimal] = [:]) throws {
-        var updated = goal; updated.years = years; updated.monthlyBudget = monthlyBudget; updated.concentrationLimit = concentration; updated.targetWeights = targetWeights
+    func saveGoal(years: Int, monthlyBudget: Decimal, concentration: Decimal, targetWeights: [String: Decimal] = [:], targetCashWeight: Decimal? = nil) throws {
+        var updated = goal; updated.years = years; updated.monthlyBudget = monthlyBudget; updated.concentrationLimit = concentration; updated.targetWeights = targetWeights; updated.targetCashWeight = targetCashWeight
         try updated.validate(); preferences.goal = updated
     }
     func addWatch(_ code: String) throws {
@@ -507,11 +507,11 @@ struct LocalPreferences: Codable {
         preferences.notifications.priceRules.append(rule); preferences = preferences
     }
     func createPatientLimitPlan(code: String, price: Decimal, units: Int, expiresAt: Date) throws {
-        guard code.count == 6, code.allSatisfy(\.isNumber), expiresAt > Date(),
+        guard code.count == 6, code.allSatisfy(\.isNumber), expiresAt > Date(), price > 0, units > 0,
               !patientLimitPlans.contains(where: { $0.code == code && $0.state == "等待价格提醒" && $0.limitPrice == price && $0.units == units }) else {
-            throw NextError.invalid("限价计划代码、有效期无效，或相同计划已经存在")
+            throw NextError.invalid("限价计划代码、有效期、价格或份额无效，或相同计划已经存在")
         }
-        var plan = NextPatientLimitPlan(id: UUID(), code: code, name: quotes[code]?.quote.name ?? code,
+        var plan = NextPatientLimitPlan(id: UUID(), code: code, name: name(for: code),
                                         limitPrice: price, units: units, createdAt: Date(), expiresAt: expiresAt)
         try plan.validate()
         patientLimitPlans.insert(plan, at: 0)

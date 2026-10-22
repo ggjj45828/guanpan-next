@@ -743,6 +743,7 @@ enum NextAccountAdvisor {
     static func review(book: NextBook, quotes: [String: NextQuote],
                        concentrationLimitPercent: Decimal,
                        targetWeights: [String: Decimal] = [:],
+                       targetCashWeight: Decimal? = nil,
                        realizedTotal: Decimal? = nil) -> NextAccountReview? {
         let holdings = book.positions.filter { $0.units > 0 }
         var priced: [(position: NextPosition, value: Double, price: Double)] = []
@@ -790,7 +791,15 @@ enum NextAccountAdvisor {
             }
         }
 
-        if cashWeight <= 5 {
+        if let cashTarget = targetCashWeight {
+            let drift = cashWeight - NextNum.double(cashTarget)
+            if abs(drift) >= 5 {
+                findings.append(NextAccountFinding(
+                    title: "现金偏离目标比例",
+                    detail: "现金占 \(NextNum.percent(cashWeight, digits: 1))，你的目标是 \(NextNum.percent(NextNum.double(cashTarget), digits: 1))，偏离 \(NextNum.percent(abs(drift), digits: 1))（\(drift > 0 ? "高于目标，可分批投入" : "低于目标，注意保留缓冲")）。按你的目标缓冲持有，不一次性打完现金也不长期闲置。",
+                    severity: .watch))
+            }
+        } else if cashWeight <= 5 {
             findings.append(NextAccountFinding(
                 title: "现金缓冲偏低",
                 detail: "现金只占 \(NextNum.percent(cashWeight, digits: 1))。新增买入前先核对未来支出与定投扣款，未突破仓位上限时再分批执行。",

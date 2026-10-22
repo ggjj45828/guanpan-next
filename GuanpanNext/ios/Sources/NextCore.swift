@@ -538,24 +538,29 @@ struct NextGoal: Codable, Equatable {
     var monthlyBudget: Decimal = 1000
     var concentrationLimit: Decimal = 40
     var targetWeights: [String: Decimal] = [:]
-    init(years: Int = 10, monthlyBudget: Decimal = 1000, concentrationLimit: Decimal = 40, targetWeights: [String: Decimal] = [:]) {
-        self.years = years; self.monthlyBudget = monthlyBudget; self.concentrationLimit = concentrationLimit; self.targetWeights = targetWeights
+    var targetCashWeight: Decimal? = nil
+    init(years: Int = 10, monthlyBudget: Decimal = 1000, concentrationLimit: Decimal = 40, targetWeights: [String: Decimal] = [:], targetCashWeight: Decimal? = nil) {
+        self.years = years; self.monthlyBudget = monthlyBudget; self.concentrationLimit = concentrationLimit; self.targetWeights = targetWeights; self.targetCashWeight = targetCashWeight
     }
-    private enum CodingKeys: String, CodingKey { case years, monthlyBudget, concentrationLimit, targetWeights }
+    private enum CodingKeys: String, CodingKey { case years, monthlyBudget, concentrationLimit, targetWeights, targetCashWeight }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         years = try values.decodeIfPresent(Int.self, forKey: .years) ?? 10
         monthlyBudget = try values.decodeIfPresent(Decimal.self, forKey: .monthlyBudget) ?? 1000
         concentrationLimit = try values.decodeIfPresent(Decimal.self, forKey: .concentrationLimit) ?? 40
         targetWeights = try values.decodeIfPresent([String: Decimal].self, forKey: .targetWeights) ?? [:]
+        targetCashWeight = try values.decodeIfPresent(Decimal.self, forKey: .targetCashWeight)
     }
     func validate() throws {
         let totalWeight = targetWeights.values.reduce(Decimal.zero, +)
+        let cashTarget = targetCashWeight ?? 0
+        let hasTarget = !targetWeights.isEmpty || targetCashWeight != nil
         guard years > 0, years <= 50, !monthlyBudget.isNaN, monthlyBudget >= 0,
               concentrationLimit > 0, concentrationLimit <= 100,
               targetWeights.keys.allSatisfy({ $0.count == 6 && $0.allSatisfy(\.isNumber) }),
               targetWeights.values.allSatisfy({ !$0.isNaN && $0 >= 0 && $0 <= 100 }),
-              targetWeights.isEmpty || abs(totalWeight - 100) <= Decimal(string: "0.01")! else { throw NextError.invalid("目标、预算或目标仓位比例无效（目标仓位合计须为 100%）") }
+              targetCashWeight.map({ !$0.isNaN && $0 >= 0 && $0 <= 100 }) ?? true,
+              !hasTarget || abs(totalWeight + cashTarget - 100) <= Decimal(string: "0.01")! else { throw NextError.invalid("目标、预算或目标仓位比例无效（持仓目标 + 现金目标合计须为 100%）") }
     }
 }
 struct NextEvidence: Codable, Identifiable, Equatable {

@@ -291,6 +291,7 @@ struct AccountReviewPanel: View {
             book: model.book, quotes: model.quotes.mapValues { $0.quote },
             concentrationLimitPercent: model.goal.concentrationLimit,
             targetWeights: model.goal.targetWeights,
+            targetCashWeight: model.goal.targetCashWeight,
             realizedTotal: realized)
     }
 }
