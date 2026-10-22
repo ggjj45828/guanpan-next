@@ -1629,7 +1629,10 @@ private struct SettingsScreen: View {
                         .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 EditorialSection(title: "无障碍") { Button("减少动态效果") { dynamicTypeNote = true }.font(.caption.weight(.medium)); Text("底部导航、表单、列表行和图表均提供可访问标签；页面遵循安全区并避让系统键盘。").font(.caption).foregroundStyle(p.muted) }
-                Text("观盘 Pro · 新原生账本结构").font(.caption2).foregroundStyle(p.muted).padding(.vertical, 18)
+                // 读取 Info.plist 真实版本，装错包一眼能看出来（旧包会显示老的 build 号）。
+                let appVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+                let appBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+                Text("观盘 Next · v\(appVer) (build \(appBuild))").font(.caption2).foregroundStyle(p.muted).padding(.vertical, 18)
             }
         }.onAppear { mobileAIKeyAvailable = DeepSeekMobile.loadKey() != nil; nasURL = model.preferences.nasBaseURL }
             .confirmationDialog("确认从 NAS 下载真实账本并替换本机账本？", isPresented: $confirmDownload, titleVisibility: .visible) {
