@@ -415,6 +415,10 @@ class HTTPTests(unittest.TestCase):
             status, value = self.request("GET", "/health")
         self.assertEqual(status, 200); self.assertEqual(value["service"], "guanpan-next"); self.assertEqual(value["authentication"], "none"); self.assertEqual(value["workers"], [])
         self.assertEqual(value["aiProvider"]["state"], "missing_key")
+        # codeVersion / codeSource 是"部署到底有没有生效"的唯一可信判据，必须一直暴露；
+        # 测试环境没有 start.sh 写的 .code-source 标记，所以这里应是 unknown。
+        self.assertTrue(value["codeVersion"] and value["codeVersion"] != "unknown")
+        self.assertEqual(value["codeSource"], "unknown")
         self.db.put_worker_status("daily-archive", datetime.now(timezone.utc).isoformat(), "ok", "4/4 codes archived")
         status, value = self.request("GET", "/health")
         self.assertEqual(status, 200)

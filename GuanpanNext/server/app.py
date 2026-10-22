@@ -37,6 +37,22 @@ def code_version():
         return "unknown"
 
 
+def code_source():
+    """这次跑起来用的是宿主机同步进来的代码，还是镜像里 bake 进去的旧代码。
+
+    start.sh 启动时写 .code-source：挂载源里没有 app.py 时会**静默退回镜像内置版本**，
+    服务照常起来、心跳也正常，于是「部署没生效」这件事从外面完全看不出来
+    （表现就是 /health 没有 codeVersion、模型名还是旧的、新增功能不出现）。
+    把这个来源写进 /health，一眼就能判定：
+      "host <路径>"  = 用的是你解压进去的新代码（正常）
+      "image ..."    = 挂载没落到位，跑的还是镜像里的旧代码（去查 GUANPAN_CODE_DIR）
+    """
+    try:
+        return Path(__file__).with_name(".code-source").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 def make_handler(database, market_fetcher=fetch_quotes, daily_fetcher=fetch_daily, dividend_fetcher=fetch_dividend_events):
     def grid_bars(codes):
         """网格参数只需要近 20 个交易日的振幅，用 NAS 已归档的日 K，够了。"""
@@ -116,7 +132,7 @@ def make_handler(database, market_fetcher=fetch_quotes, daily_fetcher=fetch_dail
                 return self.html("classic.html")
             if path == "/health":
                 return self.reply(200, {"service": "guanpan-next", "schemaVersion": 1, "authentication": "none", "web": True,
-                                        "codeVersion": code_version(),
+                                        "codeVersion": code_version(), "codeSource": code_source(),
                                         "workers": database.worker_health(), "aiProvider": provider_status()})
             if path == "/v1/ai/verify":
                 # 真实连通性探针：只发一句 "Reply with OK only."，不携带任何持仓数据。

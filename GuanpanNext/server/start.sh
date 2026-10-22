@@ -20,8 +20,13 @@ if [ -f "$SRC/app.py" ]; then
     mkdir -p "$APP/web"
     cp -Rf "$SRC/web/." "$APP/web/" 2>/dev/null || true
   fi
+  # 留个标记给 /health 的 codeSource：告诉外面这次跑的是宿主机同步进来的代码。
+  printf 'host %s\n' "$SRC" > "$APP/.code-source" 2>/dev/null || true
   echo "[start] 已同步宿主机代码 -> 版本 $(cat "$APP/VERSION" 2>/dev/null || echo 未知)"
 else
+  # 挂载源缺失时**不要**把服务弄死，退化成镜像内置版本；但必须留痕，
+  # 否则「部署没生效」从外面完全看不出来（只会看到功能没变、模型名还是旧的）。
+  printf 'image (未检测到 %s/app.py，用的镜像内置旧代码)\n' "$SRC" > "$APP/.code-source" 2>/dev/null || true
   echo "[start] 未检测到宿主机代码（$SRC/app.py），使用镜像内置版本 $(cat "$APP/VERSION" 2>/dev/null || echo 未知)"
 fi
 
