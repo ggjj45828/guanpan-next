@@ -37,7 +37,7 @@ class SimulationAccountTests(unittest.TestCase):
         with self.assertRaises(InvalidData): apply_action(account, {"action": "reset", "userConfirmed": True, "unexpected": 1}, "later")
 
     def test_database_compare_and_swap_preserves_revision_history(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             db = NextDatabase(tmp + "/next.sqlite3")
             account = create_account("G", CONFIG, "now")
             revision = db.put_twin_account("G", 0, account)
@@ -116,7 +116,7 @@ class SimulationHTTPTests(unittest.TestCase):
         import threading
         from http.server import ThreadingHTTPServer
         from urllib.request import Request, urlopen
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             db = NextDatabase(tmp + "/next.sqlite3")
             server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
             thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()

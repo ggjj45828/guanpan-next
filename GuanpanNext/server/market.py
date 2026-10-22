@@ -33,6 +33,9 @@ def _quote_is_fresh(stamp, received_at):
     当日收盘快照（深市 ETF 还有盘后固定价交易，时间戳会到 16:10+），
     上一版一律要求 60 秒内，导致每天 15:00 之后 quotes 接口把全部记录丢掉、
     返回 502，网页端拿不到报价就把现价按 0 渲染，整页变成「盈亏 -100%」。
+
+    盘中还反向卡一次：行情时间戳比 NAS 时钟快 2 分钟以上的一律当成脏数据丢掉
+    （时钟漂移或上游返回了未来时间）；2 分钟以内容忍，避免两地时钟差误杀有效报价。
     """
     cn = ZoneInfo("Asia/Shanghai")
     now = received_at.astimezone(cn)
@@ -41,7 +44,8 @@ def _quote_is_fresh(stamp, received_at):
         # 同一天：盘中进行时要求 60 秒内的实时快照，盘后/盘前接受当日快照。
         if not _in_trading_hours(now):
             return True
-        return (now - quoted).total_seconds() <= 60
+        delta = (now - quoted).total_seconds()
+        return -120 < delta <= 60
     # 不同日期：盘前和周末拿到的是上一个交易日的收盘快照，允许；
     # 但最多 3 天，防止把接口返回的陈旧数据当成有效行情。
     return 0 < (now.date() - quoted.date()).days <= 3

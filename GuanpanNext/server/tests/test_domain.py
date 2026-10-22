@@ -12,7 +12,7 @@ from pathlib import Path
 from app import make_handler
 from ai import analyze_user_context, AIProviderError
 from domain import Conflict, InvalidData, NextDatabase, convert_legacy_web_book, validate_book_json
-from market import parse_quotes, symbol_for
+from market import DIVIDEND_RULES_VERSION, parse_quotes, symbol_for
 from datetime import datetime, timezone
 
 
@@ -24,7 +24,7 @@ def book():
 
 class DomainTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = NextDatabase(Path(self.temp.name) / "new.sqlite3")
 
     def tearDown(self): self.temp.cleanup()
@@ -245,13 +245,13 @@ class IndependentWorkersTests(unittest.TestCase):
         rows = parse_minute(json.dumps(payload), "159941")
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[-1]["price"], "1.237")
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             db = NextDatabase(Path(folder) / "archive.sqlite3")
             db.put_minute("159941", rows, "2026-10-16T07:00:00Z")
             self.assertEqual(len(db.get_minute("159941", "2026-10-16")["rows"]), 2)
 
     def test_minute_iopv_is_optional_but_verified_value_survives_later_pull(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             db = NextDatabase(Path(folder) / "iopv.sqlite3")
             stamped = "2026-10-16T09:30:00+08:00"
             db.put_minute("159941", [{"timestamp": stamped, "price": "1.2", "volume": "100", "iopv": "1.19"}], "one")
@@ -298,14 +298,14 @@ class IndependentWorkersTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(result))
 
     def test_research_is_replaced_for_new_completed_day(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             db = NextDatabase(Path(folder) / "research.sqlite3")
             db.put_research("factors-159941", {"asOf": "2026-10-16", "state": "观察"})
             db.put_research("factors-159941", {"asOf": "2026-10-17", "state": "谨慎"})
             self.assertEqual(db.get_research("factors-159941")["asOf"], "2026-10-17")
 
     def test_minute_archive_rejects_untrusted_rows_and_invalid_dates(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             db = NextDatabase(Path(folder) / "minute.sqlite3")
             with self.assertRaises(InvalidData):
                 db.put_minute("159941", [{"timestamp": "bad", "price": "1.2", "volume": None}], "now")
@@ -313,7 +313,7 @@ class IndependentWorkersTests(unittest.TestCase):
                 db.get_minute("159941", "2026-13-40")
 
     def test_dividend_archive_is_persistent_and_separate_from_real_ledger(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             db = NextDatabase(Path(folder) / "dividends.sqlite3")
             events = [{"code": "563020", "date": "2026-06-10", "amountPerShare": "0.012", "isEstimated": False,
                 "recordDate": "2026-06-09", "payDate": "2026-06-15"}]
@@ -326,7 +326,7 @@ class IndependentWorkersTests(unittest.TestCase):
             self.assertEqual(db.get_real("main")["revision"], 0)
 
     def test_tracked_instrument_is_separate_from_real_ledger(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             db = NextDatabase(Path(folder) / "tracked.sqlite3")
             db.track_instrument("159941", "2026-10-19T08:00:00+00:00")
             db.track_instrument("159941", "2026-10-19T09:00:00+00:00")
@@ -334,14 +334,14 @@ class IndependentWorkersTests(unittest.TestCase):
             self.assertEqual(db.get_real("main"), {"revision": 0, "bookJSON": None})
 
     def test_worker_status_is_not_part_of_real_ledger(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             db = NextDatabase(Path(folder) / "status.sqlite3")
             db.put_worker_status("daily-archive", "2026-10-19T08:00:00+00:00", "degraded", "0/4 source replies")
             self.assertEqual(db.worker_status()[0]["state"], "degraded")
             self.assertEqual(db.get_real("main")["revision"], 0)
 
     def test_worker_health_marks_old_or_invalid_heartbeat_stale(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             db = NextDatabase(Path(folder) / "worker-health.sqlite3")
             now = datetime.fromisoformat("2026-10-20T08:00:00+00:00")
             db.put_worker_status("daily-archive", "2026-10-20T07:59:00+00:00", "ok", "recent")
@@ -395,7 +395,7 @@ class AIAnalysisTests(unittest.TestCase):
 
 class HTTPTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.db = NextDatabase(Path(self.temp.name) / "new.sqlite3")
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.db, lambda codes: [{"code": code} for code in codes]))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
@@ -463,7 +463,7 @@ class HTTPTests(unittest.TestCase):
 
     def test_dividend_history_route_serves_archive(self):
         self.db.put_dividend_events("563020", [{"code": "563020", "date": "2026-06-10", "amountPerShare": "0.012", "isEstimated": False,
-            "recordDate": "2026-06-09", "payDate": "2026-06-15"}], datetime.now(timezone.utc).isoformat())
+            "recordDate": "2026-06-09", "payDate": "2026-06-15"}], datetime.now(timezone.utc).isoformat(), DIVIDEND_RULES_VERSION)
         status, response = self.request("GET", "/v1/market/dividends/563020")
         self.assertEqual(status, 200)
         self.assertEqual(response["events"][0]["amountPerShare"], "0.012")
@@ -555,7 +555,7 @@ class HTTPTests(unittest.TestCase):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=3)
         connection.request("GET", "/")
         response = connection.getresponse(); body = response.read().decode(); connection.close()
-        self.assertEqual(response.status, 200); self.assertIn("观盘 Pro Next", body); self.assertIn("行情档案核对", body)
+        self.assertEqual(response.status, 200); self.assertIn("观盘 Next", body); self.assertIn("行情档案核对", body)
 
 
 if __name__ == "__main__": unittest.main()
