@@ -1166,14 +1166,19 @@ private struct GridLabScreen: View {
                     if let status = model.gridStatus, status.initialized, let summary = status.summary {
                         HStack(spacing: 10) {
                             GPValue(label: "网格账户权益", value: "¥\(NextMoney.text(dec(summary.equity) ?? 0))")
-                            GPValue(label: "累计盈亏", value: "\((dec(summary.pnl) ?? 0) >= 0 ? "+" : "")\(NextMoney.text(dec(summary.pnl) ?? 0))", footnote: "相对建网本金", emphasis: p.changeTone(NextNum.double(dec(summary.pnl) ?? 0)))
+                            GPValue(label: "本机账本权益", value: "¥\(NextMoney.text(model.realBookEquity))", footnote: "现金+持仓市值")
                         }
                         HStack(spacing: 10) {
+                            GPValue(label: "累计盈亏", value: "\((dec(summary.pnl) ?? 0) >= 0 ? "+" : "")\(NextMoney.text(dec(summary.pnl) ?? 0))", footnote: "相对建网本金", emphasis: p.changeTone(NextNum.double(dec(summary.pnl) ?? 0)))
                             GPValue(label: "运行天数", value: "\(summary.days) 天")
                             GPValue(label: "买入／卖出", value: "\(summary.buys)/\(summary.sells) 笔")
+                        }
+                        Text("本机真实账本权益 ¥\(NextMoney.text(model.realBookEquity))。网格是 NAS 上**独立运行的模拟账户**：建网时复制一次你的持仓与现金，之后按网格规则自己虚拟成交，并预留 20% 现金、跳过不足一手的持仓——所以权益与你的真实持仓会逐步分叉，这是设计如此、不是算错。下方每只都标注了本机真实持仓份数，方便对照。").font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            GPValue(label: "本金", value: "¥\(NextMoney.text(dec(summary.startEquity) ?? 0))")
+                            GPValue(label: "收益率", value: "\(String(format: "%.2f", NextNum.double(dec(summary.pnlPercent) ?? 0)))%", emphasis: p.changeTone(NextNum.double(dec(summary.pnlPercent) ?? 0)))
                             GPValue(label: "手续费", value: "¥\(NextMoney.text(dec(summary.fees) ?? 0))")
                         }
-                        Text("账户权益 ¥\(NextMoney.text(dec(summary.equity) ?? 0)) · 本金 ¥\(NextMoney.text(dec(summary.startEquity) ?? 0)) · 收益率 \(String(format: "%.2f", NextNum.double(dec(summary.pnlPercent) ?? 0)))%").font(.caption2).foregroundStyle(p.muted)
                     } else if let status = model.gridStatus, !status.initialized {
                         GPStatus(title: "NAS 网格尚未初始化", detail: "后台会按你的真实持仓自动建网格；首次连接后稍等片刻再刷新。", symbol: "grid")
                     }
@@ -1192,18 +1197,22 @@ private struct GridLabScreen: View {
         .task { await model.refreshGridStatus() }
     }
     @ViewBuilder private func ladderCard(_ row: NextNASGridLadderRow) -> some View {
-        let name = model.book.positions.first(where: { $0.code == row.code })?.name
-            ?? InstrumentCatalog.name(for: row.code) ?? row.code
+        let name = model.name(for: row.code)
+        let realUnits = model.book.positions.first(where: { $0.code == row.code })?.units ?? 0
+        let gridUnits = model.gridStatus?.summary?.plans.first(where: { $0.code == row.code })?.units
+        let anchorText = NextMoney.text(dec(row.anchor) ?? 0, digits: 3)
+        let stepText = String(format: "%.2f", NextNum.double(dec(row.stepPercent) ?? 0))
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(name).font(.subheadline.weight(.semibold)).foregroundStyle(p.ink)
                     Text(row.code).font(.caption2.monospaced()).foregroundStyle(p.muted)
+                    Text("本机持仓 \(realUnits) 份" + (gridUnits.map { grid in grid != realUnits ? " · 网格模拟 \(grid) 份（虚拟成交会偏离真实持仓）" : "" } ?? " · 未纳入网格")).font(.caption2).foregroundStyle(p.muted)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("现价 ¥\(NextMoney.text(dec(row.price) ?? 0, digits: 3))").font(.subheadline.monospacedDigit().weight(.semibold)).foregroundStyle(p.ink)
-                    Text("步长 \(String(format: "%.2f", NextNum.double(dec(row.stepPercent) ?? 0)))% · 第 \(row.position) 档").font(.caption2).foregroundStyle(p.muted)
+                    Text("锚点 ¥\(anchorText) · 步长 \(stepText)%").font(.caption2).foregroundStyle(p.muted)
                 }
             }
             HStack(spacing: 14) {
@@ -2188,118 +2197,162 @@ private struct DividendEventRow: View {
     }
 }
 
-/// 股息买入参考（收息页首卡）。口径对齐常见「股息率更新」表：
-///   近12个月每份已核实派息 ÷ 现价 = 当前股息率
-///   目标买入价 = 近12个月每份已核实派息 ÷ 目标股息率
-///   买入点参考「目标价 +15% 以内」（与该表备注一致）
-/// 只用已核实派息，不用推算值冒充；下次分红按最近一次除息月份外推，标注为预估。
-private struct DividendAdviceCard: View {
+/// 股息买入参考（收息页首卡，自动化版）。
+/// 从分红型 ETF 与高股息个股候选池自动筛选，按「股息率 + 价格位置」打分（0–100）：
+/// 股息率越高、现价越接近近一年区间低位，分越高。全部用已核实派息与本机行情自动算，
+/// 不按用户个人目标股息率反推目标价——目标股息率只在明细里作为对照参考。
+private struct DividendScreenCard: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
-    @State private var entry = ""
-    @State private var code: String?
-    @State private var targetYieldText: String = UserDefaults.standard.string(forKey: "guanpan.targetYield") ?? "4"
     @State private var loading = false
-    @State private var note: String?
+    @State private var selected: String?
+    @State private var customCode = ""
+    @State private var extra: [String] = []
+    @State private var customNote: String?
+    /// 自动筛选的分红型 ETF 与高股息个股候选池（场内）。
+    private let universe: [String] = ["515180","512890","515080","510880","159905","515890","561580","512530","601088","600900","601225","600188","601006","601328","600377","000895"]
 
-    private var targetYield: Decimal { Decimal(string: targetYieldText.trimmingCharacters(in: .whitespaces)) ?? 0 }
-    private var events: [NextETFDividendEvent] {
-        guard let code else { return [] }
-        let merged = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[code] ?? []))
-        return merged.filter { $0.code == code }
+    private var targetYield: Decimal {
+        Decimal(string: (UserDefaults.standard.string(forKey: "guanpan.targetYield") ?? "4").trimmingCharacters(in: .whitespaces)) ?? 4
     }
-    private var perShare: Decimal {
-        guard let code else { return 0 }
-        return NextDividendAnalytics.recentVerifiedPerShare(code: code, events: events, today: dividendTodayString())
+    private func price(_ code: String) -> Decimal? {
+        let v = model.quotes[code]?.quote.price
+        return (v ?? 0) > 0 ? v : nil
     }
-    private var quote: NextQuote? {
-        guard let code else { return nil }
-        return model.quotes[code]?.quote
+    private func events(for code: String) -> [NextETFDividendEvent] {
+        NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[code] ?? []))
     }
-    private var displayName: String {
-        guard let code else { return "" }
-        return quote?.name ?? model.book.positions.first(where: { $0.code == code })?.name ?? knownName(code)
+    private func perShare(_ code: String) -> Decimal {
+        NextDividendAnalytics.recentVerifiedPerShare(code: code, events: events(for: code), today: dividendTodayString())
     }
-    private var yieldPercent: Decimal? {
-        guard let price = quote?.price, price > 0, perShare > 0 else { return nil }
-        return perShare / price * 100
+    /// 现价在近一年日 K 区间的百分位（0=最低，100=最高）。数据不足返回 nil。
+    private func pricePercentile(_ code: String) -> Double? {
+        guard let ds = model.chartData["\(code):day"], ds.orderedSamples.count >= 20 else { return nil }
+        let closes = ds.orderedSamples.map { NextNum.double($0.close) }.filter { $0 > 0 }
+        guard let hi = closes.max(), let lo = closes.min(), hi > lo, let last = closes.last else { return nil }
+        return (last - lo) / (hi - lo) * 100
     }
-    private var targetPrice: Decimal? {
-        guard targetYield > 0, perShare > 0 else { return nil }
-        return perShare / (targetYield / 100)
-    }
-    private var nextDividendText: String? {
-        let confirmed = events.filter { $0.isEstimated != true }.map(\.date).sorted()
+    private func nextDividendText(_ code: String) -> String? {
+        let confirmed = events(for: code).filter { $0.isEstimated != true }.map(\.date).sorted()
         guard let last = confirmed.last else { return nil }
         let parts = last.split(separator: "-")
         guard parts.count == 3, let year = Int(parts[0]), let month = Int(parts[1]) else { return nil }
         return "预计 \(year + 1) 年 \(month) 月前后（按最近除息日 \(last) 外推）"
     }
-    private var advice: (headline: String, detail: String, tone: Color)? {
-        guard code != nil else { return nil }
-        guard let price = quote?.price, price > 0 else {
-            return ("还没拿到这只的行情", "点「查询」会自动拉现价与派息历史；离线时只显示本机缓存。", p.muted)
-        }
-        guard perShare > 0 else {
-            return ("近 12 个月没有已核实派息", "无法计算股息率与目标买入价；不会用推算值冒充已核实分红。", p.muted)
-        }
-        guard let target = targetPrice, target > 0 else {
-            return ("先填目标股息率", "目标买入价 = 近12个月每份 ¥\(NextMoney.text(perShare, digits: 3)) ÷ 目标股息率。", p.muted)
-        }
-        let premium = (price / target - 1) * 100
-        let current = NextMoney.text(perShare / price * 100, digits: 3)
-        if price <= target {
-            return ("现价不高于目标买入价，值得关注", "当前股息率 \(current)%，已达到目标 \(NextMoney.text(targetYield, digits: 1))%。", p.jade)
-        }
-        if premium <= 15 {
-            return ("在目标价 +15% 以内，可分批", "当前股息率 \(current)%，比目标买入价 ¥\(NextMoney.text(target, digits: 3)) 高 \(NextMoney.text(premium, digits: 1))%。", p.chartGold)
-        }
-        return ("高于目标价，建议等回落", "当前股息率 \(current)%，比目标买入价 ¥\(NextMoney.text(target, digits: 3)) 高 \(NextMoney.text(premium, digits: 1))%；价越低股息率越高。", p.terracotta)
+    private struct DRow: Identifiable {
+        let code: String
+        let name: String
+        let price: Decimal?
+        let perShare: Decimal
+        let yield: Double?
+        let percentile: Double?
+        let score: Int
+        let verdict: String
+        let tone: Color
+        var id: String { code }
+    }
+    /// 自动打分：股息率（0–50）+ 价格位置（0–50，越靠近区间低位越高）。不依赖个人目标股息率。
+    private var rows: [DRow] {
+        let combined = universe + extra
+        var seen = Set<String>(); var all: [String] = []
+        for c in combined where !seen.contains(c) { seen.insert(c); all.append(c) }
+        return all.compactMap { code in
+            let px = price(code)
+            let ps = perShare(code)
+            let yld: Double? = (px ?? 0) > 0 && ps > 0 ? NextNum.double(ps / (px ?? 1) * 100) : nil
+            let pct = pricePercentile(code)
+            let yScore: Int = { guard let y = yld else { return 6 }; if y >= 6 { return 50 } else if y >= 5 { return 44 } else if y >= 4 { return 38 } else if y >= 3 { return 30 } else if y >= 2 { return 18 } else { return 6 } }()
+            let pScore: Int = { guard let pc = pct else { return 25 }; return Int((100 - pc) / 100 * 50) }()
+            let total = yScore + pScore
+            let pair: (String, Color) = {
+                if ps <= 0 { return ("暂不可评", p.muted) }
+                if total >= 70 { return ("可考虑", p.jade) }
+                if total >= 55 { return ("等确认", p.chartGold) }
+                return ("不急", p.muted)
+            }()
+            return DRow(code: code, name: model.name(for: code), price: px, perShare: ps, yield: yld, percentile: pct, score: total, verdict: pair.0, tone: pair.1)
+        }.sorted { $0.score > $1.score }
     }
 
     var body: some View {
-        EditorialSection(title: "股息买入参考", trailing: "推荐", accent: p.chartGold) {
-            Text("输入代码查一只标的的股息率、目标买入价与下次分红预估。口径是近 12 个月已核实派息 ÷ 现价；买入点参考「目标价 +15% 以内」，不是下单建议。")
-                .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                TextField("输入 6 位代码，如 159941", text: $entry).keyboardType(.numberPad).textFieldStyle(.roundedBorder).submitLabel(.done)
-                Button(loading ? "查询中…" : "查询", action: query).buttonStyle(.borderedProminent).tint(p.forest).disabled(loading)
-            }
-            if !displayName.isEmpty { Text("\(displayName) · \(code ?? entry)").font(.subheadline.weight(.semibold)).foregroundStyle(p.ink) }
-            if let note { Text(note).font(.caption).foregroundStyle(p.muted) }
-            if code != nil {
-                GPDataRow(title: "现价", value: quote.map { "¥\(NextMoney.text($0.price, digits: 3))" } ?? "—", note: quote.map { "行情 \($0.time.formatted(date: .omitted, time: .shortened))" } ?? "点查询刷新行情")
-                GPDataRow(title: "近12个月每份派息（已核实）", value: perShare > 0 ? "¥\(NextMoney.text(perShare, digits: 3))" : "—", note: perShare > 0 ? "只统计已核实派息" : "无已核实记录")
-                GPDataRow(title: "当前股息率", value: yieldPercent.map { "\(NextMoney.text($0, digits: 3))%" } ?? "—", note: "每份派息 ÷ 现价")
-                GPDataRow(title: "目标买入价", value: targetPrice.map { "¥\(NextMoney.text($0, digits: 3))" } ?? "—", note: "按目标股息率 \(NextMoney.text(targetYield, digits: 1))% 反推")
-                GPDataRow(title: "下次分红", value: nextDividendText ?? "—", note: "按历史除息月份外推，以基金公告为准")
-                if let advice {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(advice.headline).font(.subheadline.weight(.semibold)).foregroundStyle(advice.tone)
-                        Text(advice.detail).font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
-                    }.padding(.vertical, 4)
-                }
+        EditorialSection(title: "股息买入参考 · 自动筛选", trailing: "\(rows.count) 只", accent: p.chartGold) {
+            Text("自动从分红型 ETF 与高股息个股候选池中筛选，按「股息率 + 价格位置」打分（0–100）：股息率越高、现价越接近近一年区间低位，分越高。全部用已核实派息与本机行情自动算，不按你个人目标股息率反推。点「刷新」拉最新行情与派息；点任意一行看明细。").font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button(loading ? "刷新中" : "刷新行情与派息") { Task { await load() } }.buttonStyle(.borderedProminent).tint(p.forest).disabled(loading)
+                Spacer()
                 HStack(spacing: 6) {
-                    Text("目标股息率 %").font(.caption2).foregroundStyle(p.muted)
-                    TextField("4", text: $targetYieldText).keyboardType(.decimalPad).textFieldStyle(.roundedBorder).frame(width: 64)
+                    TextField("加查代码", text: $customCode).keyboardType(.numberPad).textFieldStyle(.roundedBorder).frame(width: 92)
+                    Button("加入") { addCustom() }.buttonStyle(.bordered).disabled(customCode.count != 6)
                 }
+            }
+            if let customNote { Text(customNote).font(.caption2).foregroundStyle(p.muted) }
+            ForEach(rows) { row in
+                Button { selected = selected == row.code ? nil : row.code } label: { dividendRow(row) }
+                    .buttonStyle(.plain)
+                if selected == row.code { dividendDetail(row) }
             }
         }
+        .task { await load() }
     }
 
-    private func query() {
-        let value = entry.trimmingCharacters(in: .whitespaces)
-        guard value.count == 6, value.allSatisfy(\.isNumber) else { note = "请输入 6 位场内证券代码"; return }
-        note = nil; loading = true
-        let target = value
-        code = target
-        Task {
-            await model.refreshDividendHistory(target)
-            await model.refreshInstrument(target)
-            loading = false
+    private func dividendRow(_ row: DRow) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.name).font(.subheadline.weight(.semibold)).foregroundStyle(p.ink)
+                Text(row.code).font(.caption2.monospaced()).foregroundStyle(p.muted)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(row.score) 分").font(.system(size: 15, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(row.tone)
+                Text(row.yield.map { "股息率 \(NextNum.percent($0))" } ?? "股息率 —").font(.caption2).foregroundStyle(p.muted)
+            }
+            Text(row.verdict).font(.caption.weight(.semibold)).foregroundStyle(row.tone)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(row.tone.opacity(0.12), in: Capsule())
         }
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder private func dividendDetail(_ row: DRow) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            GPDataRow(title: "现价", value: row.price.map { "¥\(NextMoney.text($0, digits: 3))" } ?? "—", note: "行情刷新后显示")
+            GPDataRow(title: "近12个月每份派息（已核实）", value: row.perShare > 0 ? "¥\(NextMoney.text(row.perShare, digits: 3))" : "—", note: row.perShare > 0 ? "只统计已核实派息" : "无已核实记录")
+            if let y = row.yield { GPDataRow(title: "当前股息率", value: "\(NextNum.percent(y))", note: "每份派息 ÷ 现价") }
+            if let pc = row.percentile {
+                let pos = pc < 30 ? "偏低（接近区间低位，更划算）" : pc > 70 ? "偏高（接近区间高位）" : "居中"
+                GPDataRow(title: "价格位置", value: "区间 \(Int(pc.rounded()))%", note: pos)
+            } else {
+                GPDataRow(title: "价格位置", value: "—", note: "需日K数据，点刷新后显示")
+            }
+            if row.perShare > 0 {
+                let target = row.perShare / (targetYield / 100)
+                GPDataRow(title: "你的目标 \(NextMoney.text(targetYield, digits: 1))% 对应价", value: "¥\(NextMoney.text(target, digits: 3))", note: "仅供参考，不驱动评分")
+            }
+            if let nd = nextDividendText(row.code) { GPDataRow(title: "下次分红", value: nd) }
+        }
+        .padding(10).background(p.tint, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func load() async {
+        loading = true
+        defer { loading = false }
+        if model.preferences.nasBaseURL.isEmpty {
+            customNote = "未连接 NAS，仅显示本机缓存行情；连上后在「我的」填 NAS 地址可拉最新数据"
+        }
+        let all = universe + extra
+        await model.refreshQuotes(codes: all)
+        for code in all { await model.refreshDividendHistory(code) }
+    }
+    private func addCustom() {
+        let v = customCode.trimmingCharacters(in: .whitespaces)
+        guard v.count == 6, v.allSatisfies(\.isNumber) else { customNote = "请输入 6 位场内证券代码"; return }
+        customNote = nil
+        if !extra.contains(v) { extra.append(v) }
+        customCode = ""
+        Task { await model.refreshInstrument(v) }
     }
 }
+
 
 func dividendTodayString() -> String {
     let formatter = DateFormatter()
@@ -2364,7 +2417,7 @@ private struct DividendHistoryScreen: View {
             }
             // 股息买入参考（按 IMG_5912 的口径：股息率 / 目标买入价 / 收盘价 / 下次分红），默认折叠。
             DisclosureGroup(isExpanded: $adviceExpanded) {
-                DividendAdviceCard()
+                DividendScreenCard()
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Capsule().fill(p.chartGold.opacity(0.85)).frame(width: 3, height: 15).offset(y: 1)
