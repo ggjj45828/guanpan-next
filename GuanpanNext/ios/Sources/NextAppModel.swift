@@ -303,6 +303,16 @@ struct LocalPreferences: Codable {
         try commitRealLedger(updated, action: "删除场内持仓", reason: "用户确认删除 \(code)")
     }
 
+    /// 一键清空所有持仓与成交流水。现金、现金流水、收息与分红记录保留，避免丢失股息追踪。
+    /// 走审计通道，可在「资产流水 → 撤销」里回退。
+    func clearHoldingsAndFills() throws {
+        guard !book.positions.isEmpty || !book.fills.isEmpty else { throw NextError.invalid("账本里没有持仓或流水可清空") }
+        var updated = book
+        updated.positions.removeAll()
+        updated.fills.removeAll()
+        try commitRealLedger(updated, action: "清空持仓与流水", reason: "用户一键清空所有持仓与成交流水")
+    }
+
     /// 删除一条成交流水，并按相反方向回滚它对**持仓与现金**的影响。
     /// 这是必要的：只删流水不回滚，账本就会出现「有持仓无买入记录」的假账，
     /// 摊薄成本和已实现盈亏都会跟着错。

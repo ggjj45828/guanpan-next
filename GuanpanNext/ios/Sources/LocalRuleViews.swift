@@ -191,8 +191,7 @@ struct GridCheckPanel: View {
     }
 
     private func displayName(_ code: String) -> String {
-        model.book.positions.first(where: { $0.code == code })?.name
-            ?? model.quotes[code]?.quote.name ?? code
+        model.name(for: code)
     }
 
     private func recompute() {
@@ -449,7 +448,7 @@ struct PositionRow: View {
         HStack(spacing: 4) {
             NavigationLink(value: GPRoute.instrument(position.code)) {
                 VStack(alignment: .leading, spacing: 5) {
-                    InstrumentRow(code: position.code, name: position.name, units: position.units, quote: quote)
+                    InstrumentRow(code: position.code, name: model.name(for: position.code), units: position.units, quote: quote)
                     tagRow
                 }
             }.buttonStyle(.plain)

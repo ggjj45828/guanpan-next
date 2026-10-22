@@ -1172,7 +1172,7 @@ private struct GridLabScreen: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("现价 ¥\(NextMoney.text(dec(row.price) ?? 0))").font(.subheadline.monospacedDigit().weight(.semibold)).foregroundStyle(p.ink)
+                    Text("现价 ¥\(NextMoney.text(dec(row.price) ?? 0, digits: 3))").font(.subheadline.monospacedDigit().weight(.semibold)).foregroundStyle(p.ink)
                     Text("步长 \(String(format: "%.2f", NextNum.double(dec(row.stepPercent) ?? 0)))% · 第 \(row.position) 档").font(.caption2).foregroundStyle(p.muted)
                 }
             }
@@ -1185,7 +1185,7 @@ private struct GridLabScreen: View {
                 ForEach(row.rungs) { rung in
                     HStack {
                         Text(rung.isBuy ? "买" : "卖").font(.system(size: 10, weight: .bold)).foregroundStyle(rung.isBuy ? p.gpDown : p.gpUp).frame(width: 22)
-                        Text("¥\(NextMoney.text(dec(rung.price) ?? 0))").font(.system(size: 11).monospacedDigit()).foregroundStyle(p.ink)
+                        Text("¥\(NextMoney.text(dec(rung.price) ?? 0, digits: 3))").font(.system(size: 11).monospacedDigit()).foregroundStyle(p.ink)
                         Spacer()
                         Text("\(rung.units) 份").font(.system(size: 11)).foregroundStyle(p.muted)
                         Text(rung.reachable ? "可挂" : "暂不挂").font(.system(size: 10)).foregroundStyle(rung.reachable ? p.forest : p.muted)
@@ -1247,12 +1247,13 @@ private struct AssetsScreen: View {
     @State private var assetsConfirm: AssetsConfirm?
 
     private enum AssetsConfirm: Identifiable {
-        case income(UUID), cash, undo
+        case income(UUID), cash, undo, clear
         var id: String {
             switch self {
             case .income(let id): return "income-\(id)"
             case .cash: return "cash"
             case .undo: return "undo"
+            case .clear: return "clear"
             }
         }
         var title: String {
@@ -1260,6 +1261,7 @@ private struct AssetsScreen: View {
             case .income: return "确认这笔收益已实际到账？"
             case .cash: return "确认真实账本变更？"
             case .undo: return "撤销最近账本变更？"
+            case .clear: return "确认清空所有持仓与流水？"
             }
         }
         var message: String {
@@ -1267,6 +1269,7 @@ private struct AssetsScreen: View {
             case .income: return "只有收到券商或银行实际到账后才确认。本操作会把税后净额写入真实现金和审计流水，不会下单。"
             case .cash: return "本操作会改变真实场内账本，写入审计记录；不会向券商下单。"
             case .undo: return "撤销前会检查当前账本版本，仅当账本仍匹配该审计版本时生效。"
+            case .clear: return "会清空全部场内持仓和成交流水，现金、收息与分红记录保留；此操作可经审计记录撤销。"
             }
         }
     }
@@ -1359,6 +1362,7 @@ private struct AssetsScreen: View {
                 }
                 EditorialSection(title: "安全与数据") {
                     Button { assetsConfirm = .undo } label: { IntentRow(icon: "arrow.uturn.backward", title: "撤销最近账本变更", detail: "仅当账本仍匹配该审计版本时可撤销") }.buttonStyle(.plain)
+                    Button { assetsConfirm = .clear } label: { IntentRow(icon: "trash", title: "清空所有持仓与流水", detail: "一键清空，可经审计记录撤销") }.buttonStyle(.plain).foregroundStyle(p.risk)
                     Text("审计记录与备份恢复已归入「我的」页，这里不再重复放置。").font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1380,6 +1384,11 @@ private struct AssetsScreen: View {
                 case .undo:
                     Button("确认撤销", role: .destructive) {
                         do { try model.undoLatestLedgerChange() } catch { model.errorMessage = error.localizedDescription }
+                        assetsConfirm = nil
+                    }
+                case .clear:
+                    Button("确认清空", role: .destructive) {
+                        do { try model.clearHoldingsAndFills() } catch { model.errorMessage = error.localizedDescription }
                         assetsConfirm = nil
                     }
                 }
