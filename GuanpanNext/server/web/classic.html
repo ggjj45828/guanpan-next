@@ -1579,7 +1579,7 @@ function openBG(){
 /* ═══════════ 存储 ═══════════ */
 var KEY='guanpan_pro_v2';
 var DB={watch:[{code:'159941',name:'纳指ETF广发'},{code:'563020',name:'红利低波ETF易方达'},{code:'159545',name:'港股通红利低波ETF易方达'},{code:'159352',name:'A500ETF南方'}],hold:[{code:'159941',name:'纳指ETF广发',cost:1.532,num:500},{code:'563020',name:'红利低波ETF易方达',cost:1.152,num:500},{code:'159545',name:'港股通红利低波ETF易方达',cost:1.282,num:300},{code:'159352',name:'A500ETF南方',cost:1.244,num:2300}],ai:{},trades:[],profile:null};
-var CFG={auto:10,minLive:1,minLine:'auto',minSub:'macdfs',apiUrl:'',apiKey:'',model:'deepseek-chat',useLLM:0,
+var CFG={auto:10,minLive:1,minLine:'auto',minSub:'macdfs',apiUrl:'',apiKey:'',model:'deepseek-v4-flash',useLLM:0,
   visionModel:'',costMode:'diluted',cashLink:0,dayMode:'ths',
   autoNav:1,autoNavDate:'',maxPosPct:0,posAdv:1};   /* 多设备同步字段已移除 */
 /* maxPosPct：单只持仓上限（占总资产百分比），0=不限制。由你在设置里定，App 不替你判断高低。 */
@@ -16163,11 +16163,11 @@ function renderSet(){
    '<div class="fld"><label>启用大模型深度分析</label><select id="s_use"><option value="0"'+(CFG.useLLM?'':' selected')+'>关闭（用内置量化引擎）</option><option value="1"'+(CFG.useLLM?' selected':'')+'>开启</option></select></div>'+
    '<div class="fld"><label>接口地址（OpenAI 兼容 /chat/completions）</label><input id="s_url" value="'+(CFG.apiUrl||'')+'" placeholder="https://api.deepseek.com/v1/chat/completions"></div>'+
    '<div class="fld"><label>API Key</label><input id="s_key" type="password" value="'+(CFG.apiKey||'')+'" placeholder="sk-..."></div>'+
-   '<div class="fld"><label>模型名</label><input id="s_model" value="'+(CFG.model||'')+'" placeholder="deepseek-chat"></div>'+
+   '<div class="fld"><label>模型名</label><input id="s_model" value="'+(CFG.model||'')+'" placeholder="deepseek-v4-flash"></div>'+
    '<div class="fld"><label>超时（秒）</label><input id="s_llmms" type="number" inputmode="numeric" value="'+((+CFG.llmMs>0)?Math.round(CFG.llmMs/1000):30)+'" placeholder="30"><div class="hint" style="margin-top:4px">接口慢就调大。到点没回应会自动中断并提示，不会一直卡在「分析中」。</div></div>'+
    '<div class="fld"><label>单只持仓上限（%）</label><input id="s_maxpos" type="number" inputmode="decimal" value="'+((+CFG.maxPosPct>0)?(+CFG.maxPosPct):'')+'" placeholder="不限制"><div class="hint" style="margin-top:4px">超过这个比例会在持仓页和「决策建议」里提示。留空或 0 = 不限制。这是你自己定的规矩，App 不会替你判断高低。</div></div>'+
    '<div class="fld"><label>仓位类提示</label><select id="s_posadv"><option value="1"'+(CFG.posAdv!==0?' selected':'')+'>开启</option><option value="0"'+(CFG.posAdv===0?' selected':'')+'>关闭</option></select><div class="hint" style="margin-top:4px">包含：单只超上限、现金占比偏高、接近满仓。觉得这几条是噪音可以关掉，基金类提示不受影响。</div></div>'+
-   '<div class="hint">开启后，点个股页「深度解读」或 AI 页「大模型深度复盘」会调用该接口。Key 只存在本机。<br>示例：DeepSeek = <b>https://api.deepseek.com/v1/chat/completions</b> + <b>deepseek-chat</b></div>'+
+   '<div class="hint">开启后，点个股页「深度解读」或 AI 页「大模型深度复盘」会调用该接口。Key 只存在本机。<br>示例：DeepSeek = <b>https://api.deepseek.com/v1/chat/completions</b> + <b>deepseek-v4-flash</b></div>'+
    '</div></div>'+
    '<button class="btn" id="s_edit">✎ 编辑持仓数据（改份额/成本）</button><button class="btn g" id="s_demo">载入示例数据（不影响现有持仓）</button>'+
    '<div id="s_sync" style="display:flex;align-items:center;gap:9px;padding:8px 10px;margin:8px 0;border:1px solid var(--line);border-radius:9px;background:var(--card2);cursor:pointer">'+

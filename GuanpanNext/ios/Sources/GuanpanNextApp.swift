@@ -194,94 +194,6 @@ private struct RouteDestination: View {
     }
 }
 
-private struct OverviewScreen: View {
-    @EnvironmentObject private var model: NextAppModel
-    @Environment(\.gp) private var p
-    private var valuation: NextAssetValuation { book.valuation(using: model.quotes, at: Date()) }
-    private var book: NextBook { model.book }
-    private var positionMarketValue: Decimal? {
-        let active = book.positions.filter { $0.units > 0 }
-        guard active.allSatisfy({ model.quotes[$0.code]?.usableForDisplay(at: Date()) == true }) else { return nil }
-        return active.reduce(Decimal.zero) { total, position in
-            total + (model.quotes[position.code]?.quote.price ?? 0) * Decimal(position.units)
-        }
-    }
-    private var floatingProfit: Decimal? {
-        guard let positionMarketValue else { return nil }
-        return positionMarketValue - book.positions.reduce(Decimal.zero) { $0 + $1.bookCost }
-    }
-    private var realizedProfit: Decimal { book.fills.reduce(Decimal.zero) { $0 + $1.realized } }
-    var body: some View {
-        GPPageBackground {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(Date.now.formatted(.dateTime.month(.abbreviated).day().weekday(.wide))).font(.subheadline).foregroundStyle(p.muted)
-                        Text("今天，先看组合状态").font(.system(.title2, design: .serif).weight(.semibold)).foregroundStyle(p.ink)
-                        Text("场内资产 · 本机优先 · 数据有出处").font(.caption).foregroundStyle(p.muted)
-                    }
-                    Spacer()
-                    NavigationLink(value: GPRoute.alerts) { Image(systemName: "bell.badge").font(.system(size: 19)).foregroundStyle(p.forest).frame(width: 44, height: 44).background(p.tint, in: Circle()) }.accessibilityLabel("通知中心")
-                }.padding(.top, 8).padding(.bottom, 20)
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack { Text("真实场内资产").font(.caption.weight(.medium)).foregroundStyle(p.muted); Spacer(); Text("仅账本与新鲜行情").font(.caption2).foregroundStyle(p.muted) }
-                    if let total = valuation.total { Text("¥\(NextMoney.text(total))").gpFont(size: 36, relativeTo: .largeTitle, weight: .medium, design: .rounded).monospacedDigit().foregroundStyle(p.ink).minimumScaleFactor(0.75).lineLimit(1) }
-                    else { Text("行情待连接").font(.system(.title, design: .serif).weight(.medium)).foregroundStyle(p.muted) }
-                    HStack(spacing: 7) { Circle().fill(valuation.quality == .stale ? p.terracotta : p.jade).frame(width: 6, height: 6); Text(valuation.total == nil ? "仅 \(valuation.pricedPositions)/\(valuation.totalPositions) 只持仓有缓存估值；不将部分估值标作总资产" : valuation.quality.map { "\($0 == .live ? "新鲜" : "缓存")估值 · 报价截至 \(valuation.earliestQuote?.formatted(date: .omitted, time: .shortened) ?? "—")" } ?? "当前仅账本现金").font(.caption).foregroundStyle(p.muted).lineLimit(2) }
-                    Rectangle().fill(p.line).frame(height: 0.7).padding(.vertical, 3)
-                    VStack(spacing: 13) {
-                        HStack(alignment: .top) {
-                            GPValue(label: "持仓市值", value: positionMarketValue.map { "¥\(NextMoney.text($0))" } ?? "行情不完整", footnote: "按本机缓存行情估值")
-                            Spacer(minLength: 12)
-                            GPValue(label: "账本现金", value: "¥\(NextMoney.text(book.cash))")
-                        }
-                        HStack(alignment: .top) {
-                            GPValue(label: "浮动盈亏", value: floatingProfit.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: "持仓市值 − 持仓成本", emphasis: floatingProfit.map { p.changeTone(NextNum.double($0)) })
-                            Spacer(minLength: 12)
-                            let totalProfit = floatingProfit.map { $0 + realizedProfit }
-                            GPValue(label: "累计损益", value: totalProfit.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "—", footnote: "含已实现与浮动", emphasis: totalProfit.map { p.changeTone(NextNum.double($0)) })
-                        }
-                        HStack(spacing: 7) {
-                            Image(systemName: "sun.max")
-                            Text("今日变化")
-                            Spacer()
-                            Text(valuation.dailyChange.map { "\($0 >= 0 ? "+" : "")¥\(NextMoney.text($0))" } ?? "需完整新鲜行情")
-                                .monospacedDigit().font(.subheadline.weight(.semibold))
-                                .foregroundStyle(valuation.dailyChange.map { p.changeTone(NextNum.double($0)) } ?? p.muted)
-                        }.font(.caption.weight(.medium)).foregroundStyle(p.muted).padding(.top, 1)
-                    }
-                }.padding(18)
-                    .background(LinearGradient(colors: [p.heroSurface, p.paper], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(p.chartViolet.opacity(0.16), lineWidth: 0.8))
-                EditorialSection(title: "需要你留意", trailing: "\(model.preferences.notifications.unreadCount) 条未读") {
-                    if model.preferences.notifications.alerts.isEmpty {
-                        HStack(spacing: 10) { Image(systemName: "checkmark.seal").foregroundStyle(p.forest); Text("暂无待处理提醒").font(.subheadline).foregroundStyle(p.ink); Spacer(); NavigationLink(value: GPRoute.alerts) { Image(systemName: "arrow.up.right").foregroundStyle(p.muted) } }
-                    } else {
-                        ForEach(model.preferences.notifications.alerts.prefix(3)) { alert in VStack(alignment: .leading, spacing: 4) { Text(alert.title).font(.subheadline.weight(.semibold)); Text(alert.detail).font(.caption).foregroundStyle(p.muted); Text(alert.stamp.label(now: Date())).font(.caption2.monospaced()).foregroundStyle(p.muted) }.padding(.vertical, 5) }
-                        NavigationLink("查看通知记录", value: GPRoute.alerts).font(.caption.weight(.medium)).foregroundStyle(p.forest)
-                    }
-                }
-                EditorialSection(title: "持仓速览", trailing: "\(book.positions.count) 只") {
-                    if book.positions.isEmpty { GPStatus(title: "场内账本从空白开始", detail: "添加你确认的证券持仓；没有验证的备份不会被覆盖。", symbol: "tray") }
-                    else {
-                        ForEach(book.positions.sorted { lhs, rhs in
-                            let left = (model.quotes[lhs.code]?.quote.price ?? 0) * Decimal(lhs.units)
-                            let right = (model.quotes[rhs.code]?.quote.price ?? 0) * Decimal(rhs.units)
-                            return left == right ? lhs.code < rhs.code : left > right
-                        }) { position in
-                            InstrumentRow(code: position.code, name: position.name, units: position.units, quote: model.quotes[position.code])
-                        }
-                    }
-                    NavigationLink(value: GPRoute.instrument(model.watch.first ?? "159941")) { Label("浏览关注证券", systemImage: "arrow.up.right").font(.caption.weight(.semibold)).foregroundStyle(p.forest) }.padding(.top, 3)
-                }
-                EditorialSection(title: "接着做") {
-                    NavigationLink(value: GPRoute.decision(nil)) { IntentRow(icon: "sparkles", title: "分析买入机会", detail: "先组织行情、持仓、预算与风险") }
-                }
-            }
-        }.safeAreaInset(edge: .bottom) { Color.clear.frame(height: 4) }
-    }
-}
-
 private struct MarketScreen: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
@@ -1186,10 +1098,7 @@ private struct AssetsScreen: View {
                             if event.status == .expected { Button("确认到账") { assetsConfirm = .income(event.id) }.font(.caption.weight(.semibold)).tint(p.forest) }
                         }
                     }
-                    let allEvents = NextDividendAnalytics.merged(model.book.dividendEvents + model.dividendEvents.values.flatMap { $0 })
-                    ForEach(allEvents.sorted { $0.date > $1.date }.prefix(8)) { event in
-                        GPDataRow(title: "\(event.code) · 除息日 \(event.date)", value: "每份 ¥\(NextMoney.text(event.amountPerShare, digits: 3))", note: event.isEstimated == true ? "复权价格推算 · 非确认现金派息" : "已记录派息事件 · 不是未来收益承诺")
-                    }
+                    Text("完整派息历史已归入「收息」页，这里只保留真实到账的收息记录，避免同一份数据两处重复。")
                 }
                 EditorialSection(title: "现金变动", trailing: "可用 ¥\(NextMoney.text(model.book.cash))") {
                     HStack { Button("转入") { cashDirection = 1 }; Button("转出") { cashDirection = -1 }.foregroundStyle(p.risk) }.buttonStyle(.bordered)
@@ -1215,9 +1124,8 @@ private struct AssetsScreen: View {
                     if let latest = model.book.cashMovements.last { GPDataRow(title: latest.reason, value: "\(latest.amount >= 0 ? "+" : "")¥\(NextMoney.text(latest.amount))", note: latest.date.formatted(date: .numeric, time: .shortened)) }
                 }
                 EditorialSection(title: "安全与数据") {
-                    NavigationLink(value: GPRoute.fills) { IntentRow(icon: "clock.arrow.circlepath", title: "审计与撤销", detail: "查看真实账本修改记录") }
-                    NavigationLink(value: GPRoute.backups) { IntentRow(icon: "externaldrive.badge.timemachine", title: "备份与恢复", detail: "先校验备份，再确认恢复") }
                     Button { assetsConfirm = .undo } label: { IntentRow(icon: "arrow.uturn.backward", title: "撤销最近账本变更", detail: "仅当账本仍匹配该审计版本时可撤销") }.buttonStyle(.plain)
+                    Text("审计记录与备份恢复已归入「我的」页，这里不再重复放置。").font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                 }
             }
         }.sheet(isPresented: $addPosition) { AddPositionSheet { code, name, units, cost, acquiredAt in do { try model.addPosition(code: code, name: name, units: units, cost: cost, acquiredAt: acquiredAt) } catch { model.errorMessage = error.localizedDescription } } }
@@ -1958,6 +1866,127 @@ private struct DividendEventRow: View {
     }
 }
 
+/// 股息买入参考（收息页首卡）。口径对齐常见「股息率更新」表：
+///   近12个月每份已核实派息 ÷ 现价 = 当前股息率
+///   目标买入价 = 近12个月每份已核实派息 ÷ 目标股息率
+///   买入点参考「目标价 +15% 以内」（与该表备注一致）
+/// 只用已核实派息，不用推算值冒充；下次分红按最近一次除息月份外推，标注为预估。
+private struct DividendAdviceCard: View {
+    @EnvironmentObject private var model: NextAppModel
+    @Environment(\.gp) private var p
+    @State private var entry = ""
+    @State private var code: String?
+    @State private var targetYieldText = "4"
+    @State private var loading = false
+    @State private var note: String?
+
+    private var targetYield: Decimal { Decimal(string: targetYieldText.trimmingCharacters(in: .whitespaces)) ?? 0 }
+    private var events: [NextETFDividendEvent] {
+        guard let code else { return [] }
+        let merged = NextDividendAnalytics.merged(model.book.dividendEvents + (model.dividendEvents[code] ?? []))
+        return merged.filter { $0.code == code }
+    }
+    private var perShare: Decimal {
+        guard let code else { return 0 }
+        return NextDividendAnalytics.recentVerifiedPerShare(code: code, events: events, today: dividendTodayString())
+    }
+    private var quote: NextQuote? {
+        guard let code else { return nil }
+        return model.quotes[code]?.quote
+    }
+    private var displayName: String {
+        guard let code else { return "" }
+        return quote?.name ?? model.book.positions.first(where: { $0.code == code })?.name ?? knownName(code)
+    }
+    private var yieldPercent: Decimal? {
+        guard let price = quote?.price, price > 0, perShare > 0 else { return nil }
+        return perShare / price * 100
+    }
+    private var targetPrice: Decimal? {
+        guard targetYield > 0, perShare > 0 else { return nil }
+        return perShare / (targetYield / 100)
+    }
+    private var nextDividendText: String? {
+        let confirmed = events.filter { $0.isEstimated != true }.map(\.date).sorted()
+        guard let last = confirmed.last else { return nil }
+        let parts = last.split(separator: "-")
+        guard parts.count == 3, let year = Int(parts[0]), let month = Int(parts[1]) else { return nil }
+        return "预计 \(year + 1) 年 \(month) 月前后（按最近除息日 \(last) 外推）"
+    }
+    private var advice: (headline: String, detail: String, tone: Color)? {
+        guard code != nil else { return nil }
+        guard let price = quote?.price, price > 0 else {
+            return ("还没拿到这只的行情", "点「查询」会自动拉现价与派息历史；离线时只显示本机缓存。", p.muted)
+        }
+        guard perShare > 0 else {
+            return ("近 12 个月没有已核实派息", "无法计算股息率与目标买入价；不会用推算值冒充已核实分红。", p.muted)
+        }
+        guard let target = targetPrice, target > 0 else {
+            return ("先填目标股息率", "目标买入价 = 近12个月每份 ¥\(NextMoney.text(perShare, digits: 3)) ÷ 目标股息率。", p.muted)
+        }
+        let premium = (price / target - 1) * 100
+        let current = NextMoney.text(perShare / price * 100, digits: 3)
+        if price <= target {
+            return ("现价不高于目标买入价，值得关注", "当前股息率 \(current)%，已达到目标 \(NextMoney.text(targetYield, digits: 1))%。", p.jade)
+        }
+        if premium <= 15 {
+            return ("在目标价 +15% 以内，可分批", "当前股息率 \(current)%，比目标买入价 ¥\(NextMoney.text(target, digits: 3)) 高 \(NextMoney.text(premium, digits: 1))%。", p.chartGold)
+        }
+        return ("高于目标价，建议等回落", "当前股息率 \(current)%，比目标买入价 ¥\(NextMoney.text(target, digits: 3)) 高 \(NextMoney.text(premium, digits: 1))%；价越低股息率越高。", p.terracotta)
+    }
+
+    var body: some View {
+        EditorialSection(title: "股息买入参考", trailing: "推荐", accent: p.chartGold) {
+            Text("输入代码查一只标的的股息率、目标买入价与下次分红预估。口径是近 12 个月已核实派息 ÷ 现价；买入点参考「目标价 +15% 以内」，不是下单建议。")
+                .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                TextField("输入 6 位代码，如 159941", text: $entry).keyboardType(.numberPad).textFieldStyle(.roundedBorder).submitLabel(.done)
+                Button(loading ? "查询中…" : "查询", action: query).buttonStyle(.borderedProminent).tint(p.forest).disabled(loading)
+            }
+            if !displayName.isEmpty { Text("\(displayName) · \(code ?? entry)").font(.subheadline.weight(.semibold)).foregroundStyle(p.ink) }
+            if let note { Text(note).font(.caption).foregroundStyle(p.muted) }
+            if code != nil {
+                GPDataRow(title: "现价", value: quote.map { "¥\(NextMoney.text($0.price, digits: 3))" } ?? "—", note: quote.map { "行情 \($0.time.formatted(date: .omitted, time: .shortened))" } ?? "点查询刷新行情")
+                GPDataRow(title: "近12个月每份派息（已核实）", value: perShare > 0 ? "¥\(NextMoney.text(perShare, digits: 3))" : "—", note: perShare > 0 ? "只统计已核实派息" : "无已核实记录")
+                GPDataRow(title: "当前股息率", value: yieldPercent.map { "\(NextMoney.text($0, digits: 3))%" } ?? "—", note: "每份派息 ÷ 现价")
+                GPDataRow(title: "目标买入价", value: targetPrice.map { "¥\(NextMoney.text($0, digits: 3))" } ?? "—", note: "按目标股息率 \(NextMoney.text(targetYield, digits: 1))% 反推")
+                GPDataRow(title: "下次分红", value: nextDividendText ?? "—", note: "按历史除息月份外推，以基金公告为准")
+                if let advice {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(advice.headline).font(.subheadline.weight(.semibold)).foregroundStyle(advice.tone)
+                        Text(advice.detail).font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                    }.padding(.vertical, 4)
+                }
+                HStack(spacing: 6) {
+                    Text("目标股息率 %").font(.caption2).foregroundStyle(p.muted)
+                    TextField("4", text: $targetYieldText).keyboardType(.decimalPad).textFieldStyle(.roundedBorder).frame(width: 64)
+                }
+            }
+        }
+    }
+
+    private func query() {
+        let value = entry.trimmingCharacters(in: .whitespaces)
+        guard value.count == 6, value.allSatisfy(\.isNumber) else { note = "请输入 6 位场内证券代码"; return }
+        note = nil; loading = true
+        let target = value
+        code = target
+        Task {
+            await model.refreshDividendHistory(target)
+            await model.refreshInstrument(target)
+            loading = false
+        }
+    }
+}
+
+private func dividendTodayString() -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter.string(from: Date())
+}
+
 private struct DividendHistoryScreen: View {
     @EnvironmentObject private var model: NextAppModel
     @Environment(\.gp) private var p
@@ -1977,6 +2006,7 @@ private struct DividendHistoryScreen: View {
     private var sectionTrailing: String { "\(events.count) 条" }
     var body: some View {
         GPPageBackground {
+            DividendAdviceCard()
             EditorialSection(title: sectionTitle, trailing: sectionTrailing) {
                 Text("这里记录基金公告或历史数据源中的派息事件，不等于你在除息日实际持有的份额，也不代表现金已到账。已到账金额请以券商流水核对后录入资产账本。")
                     .font(.caption).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)

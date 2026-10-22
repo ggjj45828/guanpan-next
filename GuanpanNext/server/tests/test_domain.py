@@ -269,7 +269,7 @@ class IndependentWorkersTests(unittest.TestCase):
 
     def test_deepseek_profiles_and_missing_key_do_not_fake_ai(self):
         from ai import PROFILES, generate_research, provider_status, verify_provider, AIProviderError
-        self.assertEqual(PROFILES["flash"]["model"], "deepseek-flash")
+        self.assertEqual(PROFILES["flash"]["model"], "deepseek-v4-flash")
         self.assertEqual(PROFILES["pro"]["model"], "deepseek-v4-pro")
         factors = {"code": "159941", "asOf": "2026-10-16", "source": "source",
             "close": "1.2", "ma20": "1.1", "ma250": "1.0", "momentum20": "0.1", "drawdown20": "-0.02"}
@@ -378,7 +378,7 @@ class AIAnalysisTests(unittest.TestCase):
             result = analyze_user_context(self.context(), api_key="nas-secret", opener=opener)
         self.assertEqual(result["code"], "159941")
         self.assertFalse(result["realOrder"])
-        self.assertEqual(result["model"], "deepseek-flash")
+        self.assertEqual(result["model"], "deepseek-v4-flash")
         self.assertEqual(captured["request"].get_header("Authorization"), "Bearer nas-secret")
         sent = json.loads(captured["request"].data)
         self.assertIn("dailyBars", json.loads(sent["messages"][1]["content"]))
@@ -433,7 +433,7 @@ class HTTPTests(unittest.TestCase):
         self.assertIn("未配置", result["error"])
 
     def test_on_demand_ai_route_returns_research_without_real_order(self):
-        expected = {"code": "159941", "provider": "DeepSeek", "model": "deepseek-flash", "content": "等待", "realOrder": False}
+        expected = {"code": "159941", "provider": "DeepSeek", "model": "deepseek-v4-flash", "content": "等待", "realOrder": False}
         with patch("app.analyze_user_context", return_value=expected) as call:
             status, result = self.request("POST", "/v1/ai/analyze", {"userConfirmed": True, "context": {"security": {"code": "159941"}}})
         self.assertEqual(status, 200)
@@ -447,7 +447,7 @@ class HTTPTests(unittest.TestCase):
             status, value = self.request("GET", "/v1/research/159941")
         self.assertEqual(status, 200)
         self.assertEqual(value["providerStatus"]["state"], "configured_unverified")
-        self.assertEqual(value["providerStatus"]["model"], "deepseek-flash")
+        self.assertEqual(value["providerStatus"]["model"], "deepseek-v4-flash")
         self.assertNotIn(secret, json.dumps(value))
 
     def test_real_records_are_available_without_app_passphrase(self):
