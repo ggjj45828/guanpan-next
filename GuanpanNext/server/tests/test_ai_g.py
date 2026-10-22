@@ -78,3 +78,32 @@ class DeepSeekGPlanTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class DeepSeekEmptyContentTests(unittest.TestCase):
+    """V4 默认思考模式下，思考过程会先吃掉 token，正文可能为空。
+
+    这时必须给出能定位的原因（思考过程长度、finish_reason），
+    而不是一句看不出所以然的"返回空内容"——那样会被误判成网络故障（HTTP 503）。
+    """
+
+    def test_returns_content_when_present(self):
+        from ai import _message_content
+        self.assertEqual(_message_content({"choices": [{"message": {"content": "你好"}}]}), "你好")
+
+    def test_empty_content_reports_reasoning_and_finish_reason(self):
+        from ai import AIProviderError, _message_content
+        payload = {"choices": [{"message": {"content": "", "reasoning_content": "先想一想"},
+                                "finish_reason": "length"}]}
+        with self.assertRaises(AIProviderError) as caught:
+            _message_content(payload)
+        text = str(caught.exception)
+        self.assertIn("思考过程", text)
+        self.assertIn("finish_reason=length", text)
+        self.assertIn("max_tokens", text)
+
+    def test_malformed_choices_are_rejected(self):
+        from ai import AIProviderError, _message_content
+        for bad in ({"choices": []}, {}, {"choices": [{"message": None}]}):
+            with self.assertRaises(AIProviderError):
+                _message_content(bad)

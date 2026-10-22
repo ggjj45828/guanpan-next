@@ -48,13 +48,40 @@ class AIProviderError(OSError):
         super().__init__(category)
 
 
+def _message_content(result, label="DeepSeek"):
+    """取模型正文；正文为空时把原因讲清楚。
+
+    deepseek-v4-flash / deepseek-v4-pro **默认开启思考模式**：模型先吐推理过程
+    （reasoning_content）再吐正文，两者共用 max_tokens。额度给小了，token 全被思考过程
+    吃掉，正文就是空字符串 —— 表现为「DeepSeek 返回空内容」+ HTTP 503，看起来像网络故障，
+    其实是额度问题。这里把 reasoning_content 长度和 finish_reason 一起报出来，下次一眼定位。
+    """
+    try:
+        message = result["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        raise AIProviderError(f"{label} 返回格式无效")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str) and content.strip():
+        return content
+    reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+    choices = result.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+    detail = [f"只拿到思考过程 {len(reasoning)} 字而正文为空" if reasoning else "正文与思考过程均为空"]
+    if finish: detail.append(f"finish_reason={finish}")
+    detail.append("V4 默认思考模式会先占用 token，加大 max_tokens 即可")
+    raise AIProviderError(f"{label} 返回空内容：" + "；".join(detail))
+
+
 def verify_provider(opener=urlopen):
     """Perform an explicit, minimal connectivity probe without sending portfolio data."""
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if not api_key: raise AIProviderError("NAS 尚未配置 DeepSeek API key")
     try: profile = profile_from_environment()
     except ValueError as error: raise AIProviderError("DeepSeek 模型配置无效") from error
-    payload = {"model": profile["model"], "stream": False, "max_tokens": 8,
+    # 探针也要给够额度：V4 默认思考模式下，思考过程会先占用 token，
+    # max_tokens=8 时正文必空，探针就会被误判成"key 无效/网络异常"。
+    payload = {"model": profile["model"], "stream": False, "max_tokens": 1024,
                "messages": [{"role": "user", "content": "Reply with OK only."}]}
     request = Request(profile["base"] + "/chat/completions",
                       data=json.dumps(payload).encode(), method="POST",
@@ -62,10 +89,9 @@ def verify_provider(opener=urlopen):
                                "Content-Type": "application/json", "Accept": "application/json"})
     try:
         with opener(request, timeout=20) as response:
+            if response.status != 200: raise AIProviderError("DeepSeek 探针响应无效")
             result = json.loads(response.read(1_000_000))
-            content = result["choices"][0]["message"]["content"]
-            if response.status != 200 or not isinstance(content, str) or not content.strip():
-                raise AIProviderError("DeepSeek 探针响应无效")
+        content = _message_content(result, "DeepSeek 探针")
     except HTTPError as error:
         if error.code in (401, 403): category = "DeepSeek key 无效或无权限"
         elif error.code == 429: category = "DeepSeek 请求频率或额度受限"
@@ -91,7 +117,7 @@ def generate_research(factors, api_key=None, profile=None, opener=urlopen):
               "source": factors["source"], "close": factors["close"],
               "ma20": factors["ma20"], "ma250": factors["ma250"],
               "momentum20": factors["momentum20"], "drawdown20": factors["drawdown20"]}
-    payload = {"model": profile["model"], "stream": False, "max_tokens": 900,
+    payload = {"model": profile["model"], "stream": False, "max_tokens": 4096,
                "messages": [
                    {"role": "system", "content": "你是投资研究助手。仅使用给定的有日期与来源的数据。区分事实、推断、风险和等待条件；缺失信息请说未知。不得声称已下单，不得凭空给出 IOPV、盘口或交易规则。用中文简洁回答。"},
                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}]}
@@ -115,8 +141,7 @@ def generate_research(factors, api_key=None, profile=None, opener=urlopen):
         raise AIProviderError(category) from None
     except json.JSONDecodeError as error:
         raise AIProviderError("DeepSeek 返回内容无法解析") from error
-    content = result["choices"][0]["message"]["content"]
-    if not isinstance(content, str) or not content.strip(): raise AIProviderError("DeepSeek 返回空内容")
+    content = _message_content(result)
     return {"code": factors["code"], "asOf": factors["asOf"], "source": factors["source"],
             "provider": "DeepSeek", "model": profile["model"], "content": content[:10000],
             "realOrder": False}
@@ -247,7 +272,7 @@ def analyze_user_context(context, api_key=None, profile=None, opener=urlopen):
     api_key = api_key.strip() if isinstance(api_key, str) else ""
     if not api_key: raise AIProviderError("NAS 尚未配置 DeepSeek API key")
     profile = profile or profile_from_environment()
-    payload = {"model": profile["model"], "stream": False, "max_tokens": 1200,
+    payload = {"model": profile["model"], "stream": False, "max_tokens": 4096,
         "messages": [
             {"role": "system", "content": "你是谨慎的 ETF 私人投资研究助手。用户已明确请求本次分析，并同意将下面精简后的单证券数据发送给模型。只使用提供的数据；区分结论、事实依据、推断、风险、建议观察区间、等待/分档方案和失效条件。不可把分析转换为真实委托，不可假造缺失的 IOPV、盘口、交易规则、价格目标或收益。历史 K 线不代表未来。若缺少数据或可靠估值依据，必须明确说不能给出合理买价。"},
             {"role": "user", "content": encoded}
@@ -271,9 +296,7 @@ def analyze_user_context(context, api_key=None, profile=None, opener=urlopen):
         raise AIProviderError(category) from None
     except json.JSONDecodeError as error:
         raise AIProviderError("DeepSeek 返回内容无法解析") from error
-    try: content = result["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as error: raise AIProviderError("DeepSeek 返回格式无效") from error
-    if not isinstance(content, str) or not content.strip(): raise AIProviderError("DeepSeek 返回空内容")
+    content = _message_content(result)
     return {"code": code, "provider": "DeepSeek", "model": profile["model"], "content": content[:16000], "realOrder": False}
 
 
@@ -335,7 +358,7 @@ def generate_g_twin_plan(context, api_key=None, profile=None, opener=urlopen):
     model_context = {key: value for key, value in context.items() if key != "dailyBars"}
     model_context["dailyBars"] = {code: [[row[k] for k in ("date", "open", "high", "low", "close", "volume")]
                                          for row in context["dailyBars"][code][-250:]] for code in codes}
-    payload = {"model": profile["model"], "stream": False, "max_tokens": 1100,
+    payload = {"model": profile["model"], "stream": False, "max_tokens": 4096,
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": "你是 G 数字孪生的 AI 研究员。只可使用输入中的真实日 K、虚拟账户和规则，不得声称真实下单。dailyBars 每条按 [date,open,high,low,close,volume] 排列。必须只返回符合指定 JSON 结构的对象。目标权重必须是 0 到 1 的字符串，所有权重之和不得超过 1，剩余资金留在虚拟现金。不得输出虚构价格、盘口、成交或交易制度。数据不足时保持现金权重（所有证券目标权重为 0），并在 risks 说明缺口。"},
@@ -347,8 +370,7 @@ def generate_g_twin_plan(context, api_key=None, profile=None, opener=urlopen):
         with opener(request, timeout=45) as response:
             if response.status != 200: raise AIProviderError("DeepSeek G 研究返回异常状态")
             result = json.loads(response.read(1_000_000))
-        content = result["choices"][0]["message"]["content"]
-        if not isinstance(content, str): raise AIProviderError("DeepSeek G 研究响应无效")
+        content = _message_content(result, "DeepSeek G 研究")
         body = json.loads(content)
     except HTTPError as error:
         if error.code in (401, 403): category = "DeepSeek key 无效或无权限"
