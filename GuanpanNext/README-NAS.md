@@ -34,10 +34,20 @@
 ## 更新：覆盖文件 + 重启，不需要重建镜像
 
 `compose.yml` 把宿主机 `./server` 只读挂到容器的 `/opt/guanpan-src`，容器启动时由
-`server/start.sh` 把它同步进 `/app`。镜像里仍然带一份代码作为**兜底基线**，所以：
+`server/start.sh` 决定跑哪一份。镜像里也带一份代码作为**兜底基线**，规则是：
 
-- 宿主机代码存在 → 用宿主机的（更新就是覆盖 + 重启）；
-- 宿主机代码缺失 → 退回镜像内置版本，**服务照常起来**。
+- **两边都读 `VERSION`，谁的版本新就用谁**（`sort -V` 比较）；
+- 挂载源为空/没有 `app.py` → 用镜像内置那份；
+- 挂载源是旧代码、镜像更新 → 用镜像那份（不会被旧挂载拖住）。
+
+这样"挂载没落对位置"不再等于"永远跑旧代码"。启动时还会把结论写进 `/app/.code-source`，
+由 `/health` 的 `codeSource` 暴露，一眼看出走的是哪条路：
+
+| `codeSource` | 含义 |
+|---|---|
+| `host /opt/guanpan-src (版本 x)` | 用的是宿主机挂载进来的代码 ✅ |
+| `image (未检测到 …/app.py，用的镜像内置代码)` | 挂载源是空的，跑的是镜像里的 |
+| `image (挂载源 … 版本 a 不比镜像内置 b 新，沿用镜像内置)` | 你把新包解到了别处，挂载源那份更旧 |
 
 > 为什么不再直接挂 `/app`：`./server` 在 NAS 上解析不到时（目录名不对、更新包解到了子目录、
 > 面板把 compose 拷到别处执行），Docker 会建一个空目录挂上去，把镜像里的代码整个盖住，
@@ -45,12 +55,16 @@
 
 1. 把更新包里的 `server/` 整个覆盖到 NAS 部署目录的 `server/`（同名文件直接覆盖，`tests/` 可一并覆盖）。
    覆盖后请确认 `compose.yml` 同级确实存在 `server/app.py` —— 这是唯一会让更新失效的地方。
+   - 不确定部署目录在哪？`docker inspect <容器名> --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}'`
+     看 Source 那一列；或者直接在 `.env` 里写死 `GUANPAN_CODE_DIR=/绝对路径/server`，一劳永逸。
 2. 重启这个项目。命令行用 `docker compose restart guanpan-next`；极空间等面板点「重启」即可。
    - 只有**第一次**从旧结构升级（compose 里还是 `./server:/app:ro`）时，需要先替换 `compose.yml`，
      再执行一次 `docker compose up -d`（按新配置**重建容器**，不重新构建镜像），之后都只重启。
-3. 确认生效：`curl http://127.0.0.1:30001/health` 看 `codeVersion`。
-   它必须等于更新包 `server/VERSION` 里的值；没变就是文件没覆盖对或容器没重启。
-   Python 已经加载的模块不会自己重载，所以“只覆盖不重启”不会生效。
+   - 想彻底不依赖挂载落位：`docker compose up -d --build --force-recreate` 把新代码直接打进镜像，
+     镜像那份就是最新的，无论挂载有没有落对都会跑新代码。
+3. 确认生效：`curl http://127.0.0.1:30001/health` 同时看 `codeVersion` 与 `codeSource`。
+   `codeVersion` 必须等于更新包 `server/VERSION` 里的值；没变就是文件没覆盖对或容器没重启。
+   Python 已经加载的模块不会自己重载，所以"只覆盖不重启"不会生效。
    容器日志开头还会打印 `[start] 已同步宿主机代码 -> 版本 …` 或 `[start] 未检测到宿主机代码…`，
    一看就知道走的是哪条路。
 

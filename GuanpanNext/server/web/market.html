@@ -121,8 +121,9 @@ details.exlist .body{padding:6px 10px}
     <div class="card">
       <h2>行情图表 <span class="tag t">分时 / 日K</span></h2>
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-        <select id="chartCode" style="width:170px"></select>
-        <button class="act mini" onclick="openChart()">打开</button>
+        <!-- 自动：进来就已选中第一只持仓并画好图；点持仓/自选卡片、指数都会自动切到这里 -->
+        <select id="chartCode" style="width:170px" onchange="openChart()" title="会自动跟随你的持仓/自选，也可手动切换"></select>
+        <button class="act mini" onclick="openChart()">刷新</button>
         <div class="chips" id="chartKind" style="margin:0">
           <span class="chip on" data-k="day" onclick="setKind('day')">日K</span>
           <span class="chip" data-k="intraday" onclick="setKind('intraday')">分时</span>
@@ -158,8 +159,8 @@ details.exlist .body{padding:6px 10px}
         <button class="act mini" onclick="runAI()">跑 AI 分析</button>
         <button class="act mini" onclick="verifyAI()">验证 AI</button>
       </div>
-      <div class="sm mut">选持仓里的标的即可，无需手输代码；分析上下文由 NAS 服务端用账本+行情+日K+分红自动拼装。</div>
-      <div id="aiBody" class="sm mut">输入代码查询。</div>
+      <div class="sm mut">标的自动列出（持仓 + 自选），直接点「跑 AI 分析」即可，不用手输代码；分析上下文由 NAS 服务端用账本+行情+日K+分红自动拼装。</div>
+      <div id="aiBody" class="sm mut">选好标的后点「跑 AI 分析」。</div>
     </div>
   </section>
 
@@ -209,7 +210,9 @@ let CHART={bars:null,rows:null,div:null,code:null,name:null,prevClose:null,intra
 async function api(path, opts){
   const r = await fetch(path, opts||{});
   const v = await r.json().catch(()=>({error:"响应非 JSON"}));
-  if(!r.ok) throw new Error(v.error||("HTTP "+r.status));
+  // 带上状态码与服务端原文：AI 分析失败时要能分清是 400（模型名/请求格式）、
+  // 401/403（key 没配）还是 5xx（NAS 出不了网），否则用户只看到一句"分析失败"。
+  if(!r.ok){ const e=new Error(v.error||("HTTP "+r.status)); e.status=r.status; e.serverError=v.error||""; e.payload=v; throw e; }
   return v;
 }
 function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("show");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("show"),2200);}
@@ -224,6 +227,7 @@ document.querySelectorAll("#nav button").forEach(b=>b.onclick=()=>{
   if(b.dataset.tab==="watch"){ loadQuotes(getWatch()); loadWorth(); }
   if(b.dataset.tab==="hold") loadBook();
   if(b.dataset.tab==="alert") renderAlerts();
+  if(b.dataset.tab==="chart" && !CHART.code) openChart();   // 切到图表页自动画，不用手动选代码
 });
 
 // ---------- 指数（可点进看曲线） ----------
@@ -241,7 +245,7 @@ async function loadIndices(){
 
 // ---------- 自选 ----------
 function getWatch(){ if(!WATCH.length) WATCH=JSON.parse(localStorage.getItem("gp_watch")||"[]"); return WATCH; }
-function setWatch(){ localStorage.setItem("gp_watch", JSON.stringify(WATCH)); renderWatchChips(); renderChartCodeOptions(); }
+function setWatch(){ localStorage.setItem("gp_watch", JSON.stringify(WATCH)); renderWatchChips(); renderChartCodeOptions(); renderAICode(); }
 function renderWatchChips(){
   const c=$("watchChips"); c.innerHTML="";
   getWatch().forEach(code=>{
@@ -346,16 +350,22 @@ function normalizeBook(){
 function bookCash(){ return Number(BOOK.cash||0); }
 function renderAICode(){
   const sel=$("aiCode"); if(!sel) return;
-  const positions=(BOOK&&BOOK.positions)||[];
-  if(!positions.length){ sel.innerHTML='<option value="">暂持仓位</option>'; return; }
-  sel.innerHTML = positions.map(p=>`<option value="${p.code}">${p.code} ${p.name||""}</option>`).join("");
+  const keep=sel.value;
+  // 持仓 + 自选都列出来：即使 NAS 账本还没上传，也能直接分析自选里的标的，不用手输代码。
+  const list=[]; const seen=new Set();
+  ((BOOK&&BOOK.positions)||[]).forEach(p=>{ if(p&&p.code&&!seen.has(p.code)){ seen.add(p.code); list.push({code:String(p.code),name:p.name||""}); } });
+  getWatch().filter(isSix).forEach(c=>{ if(!seen.has(c)){ seen.add(c); list.push({code:c,name:(QUOTES[c]&&QUOTES[c].name)||""}); } });
+  if(!list.length){ sel.innerHTML='<option value="">（暂无标的：先加自选，或在账本页导入/手机上传账本）</option>'; return; }
+  sel.innerHTML=list.map(p=>`<option value="${p.code}">${p.code} ${p.name||""}</option>`).join("");
+  if(keep&&list.some(p=>p.code===keep)) sel.value=keep;   // 自动选中，不用手填
 }
 /* 行情图表代码改成下拉：直接列出持仓 + 自选 + 常用指数，不再手填。
    指数走东财 secid（/v1/market/kline?symbol=），6 位代码走 /v1/market/daily/。 */
 const CHART_INDICES=[["1.000001","上证指数"],["0.399001","深证成指"],["0.399006","创业板指"],["1.000300","沪深300"],["100.NDX","纳斯达克100"],["100.N225","日经225"],["100.HSI","恒生指数"],["100.SPX","标普500"],["100.DJIA","道琼斯"],["100.KS11","韩国KOSPI"]];
 function renderChartCodeOptions(){
   const sel=$("chartCode"); if(!sel) return;
-  const cur=sel.value||"159941";
+  // 自动优先：当前选择 → 第一只持仓 → 第一只自选 → 159941。**不需要手填代码**。
+  const cur=sel.value||CHART.code||chartDefaultCode();
   const groups=[["持仓",(BOOK&&BOOK.positions)||[]],["自选",getWatch().map(c=>({code:c,name:(QUOTES[c]&&QUOTES[c].name)||c}))]];
   let html=""; const seen=new Set();
   groups.forEach(([label,arr])=>{
@@ -366,6 +376,21 @@ function renderChartCodeOptions(){
   sel.innerHTML=html;
   if(!Array.from(sel.options).some(o=>o.value===cur)){ const o=document.createElement("option"); o.value=cur; o.textContent=cur; sel.insertBefore(o, sel.firstChild); }
   sel.value=cur;
+  // 全自动：还没画过图就把默认标的直接画出来，进页面即可见，不用点"打开"。
+  if(!CHART.code){ CHART.code=cur; CHART.name=labelOfOption(sel,cur); loadChart(); }
+}
+/* 默认标的：第一只持仓 → 第一只自选 → 159941 */
+function chartDefaultCode(){
+  const pos=(BOOK&&BOOK.positions)||[];
+  if(pos.length&&pos[0]&&pos[0].code) return String(pos[0].code);
+  const w=getWatch().filter(isSix);
+  if(w.length) return w[0];
+  return "159941";
+}
+function labelOfOption(sel,val){
+  const o=Array.from(sel.options||[]).find(x=>x.value===val);
+  if(!o) return val;
+  return String(o.textContent||"").replace(/^\d{6}\s*/,"").trim()||val;
 }
 function ensureChartOption(value,label){
   const sel=$("chartCode"); if(!sel||!value) return;
@@ -455,7 +480,13 @@ async function saveBook(){
 }
 
 // ---------- 图表 ----------
-function openChart(){ const code=$("chartCode").value.trim(); if(!code){toast("请输入代码或指数");return;} CHART.code=code; CHART.name=code; loadChart(); }
+function openChart(){
+  const sel=$("chartCode");
+  let code=sel?(sel.value||"").trim():"";
+  if(!code){ code=chartDefaultCode(); if(sel) sel.value=code; }   // 没选就自动取默认，不再弹"请输入代码"
+  if(!code){ toast("暂无可显示的标的"); return; }
+  CHART.code=code; CHART.name=labelOfOption(sel,code); loadChart();
+}
 function setKind(k){
   if(k==="intraday" && !CHART.intradayAllowed){ toast("该标的无分时数据（仅日K）"); return; }
   document.querySelectorAll('#chartKind .chip').forEach(x=>x.classList.toggle('on', x.dataset.k===k));
@@ -721,13 +752,25 @@ async function loadResearch(){
   }catch(e){ body.className="sm mut"; body.textContent="读取失败："+e.message; }
 }
 async function runAI(){
-  const code=$("aiCode").value.trim(); if(!isSix(code)){toast("请选择持仓里的标的");return;}
+  const sel=$("aiCode"); const code=sel?(sel.value||"").trim():"";
+  if(!isSix(code)){ toast("先在下拉里选一个标的（持仓或自选）"); return; }
   const body=$("aiBody"); body.className="sm mut"; body.textContent="调用 DeepSeek 中…（需 NAS 已配置 Key，上下文由服务端拼装）";
   try{
     const v=await api("/v1/ai/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userConfirmed:true,code})});
     body.className="";
-    body.innerHTML=`<div class="status ok">分析完成（${v.provider||'deepseek'}）</div><div style="margin-top:8px;white-space:pre-wrap;font-size:12px;background:#f4f5f1;padding:10px;border-radius:8px">${escapeHtml(v.text||JSON.stringify(v,null,2))}</div>`;
-  }catch(e){ body.className="sm mut"; body.textContent="分析失败："+e.message; }
+    body.innerHTML=`<div class="status ok">分析完成（${v.provider||'deepseek'}${v.model?" · "+v.model:""}）</div><div style="margin-top:8px;white-space:pre-wrap;font-size:12px;background:#f4f5f1;padding:10px;border-radius:8px">${escapeHtml(v.text||JSON.stringify(v,null,2))}</div>`;
+  }catch(e){
+    // 失败必须说清是哪一类，否则只会看到一句"分析失败"，无从下手。
+    const st=e.status||"", raw=e.serverError||e.message||"";
+    let why="";
+    if(st===400) why="请求被 DeepSeek 拒绝（400）。最常见原因：NAS 还在跑旧代码，模型名仍是已停用的 <b>deepseek-flash</b>；部署最新版后 /health 的 model 应变成 <b>deepseek-v4-flash</b>。";
+    else if(st===401||st===403) why="密钥问题（"+st+"）：NAS 的 .env 里 DEEPSEEK_API_KEY 没填、填错或已失效，改完要重启容器。";
+    else if(String(st).startsWith("5")||!st) why="服务端/网络问题：NAS 出不了外网，或 DeepSeek 暂时不可达。可点「验证 AI」看具体原因。";
+    body.className="";
+    body.innerHTML='<div class="status err">分析失败'+(st?"（HTTP "+st+"）":"")+'</div>'
+      + (why?'<div class="sm" style="margin-top:6px">'+why+'</div>':'')
+      + '<div class="sm mut" style="margin-top:6px">服务端原文：'+escapeHtml(raw)+'</div>';
+  }
 }
 function escapeHtml(s){return String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 
