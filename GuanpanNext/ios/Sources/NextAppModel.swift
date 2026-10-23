@@ -155,6 +155,8 @@ struct LocalPreferences: Codable {
     @Published var patientLimitPlans: [NextPatientLimitPlan] { didSet { reportSave(repository.save(patientLimitPlans, filename: "patient-limit-plans-v1.json")) } }
     /// 动态投资者画像：只由真实持仓、真实成交与真实反馈学习，不使用任何模拟交易。
     @Published var profile: InvestorProfile { didSet { reportSave(repository.save(profile, filename: "investor-profile-v1.json")) } }
+    /// AI 决策记忆：保存每次建议当时的行情/持仓/研究/画像/依据，并追踪是否真实成交与后续结果。
+    @Published var decisionSnapshots: [DecisionSnapshot] { didSet { reportSave(repository.save(decisionSnapshots, filename: "decision-snapshots-v1.json")) } }
     @Published var twinBacktests: [String: NextTwinBacktest] { didSet { reportSave(repository.save(twinBacktests, filename: "twin-backtests-v1.json")) } }
     @Published var backtestStatus = "尚无本机策略回测"
     @Published var nasGAccount: NextNASGAccount?
@@ -277,9 +279,12 @@ struct LocalPreferences: Codable {
         self.patientLimitPlans = repository.load([NextPatientLimitPlan].self, filename: "patient-limit-plans-v1.json", fallback: [])
         self.twinBacktests = repository.load([String: NextTwinBacktest].self, filename: "twin-backtests-v1.json", fallback: [:])
         self.profile = repository.load(InvestorProfile.self, filename: "investor-profile-v1.json", fallback: InvestorProfile.empty())
+        self.decisionSnapshots = repository.load([DecisionSnapshot].self, filename: "decision-snapshots-v1.json", fallback: [])
         self.errorMessage = repository.integrityWarning
         // 启动时用真实持仓与真实成交刷新一次画像（内部有最小样本量门槛，样本不足不会硬推结论）。
         refreshProfile()
+        // 用真实成交流水回填决策记忆：只有真实成交才会改变状态。
+        reconcileDecisions()
         // 启动时把「只有代码、没有名字」的标的补一次：账本里的旧数据、旧自选都能认出来。
         Task { await backfillNamesIfNeeded() }
     }
@@ -368,6 +373,22 @@ struct LocalPreferences: Codable {
         notice = role == "core"
             ? "已将 \(name(for: code)) 设为长期核心仓；AI 不会再把它当机动交易仓位。"
             : "已将 \(name(for: code)) 设为行业机动仓。"
+    }
+
+    // MARK: - AI 决策记忆（建议 → 是否真实成交 → 后续结果 → 复盘 → 画像更新）
+
+    func recordDecisionSnapshot(_ snapshot: DecisionSnapshot) {
+        var updated = decisionSnapshots
+        updated.insert(snapshot, at: 0)
+        if updated.count > 400 { updated = Array(updated.prefix(400)) }
+        decisionSnapshots = updated
+    }
+
+    /// 用真实成交流水与最新行情回填决策结果。只有真实成交才会改变状态，不会用价格猜测。
+    func reconcileDecisions() {
+        var updated = decisionSnapshots
+        DecisionMemoryStore.reconcile(&updated, book: book, quotes: quotes, now: Date())
+        decisionSnapshots = updated
     }
 
     func commitRealLedger(_ updated: NextBook, action: String, reason: String) throws {

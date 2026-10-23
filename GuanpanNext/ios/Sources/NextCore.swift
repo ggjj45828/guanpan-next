@@ -1079,11 +1079,43 @@ enum NextMarketClock {
 /// Cached NAS research is portable with the encrypted local backup, but it is
 /// never a source of truth for the real ledger and never carries an API key.
 struct NextNASResearch: Codable, Equatable {
-    struct Factor: Codable, Equatable { let code: String; let asOf: String; let source: String; let close: String; let ma20: String; let ma250: String; let state: String }
+    struct Factor: Codable, Equatable {
+        let code: String; let asOf: String; let source: String; let close: String; let ma20: String; let ma250: String; let state: String
+        // NAS 长期研究扩展（可选，旧版本 NAS 不会返回这些字段）
+        var vwapDeviationPercent: String? = nil
+        var support: String? = nil
+        var resistance: String? = nil
+        var rangePosition: String? = nil
+        var amplitude20Percent: String? = nil
+        var volatilityAnnualPercent: String? = nil
+        var completeness: String? = nil
+        var freshnessDays: Int? = nil
+        var minuteSamples: Int? = nil
+    }
+    /// 新闻与持仓关联：NAS 抓真实资讯并按规则判定对当前计划的影响。
+    struct News: Codable, Equatable {
+        struct Item: Codable, Equatable { let title: String; let date: String; let media: String; let url: String }
+        struct Hit: Codable, Equatable { let word: String; let title: String }
+        struct Link: Codable, Equatable {
+            let code: String
+            let action: String
+            let reason: String
+            let newsCount: Int
+            let hits: [String: [Hit]]
+        }
+        let code: String
+        let asOf: String
+        let items: [Item]
+        let link: Link?
+        /// true = NAS 明确抓不到新闻，界面要说明「不可用」而不是显示空列表冒充没有事件。
+        let unavailable: Bool?
+        let source: String
+    }
     struct AI: Codable, Equatable { let code: String; let asOf: String; let source: String; let provider: String; let model: String; let content: String; let realOrder: Bool }
     struct ProviderStatus: Codable, Equatable { let state: String; let configured: Bool; let profile: String; let model: String?; let message: String }
     let factors: Factor?
     let ai: AI?
+    let news: News?
     let providerConfigured: Bool
     var providerStatus: ProviderStatus? = nil
 }

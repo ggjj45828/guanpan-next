@@ -187,6 +187,7 @@ def make_handler(database, market_fetcher=fetch_quotes, daily_fetcher=fetch_dail
                     code = path.rsplit("/", 1)[-1]; symbol_for(code)
                     return self.reply(200, {"factors": database.get_research("factors-" + code),
                                             "ai": database.get_research("deepseek-" + code),
+                                            "news": database.get_research("news-" + code),
                                             "providerConfigured": provider_status()["configured"],
                                             "providerStatus": provider_status()})
                 except (InvalidData, ValueError) as error: return self.reply(400, {"error": str(error)})

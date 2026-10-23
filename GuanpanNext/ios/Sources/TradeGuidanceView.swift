@@ -111,6 +111,8 @@ struct TradeGuidanceScreen: View {
             if let plan = item.tsession, item.choice == "tsession" { tsessionBlock(item: item, plan: plan) }
             if let grid = item.grid, item.choice == "grid" { gridBlock(grid: grid) }
 
+            newsBlock(code: item.code)
+
             // 画像判断
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: item.profileAllows ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -154,6 +156,36 @@ struct TradeGuidanceScreen: View {
             if let support = regime.metrics.support, let resistance = regime.metrics.resistance {
                 Text("支撑 ¥\(NextMoney.text(NextNum.decimal(support), digits: 3)) · 压力 ¥\(NextMoney.text(NextNum.decimal(resistance), digits: 3)) · 区间位置 \(NextNum.percent((regime.metrics.rangePosition ?? 0) * 100, digits: 0))")
                     .font(.caption2).foregroundStyle(p.muted)
+            }
+        }
+    }
+
+    /// 新闻 → 证券 → 我的真实持仓 → 当前 AI 计划 的关联判定。
+    @ViewBuilder
+    private func newsBlock(code: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("新闻与持仓关联").font(.caption.weight(.semibold)).foregroundStyle(p.ink)
+            if let news = model.nasResearch[code]?.news {
+                if news.unavailable == true {
+                    Text("NAS 明确报告该标的新闻不可用（\(news.source)）。不会拿过期内容冒充最新情况，也不会因为没有新闻就假定安全。")
+                        .font(.caption2).foregroundStyle(p.chartGold).fixedSize(horizontal: false, vertical: true)
+                } else if let link = news.link {
+                    Text("影响判定：\(link.action)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(link.action.hasPrefix("计划作废") ? p.risk : (link.action.hasPrefix("暂停") ? p.chartGold : p.jade))
+                    Text(link.reason).font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                    Text("共 \(link.newsCount) 条资讯 · 来源 \(news.source) · \(news.asOf)")
+                        .font(.caption2).foregroundStyle(p.muted)
+                    ForEach(Array(news.items.prefix(5)), id: \.title) { item in
+                        Text("· \(item.title)（\(item.media) \(item.date)）")
+                            .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    Text("NAS 返回了新闻但未给出影响判定。").font(.caption2).foregroundStyle(p.muted)
+                }
+            } else {
+                Text("尚未从 NAS 取到该标的的新闻。连接 NAS 后会自动拉取真实资讯，并按规则判定对当前计划的影响。")
+                    .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -243,6 +275,19 @@ struct TradeGuidanceScreen: View {
         }
     }
 
+    private func choiceTitle(of choice: String) -> String {
+        switch choice {
+        case "tsession": return "做T"
+        case "grid": return "网格"
+        case "hold": return "持有"
+        default: return "不交易"
+        }
+    }
+    private func gridInvalidation(of plan: SmartGridPlan) -> [String] {
+        ["价格突破 ¥\(NextMoney.text(plan.upper, digits: 3)) 或跌破 ¥\(NextMoney.text(plan.lower, digits: 3)) → 区间失效。",
+         "最长 \(model.profile.grid.maxDurationDays) 天后重估。"]
+    }
+
     private func toneFor(_ choice: String) -> Color {
         switch choice {
         case "tsession": return p.chartGold
@@ -310,6 +355,18 @@ struct TradeGuidanceScreen: View {
                 reason = "做T与网格都不达标：\(why)。继续持有。"
             }
 
+            // ---- 新闻覆盖：重大事件直接让原做T/网格计划失效 ----
+            if let link = model.nasResearch[code]?.news?.link {
+                if link.action.hasPrefix("计划作废") {
+                    let previous = choiceTitle(of: choice)
+                    choice = "none"
+                    reason = "新闻触发作废（\(link.reason)）。原判断为「\(previous)」，现已按重大事件作废，需重新评估后再议。"
+                } else if link.action.hasPrefix("暂停新增买入档") && choice == "grid" {
+                    choice = "hold"
+                    reason = "新闻提示风险（\(link.reason)）。网格新增买入档暂停，暂不挂新买档，等风险解除再重估。"
+                }
+            }
+
             // ---- 画像放行判断：画像只能影响推荐优先级，不得制造机会 ----
             let minNet = model.profile.tsession.minNetProfit
             var allows = true
@@ -332,6 +389,28 @@ struct TradeGuidanceScreen: View {
                     note = "网格档数与资金占用已按你的偏好上限收敛（最多 \(model.profile.grid.maxRungs) 档，占用不超过 \(NextNum.percent(model.profile.grid.maxCapitalRatio * 100, digits: 0))）。"
                 }
             }
+
+            let snapshot = DecisionMemoryStore.make(
+                code: code, name: model.name(for: code),
+                kind: choice == "tsession" ? "tsession" : (choice == "grid" ? "grid" : "hold"),
+                price: quote.price, previousClose: previousClose, quote: cached,
+                position: position, cash: model.book.cash,
+                regime: regime, research: model.nasResearch[code], profile: model.profile,
+                headline: "\(choiceTitle(of: choice))：\(reason)",
+                reasoning: reason,
+                suggestedPrice: choice == "tsession" ? tPlan.quote?.sellPrice : (choice == "grid" ? gPlan.lower : nil),
+                suggestedUnits: choice == "tsession" ? tPlan.quote?.units : (choice == "grid" ? gPlan.rungs.first?.units : nil),
+                expectedNetProfit: choice == "tsession" ? tPlan.netProfit : (choice == "grid" ? gPlan.netPerRung : nil),
+                risks: choice == "tsession" ? tPlan.risks : gPlan.breakoutPolicy,
+                validUntil: choice == "tsession" ? tPlan.validUntil : now.addingTimeInterval(86_400 * Double(model.profile.grid.maxDurationDays)),
+                invalidation: choice == "tsession" ? tPlan.invalidation : gridInvalidation(of: gPlan),
+                evidence: (choice == "tsession" ? regime.reasons + tPlan.basis : regime.reasons + gPlan.basis),
+                now: now)
+            // 同一标的同一天只保留一条最新快照，避免刷新时无限堆叠。
+            let sameDayExists = model.decisionSnapshots.contains {
+                $0.code == code && Calendar.current.isDate($0.createdAt, inSameDayAs: now)
+            }
+            if !sameDayExists { model.recordDecisionSnapshot(snapshot) }
 
             results.append(GuidanceItem(code: code, name: model.name(for: code), regime: regime,
                                         choice: choice, choiceReason: reason,

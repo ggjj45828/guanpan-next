@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
     var body: some Scene { WindowGroup { RootView().environmentObject(model) } }
 }
 
-enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, indexDetail(String), profile, guidance }
+enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, indexDetail(String), profile, guidance, memory }
 private extension GPRoute {
     var persisted: NextRoute {
         switch self {
@@ -24,6 +24,7 @@ private extension GPRoute {
         case .indexDetail(let symbol): .intent("index", symbol)
         case .profile: .intent("profile", "")
         case .guidance: .intent("guidance", "")
+        case .memory: .intent("memory", "")
         }
     }
     static func restore(_ route: NextRoute) -> GPRoute? {
@@ -37,6 +38,7 @@ private extension GPRoute {
             else if action == "index" { code.isEmpty ? nil : .indexDetail(code) }
             else if action == "profile" { .profile }
             else if action == "guidance" { .guidance }
+            else if action == "memory" { .memory }
             else { nil }
         case .settings: .settings
         case .alerts: .alerts
@@ -263,6 +265,7 @@ private struct RouteDestination: View {
         case .indexDetail(let symbol): IndexDetailScreen(symbol: symbol)
         case .profile: ProfileScreen()
         case .guidance: TradeGuidanceScreen()
+        case .memory: DecisionMemoryScreen()
         }
     }
 }
@@ -1878,6 +1881,7 @@ private struct SettingsScreen: View {
                 EditorialSection(title: "AI 与画像", trailing: "真实数据") {
                     NavigationLink(value: GPRoute.guidance) { IntentRow(icon: "arrow.triangle.branch", title: "今日交易指导", detail: "市场状态 → 做T/网格/持有 → 具体价格与份额 → 净收益与降本") }.accessibilityIdentifier("settings.guidance")
                     NavigationLink(value: GPRoute.profile) { IntentRow(icon: "person.text.rectangle", title: "AI 对我的了解", detail: "查看并纠正 AI 形成的投资画像") }.accessibilityIdentifier("settings.profile")
+                    NavigationLink(value: GPRoute.memory) { IntentRow(icon: "clock.arrow.circlepath", title: "决策记忆与复盘", detail: "每条建议当时的依据、是否真实成交与后续结果") }.accessibilityIdentifier("settings.memory")
                     Text("画像只用真实持仓、真实成交与你的反馈学习，不使用任何模拟交易。").font(.caption2).foregroundStyle(p.muted)
                 }
                 EditorialSection(title: "通知与提醒") { NavigationLink(value: GPRoute.alerts) { IntentRow(icon: "bell.badge", title: "提醒和通知中心", detail: "价格、风险、限价计划与 NAS 状态") } }

@@ -254,7 +254,77 @@ def research_factors(code, bars, minute_count=None):
             "source": "NAS archived Tencent qfqday", "type": "local-factor-research", "realOrder": False}
 
 
-def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fetch_minute, quote_fetcher=fetch_tencent_quotes):
+def fetch_news(code, name=""):
+    """东方财富资讯搜索。抓不到就抛异常 —— 没有新闻就说没有，绝不合成假新闻。"""
+    keyword = (code + " " + (name or "")).strip()
+    param = {"uid": "", "keyword": keyword, "type": ["cmsArticleWebOld"], "client": "web",
+             "clientType": "web", "clientVersion": "curr",
+             "param": {"cmsArticleWebOld": {"searchScope": "default", "sort": "time",
+                                            "pageIndex": 1, "pageSize": 12,
+                                            "preTag": "", "postTag": ""}}}
+    url = "https://search-api-web.eastmoney.com/search/jsonp?cb=jQuery&param=" + quote(json.dumps(param, ensure_ascii=False))
+    request = Request(url, headers={"Referer": "https://so.eastmoney.com/",
+                                    "User-Agent": "Mozilla/5.0 (compatible; GuanpanNext/3)"})
+    with urlopen(request, timeout=12) as response:
+        if response.status != 200:
+            raise OSError("news source unavailable")
+        body = response.read(2_000_000).decode("utf-8", "replace")
+    start, end = body.find("("), body.rfind(")")
+    if start < 0 or end <= start:
+        raise ValueError("invalid news response")
+    data = json.loads(body[start + 1:end])
+    rows = ((data.get("result") or {}).get("cmsArticleWebOld") or [])
+    result = []
+    for row in rows:
+        title = (row.get("title") or "").replace("<em>", "").replace("</em>", "").strip()
+        if not title:
+            continue
+        result.append({"title": title[:200],
+                       "date": (row.get("date") or row.get("showTime") or "")[:32],
+                       "media": (row.get("mediaName") or "")[:40],
+                       "url": (row.get("url") or "")[:400]})
+    if not result:
+        raise ValueError("no usable news rows")
+    return result
+
+
+def news_relevance(code, items):
+    """新闻 → 持仓 → 当前计划的规则化影响判定。
+
+    只用关键词规则，不做情绪臆测；命中不了就明确返回「未见重大事件」。
+    """
+    severe = ("停牌", "退市", "清盘", "基金合同终止", "终止上市", "立案", "被调查")
+    caution = ("暂停申购", "限制大额申购", "溢价提示", "风险提示", "业绩预亏", "业绩下滑", "大额赎回")
+    positive = ("分红", "派息", "收益分配", "增持", "回购", "业绩预增")
+    hits = {"severe": [], "caution": [], "positive": []}
+    for item in items:
+        title = item.get("title", "")
+        for word in severe:
+            if word in title:
+                hits["severe"].append({"word": word, "title": title})
+        for word in caution:
+            if word in title:
+                hits["caution"].append({"word": word, "title": title})
+        for word in positive:
+            if word in title:
+                hits["positive"].append({"word": word, "title": title})
+    if hits["severe"]:
+        action = "计划作废并重新评估"
+        reason = "命中重大事件关键词：" + "、".join(sorted({item["word"] for item in hits["severe"]}))
+    elif hits["caution"]:
+        action = "暂停新增买入档，提高风险等级"
+        reason = "命中风险提示关键词：" + "、".join(sorted({item["word"] for item in hits["caution"]}))
+    elif hits["positive"]:
+        action = "维持原计划，可留意分红/派息时点"
+        reason = "命中正面事件关键词：" + "、".join(sorted({item["word"] for item in hits["positive"]}))
+    else:
+        action = "未见重大事件，原计划继续有效"
+        reason = "近期资讯未命中需要调整计划的关键词。"
+    return {"code": code, "action": action, "reason": reason, "hits": hits,
+            "newsCount": len(items), "type": "news-link"}
+
+
+def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fetch_minute, quote_fetcher=fetch_tencent_quotes, news_fetcher=fetch_news):
     """Each loop owns its own timer and failure handling; sync APIs never stop them."""
     def tracked():
         with database.connect() as connection:
@@ -338,6 +408,34 @@ def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fe
             update("factor-research", "ok" if not failures else "degraded",
                    f"{researched}/{len(codes)} codes have usable 250-day research; next run in 15m{missing_note(failures)}")
             time.sleep(900)
+
+    def news_loop():
+        update("news-link", "starting", "news collector starting")
+        while True:
+            codes = tracked(); failures = []; collected = 0
+            for code in codes:
+                try:
+                    items = news_fetcher(code)
+                    link = news_relevance(code, items)
+                    database.put_research("news-" + code, {
+                        "code": code,
+                        "asOf": datetime.now(SHANGHAI).date().isoformat(),
+                        "items": items,
+                        "link": link,
+                        "source": "eastmoney news search", "type": "news-link"})
+                    collected += 1
+                except Exception as error:
+                    failures.append(f"{code}:{type(error).__name__}")
+                    # 抓不到就明确记录为不可用，绝不留下过期内容冒充最新新闻。
+                    database.put_research("news-" + code, {
+                        "code": code,
+                        "asOf": datetime.now(SHANGHAI).date().isoformat(),
+                        "items": [], "unavailable": True,
+                        "error": type(error).__name__,
+                        "source": "eastmoney news search", "type": "news-link"})
+            update("news-link", "ok" if not failures else "degraded",
+                   f"{collected}/{len(codes)} codes have news; next run in 30m{missing_note(failures)}")
+            time.sleep(1800)
 
     def g_simulation_loop():
         update("g-live-simulation", "starting", "G waits for an explicitly started virtual account and DeepSeek configuration")
@@ -448,5 +546,5 @@ def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fe
             in_session = local.weekday() < 5 and ((9, 30) <= (local.hour, local.minute) <= (15, 0))
             time.sleep(60 if in_session else 600)
 
-    for name, target in (("daily-archive", daily_loop), ("minute-archive", minute_loop), ("dividend-research", dividend_loop), ("factor-research", research_loop), ("g-live-simulation", g_simulation_loop), ("portfolio-grid", grid_loop)):
+    for name, target in (("daily-archive", daily_loop), ("minute-archive", minute_loop), ("dividend-research", dividend_loop), ("factor-research", research_loop), ("g-live-simulation", g_simulation_loop), ("portfolio-grid", grid_loop), ("news-link", news_loop)):
         threading.Thread(target=target, name=name, daemon=True).start()
