@@ -142,8 +142,8 @@ struct RootView: View {
                 .accessibilityHidden(tabSelection.wrappedValue != .mine)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { GPTabBar(selection: tabSelection) }
-        .tint(GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort, appearance: model.preferences.appearance).forest)
-        .environment(\.gp, GPPalette(scheme: effectiveScheme, comfort: model.theme == .comfort, appearance: model.preferences.appearance))
+        .tint(GPPalette(theme: model.theme, scheme: effectiveScheme, appearance: model.preferences.appearance).forest)
+        .environment(\.gp, GPPalette(theme: model.theme, scheme: effectiveScheme, appearance: model.preferences.appearance))
         .environment(\.gpAppearance, model.preferences.appearance)
         .dynamicTypeSize(model.preferences.appearance.dynamicTypeSize)
         .preferredColorScheme(model.theme.colorScheme)
@@ -179,7 +179,13 @@ struct RootView: View {
     }
     // Comfort mode is an intentionally warm light palette. Do not let a dark
     // system appearance pair its ivory canvas with the dark palette's light ink.
-    private var effectiveScheme: ColorScheme { model.theme == .system ? systemScheme : model.theme == .dark ? .dark : .light }
+    private var effectiveScheme: ColorScheme {
+        switch model.theme {
+        case .system: systemScheme
+        case .light, .comfort: .light
+        case .dark, .noir: .dark
+        }
+    }
 }
 
 private struct PrimaryNavigation<Content: View>: View {
