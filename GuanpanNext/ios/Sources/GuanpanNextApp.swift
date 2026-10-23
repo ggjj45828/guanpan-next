@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
     var body: some Scene { WindowGroup { RootView().environmentObject(model) } }
 }
 
-enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, indexDetail(String) }
+enum GPRoute: Hashable { case instrument(String), chart(String), decision(String?), dividends(String?), settings, alerts, fills, history, backups, worthOverview, indexDetail(String), profile, guidance }
 private extension GPRoute {
     var persisted: NextRoute {
         switch self {
@@ -22,6 +22,8 @@ private extension GPRoute {
         case .backups: .backups
         case .worthOverview: .intent("worth", "")
         case .indexDetail(let symbol): .intent("index", symbol)
+        case .profile: .intent("profile", "")
+        case .guidance: .intent("guidance", "")
         }
     }
     static func restore(_ route: NextRoute) -> GPRoute? {
@@ -33,6 +35,8 @@ private extension GPRoute {
             else if action == "dividends" { .dividends(code.isEmpty ? nil : code) }
             else if action == "worth" { .worthOverview }
             else if action == "index" { code.isEmpty ? nil : .indexDetail(code) }
+            else if action == "profile" { .profile }
+            else if action == "guidance" { .guidance }
             else { nil }
         case .settings: .settings
         case .alerts: .alerts
@@ -257,6 +261,8 @@ private struct RouteDestination: View {
         case .backups: BackupRestoreScreen()
         case .worthOverview: WorthBuyOverviewScreen()
         case .indexDetail(let symbol): IndexDetailScreen(symbol: symbol)
+        case .profile: ProfileScreen()
+        case .guidance: TradeGuidanceScreen()
         }
     }
 }
@@ -1868,6 +1874,11 @@ private struct SettingsScreen: View {
                             .font(.caption.weight(.semibold)).tint(p.forest)
                     }
                     Text("字号改的是系统动态字体档位，导航栏、列表、表单会一起放大；颜色是在当前主题之上做覆盖。").font(.caption).foregroundStyle(p.muted)
+                }
+                EditorialSection(title: "AI 与画像", trailing: "真实数据") {
+                    NavigationLink(value: GPRoute.guidance) { IntentRow(icon: "arrow.triangle.branch", title: "今日交易指导", detail: "市场状态 → 做T/网格/持有 → 具体价格与份额 → 净收益与降本") }.accessibilityIdentifier("settings.guidance")
+                    NavigationLink(value: GPRoute.profile) { IntentRow(icon: "person.text.rectangle", title: "AI 对我的了解", detail: "查看并纠正 AI 形成的投资画像") }.accessibilityIdentifier("settings.profile")
+                    Text("画像只用真实持仓、真实成交与你的反馈学习，不使用任何模拟交易。").font(.caption2).foregroundStyle(p.muted)
                 }
                 EditorialSection(title: "通知与提醒") { NavigationLink(value: GPRoute.alerts) { IntentRow(icon: "bell.badge", title: "提醒和通知中心", detail: "价格、风险、限价计划与 NAS 状态") } }
                 EditorialSection(title: "账本与数据") { NavigationLink(value: GPRoute.fills) { IntentRow(icon: "list.bullet.rectangle", title: "审计记录", detail: "真实资产修改、撤销和版本") }; NavigationLink(value: GPRoute.backups) { IntentRow(icon: "externaldrive", title: "备份与恢复", detail: "数据隔离、校验、确认恢复") } }

@@ -153,6 +153,8 @@ struct LocalPreferences: Codable {
     @Published var researchStatus: [String: String] = [:]
     @Published var dividendEvents: [String: [NextETFDividendEvent]] { didSet { reportSave(repository.save(dividendEvents, filename: "dividend-history-v1.json")) } }
     @Published var patientLimitPlans: [NextPatientLimitPlan] { didSet { reportSave(repository.save(patientLimitPlans, filename: "patient-limit-plans-v1.json")) } }
+    /// 动态投资者画像：只由真实持仓、真实成交与真实反馈学习，不使用任何模拟交易。
+    @Published var profile: InvestorProfile { didSet { reportSave(repository.save(profile, filename: "investor-profile-v1.json")) } }
     @Published var twinBacktests: [String: NextTwinBacktest] { didSet { reportSave(repository.save(twinBacktests, filename: "twin-backtests-v1.json")) } }
     @Published var backtestStatus = "尚无本机策略回测"
     @Published var nasGAccount: NextNASGAccount?
@@ -274,10 +276,100 @@ struct LocalPreferences: Codable {
         self.dividendEvents = repository.load([String: [NextETFDividendEvent]].self, filename: "dividend-history-v1.json", fallback: [:])
         self.patientLimitPlans = repository.load([NextPatientLimitPlan].self, filename: "patient-limit-plans-v1.json", fallback: [])
         self.twinBacktests = repository.load([String: NextTwinBacktest].self, filename: "twin-backtests-v1.json", fallback: [:])
+        self.profile = repository.load(InvestorProfile.self, filename: "investor-profile-v1.json", fallback: InvestorProfile.empty())
         self.errorMessage = repository.integrityWarning
+        // 启动时用真实持仓与真实成交刷新一次画像（内部有最小样本量门槛，样本不足不会硬推结论）。
+        refreshProfile()
         // 启动时把「只有代码、没有名字」的标的补一次：账本里的旧数据、旧自选都能认出来。
         Task { await backfillNamesIfNeeded() }
     }
+    // MARK: - 动态投资者画像（只用真实持仓 / 真实成交 / 真实反馈）
+
+    /// 用真实持仓 + 真实成交 + 真实反馈刷新画像。样本不足的维度只记为短期状态，不会硬推结论。
+    func refreshProfile() {
+        var updated = profile
+        InvestorProfileEngine.learn(profile: &updated,
+                                    book: book,
+                                    quotes: quotes.mapValues { $0.quote },
+                                    goal: goal,
+                                    plans: patientLimitPlans,
+                                    now: Date())
+        InvestorProfileEngine.updateTSessionPreference(&updated.tsession, profile: updated)
+        InvestorProfileEngine.updateGridPreference(&updated.grid, profile: updated)
+        profile = updated
+    }
+
+    /// 记录一次 AI 建议的用户反应。画像学习的真实素材之一（另一部分是成交流水）。
+    func recordObservation(kind: String, code: String, proposedNetProfit: Decimal?,
+                           proposedSpreadPercent: Double?, outcome: String,
+                           feedback: ProfileFeedback?, reallyExecuted: Bool) {
+        var updated = profile
+        updated.observations.append(ProfileObservation(at: Date(), kind: kind, code: code,
+                                                       proposedNetProfit: proposedNetProfit,
+                                                       proposedSpreadPercent: proposedSpreadPercent,
+                                                       outcome: outcome,
+                                                       feedback: feedback?.rawValue,
+                                                       reallyExecuted: reallyExecuted))
+        if updated.observations.count > 500 { updated.observations = Array(updated.observations.suffix(500)) }
+        profile = updated
+        refreshProfile()
+    }
+
+    /// 用户在建议卡上点了一键反馈（不是问卷）。
+    func recordFeedback(_ feedback: ProfileFeedback, kind: String, code: String,
+                        proposedNetProfit: Decimal? = nil, proposedSpreadPercent: Double? = nil) {
+        let isPositive = feedback == .suitsMe
+        recordObservation(kind: kind, code: code, proposedNetProfit: proposedNetProfit,
+                          proposedSpreadPercent: proposedSpreadPercent,
+                          outcome: isPositive ? "accepted" : "ignored",
+                          feedback: feedback, reallyExecuted: isPositive)
+        notice = "已记录：\(feedback.title)。\(feedback.implication)"
+    }
+
+    /// 用户手动修改画像属性 → 变为 explicit 并锁定，AI 不得再改。
+    func setProfileFact(_ key: String, value: String, locked: Bool = true) {
+        var updated = profile
+        guard var fact = updated.facts[key] else { return }
+        fact.value = value
+        fact.source = .explicit
+        fact.locked = locked
+        fact.confidence = 1.0
+        fact.updatedAt = Date()
+        fact.reason = "你在「AI 对我的了解」中手动设置；AI 不会自行修改。"
+        updated.facts[key] = fact
+        profile = updated
+    }
+
+    /// 用户标记「这个判断不准确」→ 清空该维度并重新学习。
+    func resetProfileFact(_ key: String) {
+        var updated = profile
+        guard let existing = updated.facts[key] else { return }
+        updated.facts[key] = ProfileFact(key: key, title: existing.title, value: "已重置，重新学习中",
+                                         confidence: 0, source: .learned, sampleSize: 0, updatedAt: Date(),
+                                         locked: false,
+                                         reason: "你标记该判断不准确，已清除原有结论，将按之后的真实行为重新积累。",
+                                         evidence: [])
+        let kind: String? = key == "tsession" ? "tsession" : (key == "grid" ? "grid" : nil)
+        if let kind { updated.observations.removeAll { $0.kind == kind } }
+        profile = updated
+        refreshProfile()
+        notice = "已重置「\(existing.title)」，AI 会按你之后的真实行为重新学习。"
+    }
+
+    /// 设置资产角色（长期核心仓 / 行业机动仓）。用户设置 = explicit，AI 不得改回。
+    func setAssetRole(code: String, role: String) {
+        var updated = profile
+        updated.assetRoles[code] = AssetRole(
+            code: code, role: role, source: .explicit, updatedAt: Date(),
+            note: role == "core"
+                ? "你指定为长期核心仓：允许较大波动、不轻易卖出，主要靠新增资金调整，不因短期技术信号改变长期计划。"
+                : "你指定为行业机动仓：可做T、可网格、可主动降本，可按趋势与行业变化减仓。")
+        profile = updated
+        notice = role == "core"
+            ? "已将 \(name(for: code)) 设为长期核心仓；AI 不会再把它当机动交易仓位。"
+            : "已将 \(name(for: code)) 设为行业机动仓。"
+    }
+
     func commitRealLedger(_ updated: NextBook, action: String, reason: String) throws {
         try updated.validate()
         var copy = ledger
