@@ -251,7 +251,7 @@ struct RankedOpportunity: Identifiable, Equatable {
     let candidate: OpportunityCandidate
     let score: Double
     /// 为什么排在这里（含与纯收益排序的差异解释）。
-    let explanation: String
+    var explanation: String
 }
 
 // MARK: - 学习引擎

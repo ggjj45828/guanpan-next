@@ -62,18 +62,196 @@ def attach_quote_iopv(rows, quote):
     return rows
 
 
-def research_factors(code, bars):
-    """Traceable local factor research; no model-generated claims or real trading."""
-    closes = [Decimal(row["close"]) for row in bars]
-    if len(closes) < 250: return None
-    ma20 = sum(closes[-20:]) / 20
-    ma250 = sum(closes[-250:]) / 250
-    delta = closes[-1] / closes[-21] - 1
-    drawdown = closes[-1] / max(closes[-20:]) - 1
-    return {"code": code, "asOf": bars[-1]["date"], "close": str(closes[-1]),
-        "ma20": str(ma20), "ma250": str(ma250), "momentum20": str(delta),
-        "drawdown20": str(drawdown), "state": "观察" if closes[-1] >= ma250 and delta > 0 else "谨慎",
-        "source": "NAS archived Tencent qfqday", "type": "local-factor-research", "realOrder": False}
+def _d(value):
+    return Decimal(str(value))
+
+
+def _returns(window):
+    """日收益率序列（float，仅供标准差类统计使用）。"""
+    values = [_d(row["close"]) for row in window]
+    out = []
+    for index in range(1, len(values)):
+        if values[index - 1] > 0:
+            out.append(float(values[index] / values[index - 1] - 1))
+    return out
+
+
+def _annual_volatility_percent(returns):
+    """年化波动率（%）。样本不足 5 个时返回 None，绝不给出伪精确值。"""
+    if len(returns) < 5:
+        return None
+    mean = sum(returns) / len(returns)
+    variance = sum((value - mean) ** 2 for value in returns) / len(returns)
+    return (variance ** 0.5) * (250 ** 0.5) * 100
+
+
+def _period_stats(rows, period):
+    """单周期统计：收益、年化波动、振幅均值、高低点、均量、VWAP。"""
+    if len(rows) < period:
+        return None
+    window = rows[-period:]
+    closes = [_d(row["close"]) for row in window]
+    first = closes[0]
+    change = ((closes[-1] / first - 1) * 100) if first > 0 else Decimal(0)
+    amplitudes = []
+    for row in window:
+        high, low = row.get("high"), row.get("low")
+        if high and low and _d(low) > 0:
+            amplitudes.append(float((_d(high) - _d(low)) / _d(low)) * 100)
+    highs = [_d(row["high"]) for row in window if row.get("high")]
+    lows = [_d(row["low"]) for row in window if row.get("low")]
+    volumes = [_d(row.get("volume", 0)) for row in window]
+    avg_volume = (sum(volumes) / len(volumes)) if volumes else Decimal(0)
+    # 典型价格加权成交量 = VWAP 的常用近似；无成交额字段时用它，不臆造成交额。
+    numerator = Decimal(0)
+    denominator = Decimal(0)
+    for row in window:
+        high, low, close, volume = row.get("high"), row.get("low"), row.get("close"), row.get("volume")
+        if not (high and low and close and volume):
+            continue
+        volume_value = _d(volume)
+        numerator += ((_d(high) + _d(low) + _d(close)) / 3) * volume_value
+        denominator += volume_value
+    vwap = (numerator / denominator) if denominator > 0 else None
+    return {
+        "period": period,
+        "changePercent": str(change),
+        "volatilityAnnualPercent": None if _annual_volatility_percent(_returns(window)) is None else str(Decimal(str(_annual_volatility_percent(_returns(window))))),
+        "avgAmplitudePercent": None if not amplitudes else str(Decimal(str(sum(amplitudes) / len(amplitudes)))),
+        "high": str(max(highs)) if highs else None,
+        "low": str(min(lows)) if lows else None,
+        "avgVolume": str(avg_volume),
+        "vwap": str(vwap) if vwap else None,
+        "avgTurnoverEstimate": str(avg_volume * closes[-1]) if closes else None,
+        "bars": len(window),
+    }
+
+
+def research_factors(code, bars, minute_count=None):
+    """Traceable local factor research; no model-generated claims or real trading.
+
+    指标全部来自已归档的真实日K：
+      5/20/60/120 日统计、VWAP 偏离与回归、日内振幅、区间往返、支撑压力、
+      波动率、流动性、数据完整度与新鲜度。样本不足时明确降级，绝不用合成数据填充。
+    """
+    if not bars or len(bars) < 60:
+        return None
+    rows = bars
+    closes = [_d(row["close"]) for row in rows]
+    last_close = closes[-1]
+    ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else last_close
+    ma250 = sum(closes[-250:]) / 250 if len(closes) >= 250 else (sum(closes) / len(closes))
+    delta = closes[-1] / closes[-21] - 1 if len(closes) >= 21 and closes[-21] > 0 else Decimal(0)
+    drawdown = closes[-1] / max(closes[-20:]) - 1 if len(closes) >= 20 else Decimal(0)
+
+    stats = {}
+    for period in (5, 20, 60, 120):
+        item = _period_stats(rows, period)
+        if item:
+            stats["d%d" % period] = item
+
+    # VWAP 偏离与回归：偏离超过 1.5% 后，5 个交易日内回到 ±0.5% 以内的历史比例。
+    vwap_deviation = None
+    vwap_reversion = None
+    if len(rows) >= 40:
+        series = []
+        for index in range(20, len(rows)):
+            item = _period_stats(rows[:index], 20)
+            if not item or not item.get("vwap"):
+                continue
+            vwap_value = _d(item["vwap"])
+            if vwap_value > 0:
+                series.append((index, float(_d(rows[index]["close"]) / vwap_value - 1)))
+        if series:
+            vwap_deviation = str(Decimal(str(series[-1][1] * 100)))
+            events = 0
+            reverted = 0
+            for position, deviation in series[:-5]:
+                if abs(deviation) < 0.015:
+                    continue
+                events += 1
+                for offset in range(1, 6):
+                    if position + offset < len(series) and abs(series[position + offset][1]) < 0.005:
+                        reverted += 1
+                        break
+            vwap_reversion = {"events": events, "reverted": reverted,
+                              "rate": str(Decimal(str(reverted / events))) if events else None,
+                              "window": 5, "thresholdPercent": "1.5"}
+
+    # 区间往返：以近 60 日中轴为界，统计穿越次数与累计往返幅度。
+    round_trips = None
+    if len(rows) >= 60:
+        window = rows[-60:]
+        highs = [_d(row["high"]) for row in window if row.get("high")]
+        lows = [_d(row["low"]) for row in window if row.get("low")]
+        if highs and lows and max(highs) > min(lows):
+            middle = (max(highs) + min(lows)) / 2
+            crossings = 0
+            swing = Decimal(0)
+            previous_side = None
+            previous_price = None
+            for row in window:
+                price = _d(row["close"])
+                side = "above" if price > middle else "below"
+                if previous_side and side != previous_side:
+                    crossings += 1
+                    if previous_price is not None:
+                        swing += abs(price - previous_price)
+                previous_side = side
+                previous_price = price
+            round_trips = {"middle": str(middle), "crossings": crossings,
+                           "cumulativeSwing": str(swing), "bars": len(window)}
+
+    # 支撑压力：近 60 日极值聚类（最低 5 个低点 / 最高 5 个高点），不用整数关口。
+    support = resistance = range_position = None
+    if len(rows) >= 60:
+        window = rows[-60:]
+        highs = sorted((_d(row["high"]) for row in window if row.get("high")), reverse=True)
+        lows = sorted((_d(row["low"]) for row in window if row.get("low")))
+        if highs and lows:
+            support = sum(lows[:5], Decimal(0)) / len(lows[:5])
+            resistance = sum(highs[:5], Decimal(0)) / len(highs[:5])
+            if resistance > support:
+                range_position = str((last_close - support) / (resistance - support))
+
+    # 数据完整度与新鲜度
+    try:
+        first_day = datetime.strptime(rows[0]["date"], "%Y-%m-%d").date()
+        last_day = datetime.strptime(rows[-1]["date"], "%Y-%m-%d").date()
+        span = max(1, (last_day - first_day).days)
+        expected = span * 250.0 / 365.0
+        completeness = str(Decimal(str(min(1.0, len(rows) / expected)))) if expected > 0 else "0"
+        freshness_days = (datetime.now(SHANGHAI).date() - last_day).days
+    except (ValueError, KeyError, TypeError):
+        completeness, freshness_days = None, None
+
+    volatility = _annual_volatility_percent(_returns(rows))
+    amplitude = None
+    amplitudes = []
+    for row in rows[-20:]:
+        high, low = row.get("high"), row.get("low")
+        if high and low and _d(low) > 0:
+            amplitudes.append(float((_d(high) - _d(low)) / _d(low)) * 100)
+    if amplitudes:
+        amplitude = str(Decimal(str(sum(amplitudes) / len(amplitudes))))
+
+    return {"code": code, "asOf": rows[-1]["date"], "close": str(last_close),
+            "ma20": str(ma20), "ma250": str(ma250), "momentum20": str(delta),
+            "drawdown20": str(drawdown),
+            "state": "观察" if last_close >= ma250 and delta > 0 else "谨慎",
+            "stats": stats,
+            "vwapDeviationPercent": vwap_deviation,
+            "vwapReversion": vwap_reversion,
+            "amplitude20Percent": amplitude,
+            "roundTrips": round_trips,
+            "support": str(support) if support else None,
+            "resistance": str(resistance) if resistance else None,
+            "rangePosition": range_position,
+            "volatilityAnnualPercent": None if volatility is None else str(Decimal(str(volatility))),
+            "minuteSamples": minute_count,
+            "completeness": completeness,
+            "freshnessDays": freshness_days,
+            "source": "NAS archived Tencent qfqday", "type": "local-factor-research", "realOrder": False}
 
 
 def start_workers(database, daily_fetcher=fetch_tencent_daily, minute_fetcher=fetch_minute, quote_fetcher=fetch_tencent_quotes):

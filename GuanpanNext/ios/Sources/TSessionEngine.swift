@@ -2,7 +2,7 @@ import Foundation
 
 /// 一次做T（日内回转）候选方案。
 /// 全部数字由真实持仓 + 真实日K + 真实手续费算出；不允许任何硬编码示例价。
-struct TSessionQuote {
+struct TSessionQuote: Equatable {
     /// 卖出参考价（反T先卖 / 正T后卖）。
     let sellPrice: Decimal
     /// 买回参考价。
