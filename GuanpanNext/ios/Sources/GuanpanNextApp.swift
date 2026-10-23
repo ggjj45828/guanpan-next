@@ -672,7 +672,7 @@ private struct DecisionScreen: View {
                 Text("分析会结合本机账本、有效行情、预算和风险限制。没有来源的数据会明确标为缺口。").font(.subheadline).foregroundStyle(p.muted).padding(.top, 5)
                 EditorialSection(title: "你的目标与资金") {
                     HStack(spacing: 10) { compactField("期限（年）", text: $years); compactField("每月新增预算", text: $budget); compactField("集中度线 %", text: $limit) }
-                    Text("目标仓位（可留空；填写后持仓目标与现金目标合计须为 100%）").font(.caption2).foregroundStyle(p.muted)
+                    Text("目标仓位（可留空；只填现金时现金目标独立生效，填了任一持仓目标后合计须为 100%）").font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                     ForEach(Array(Set(model.preferences.watch + model.book.positions.map(\.code))).sorted(), id: \.self) { targetCode in
                         HStack(spacing: 8) {
                             Text("\(knownName(targetCode)) · \(targetCode)").font(.caption).lineLimit(1)
@@ -697,7 +697,11 @@ private struct DecisionScreen: View {
                         } catch { model.errorMessage = error.localizedDescription }
                     }.font(.caption.weight(.semibold)).tint(p.forest)
                     if !targetCashText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text("已设现金目标 \(targetCashText)%；持仓目标与现金目标合计须为 100%。").font(.caption2).foregroundStyle(p.muted)
+                        let hasStockTarget = targetWeightsText.values.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                        Text(hasStockTarget
+                             ? "已设现金目标 \(targetCashText)%；已填持仓目标，两者合计须为 100%。"
+                             : "已设现金目标 \(targetCashText)%；未填持仓目标时它作为现金保留下限独立生效，不要求凑满 100%。")
+                            .font(.caption2).foregroundStyle(p.muted).fixedSize(horizontal: false, vertical: true)
                     }
                     GPDataRow(title: "资金边界", value: "不动用真实现金", note: "计划和真实账本分开")
                 }

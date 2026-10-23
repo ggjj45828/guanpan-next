@@ -554,13 +554,20 @@ struct NextGoal: Codable, Equatable {
     func validate() throws {
         let totalWeight = targetWeights.values.reduce(Decimal.zero, +)
         let cashTarget = targetCashWeight ?? 0
-        let hasTarget = !targetWeights.isEmpty || targetCashWeight != nil
+        // 持仓目标为空时，现金目标独立生效——它只是「现金保留下限」，不要求凑满 100%，
+        // 否则「我就想留 20% 现金」这种单一诉求会因为 0 + 20 ≠ 100 而存不下来。
+        // 一旦填了任一持仓目标，就视为在做完整配置：持仓目标 + 现金目标必须 == 100%。
+        let needsFullAllocation = !targetWeights.isEmpty
         guard years > 0, years <= 50, !monthlyBudget.isNaN, monthlyBudget >= 0,
               concentrationLimit > 0, concentrationLimit <= 100,
               targetWeights.keys.allSatisfy({ $0.count == 6 && $0.allSatisfy(\.isNumber) }),
               targetWeights.values.allSatisfy({ !$0.isNaN && $0 >= 0 && $0 <= 100 }),
               targetCashWeight.map({ !$0.isNaN && $0 >= 0 && $0 <= 100 }) ?? true,
-              !hasTarget || abs(totalWeight + cashTarget - 100) <= Decimal(string: "0.01")! else { throw NextError.invalid("目标、预算或目标仓位比例无效（持仓目标 + 现金目标合计须为 100%）") }
+              !needsFullAllocation || abs(totalWeight + cashTarget - 100) <= Decimal(string: "0.01")! else {
+            throw NextError.invalid(needsFullAllocation
+                                    ? "目标、预算或目标仓位比例无效（持仓目标 + 现金目标合计须为 100%）"
+                                    : "目标、预算或现金保留比例无效（现金目标须在 0–100%）")
+        }
     }
 }
 struct NextEvidence: Codable, Identifiable, Equatable {
